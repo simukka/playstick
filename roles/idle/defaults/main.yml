@@ -1,0 +1,47 @@
+---
+# The idle screen: what the projector shows when nobody is mirroring.
+#
+# It draws pixels into /dev/fb0 rather than text into /dev/tty1. That is not a
+# style choice -- the console version was built first and froze on screen,
+# because uxplay-kms holds DRM master from startup and the fbdev helper refuses
+# console updates while another master exists. See the header comment in
+# files/uxplay-idle-clock.py and the README section "Idle screen".
+
+idle_enabled: true
+
+idle_fb: /dev/fb0
+
+# Only used to clear leftover console text and hide the cursor; nothing is
+# drawn through it. tty1 is free because claim_tty1 masks getty@tty1.
+idle_tty: /dev/tty1
+
+# Glyphs are parsed from these PSF files directly, so the kernel's own font
+# validation does not apply -- the 32x16 face that fbcon rejects with
+# "Unable to load such font with such kernel version" renders fine here.
+# First readable file wins; the rest are fallbacks if console-setup is slimmed.
+idle_fonts:
+  - /usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz
+  - /usr/share/consolefonts/Lat15-Terminus32x16.psf.gz
+  - /usr/share/consolefonts/Lat15-VGA32x16.psf.gz
+  - /usr/share/consolefonts/Lat15-Fixed16.psf.gz
+
+# 0 = fit the clock to the framebuffer (90% of width, 55% of height, whichever
+# binds first). On 1280x720 with the 16x32 face that lands on scale 12, i.e.
+# 192x384 px digits. Set a number to pin it.
+idle_clock_scale: 0
+
+# strftime format. 24-hour, no seconds: a projector clock that ticks every
+# second is a distraction, and it would redraw 60x more often for nothing.
+idle_time_format: "%H:%M"
+
+# Black the screen after this many idle minutes, to save projector lamp hours.
+# 0 disables blanking. The countdown restarts when a mirroring session ends.
+idle_blank_minutes: 30
+
+# How often to re-check the time and the session state. The screen is only
+# redrawn when HH:MM actually changes.
+idle_poll_seconds: 5
+
+# Second line, under the clock. Empty derives it from uxplay_advert_name plus
+# the hostname UxPlay appends -- i.e. exactly what iOS will list.
+idle_subtitle: ""

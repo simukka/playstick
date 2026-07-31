@@ -10,6 +10,11 @@
   vars:
     run_facts: true
     run_matrix: false      # opt-in: the matrix takes ~20 minutes and owns the display
+    # Narrow the sweep, e.g. -e probe_decoders=vaapih264dec
+    #                       -e probe_sinks=fakesink,kms-primary,kms-novsync
+    probe_decoders: ""
+    probe_sinks: ""
+    probe_vt: "1"          # VT the pipelines run on; 0 to disable
 
   tasks:
     - name: Run the facts probe
@@ -37,6 +42,9 @@
         PROBE_RESULTS_DIR: "{{ probe_results_dir }}"
         PROBE_CLIP_DIR: "{{ probe_clip_dir }}"
         LIBVA_DRIVER_NAME: "{{ libva_driver }}"
+        DECODERS: "{{ probe_decoders }}"
+        SINKS: "{{ probe_sinks }}"
+        PROBE_VT: "{{ probe_vt }}"
       register: probe_matrix
       changed_when: false
       timeout: 3600

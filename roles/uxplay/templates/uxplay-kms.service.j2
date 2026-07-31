@@ -2,10 +2,15 @@
 # Path A: UxPlay renders straight to a DRM plane on the integrated Gen8 LP
 # graphics. No X, no Wayland, no compositor of any kind.
 #
-# DRM master: the first process to open /dev/dri/card0 becomes master, and
-# nothing else holds it -- i915's fbdev console emulation lives in the kernel
-# and is not a DRM client. The only real contender is a getty painting tty1,
-# which is why this unit conflicts with getty@tty1.
+# DRM master: the first process to open the card becomes master, and nothing
+# else holds it -- i915's fbdev console emulation lives in the kernel and is
+# not a DRM client. The only real contender is a getty painting tty1, which is
+# why this unit conflicts with getty@tty1.
+#
+# uxplay-idle.service is NOT a conflict, deliberately. It draws the idle clock
+# on the framebuffer console and takes no DRM master; the kernel suspends
+# fbcon while this unit owns the card and restores it afterwards. The two run
+# side by side.
 
 [Unit]
 Description=UxPlay AirPlay receiver (direct KMS, no compositor)
@@ -14,7 +19,7 @@ After=network-online.target avahi-daemon.service
 Wants=network-online.target
 Requires=avahi-daemon.service
 Conflicts=uxplay-cage.service getty@tty1.service
-ConditionPathExists=/dev/dri/card0
+ConditionPathExists={{ drm_card_path | default('/dev/dri/by-path/pci-' ~ drm_pci_slot ~ '-card', true) }}
 
 [Service]
 Type=simple
@@ -26,21 +31,36 @@ Environment=XDG_RUNTIME_DIR=/run/uxplay
 Environment=LIBVA_DRIVER_NAME={{ libva_driver }}
 Environment=GST_VA_ALL_DRIVERS=1
 
-# Owning a VT is what makes this the active console, and TTYVTDisallocate
-# clears the login text before the first frame lands.
-TTYPath=/dev/tty1
-StandardInput=tty-force
+# No TTYPath/TTYVTDisallocate here. kmssink needs the DRM device, not a VT --
+# those settings existed only to keep a getty off tty1, which claim_tty1
+# already handles by masking it. Left in place, TTYVTDisallocate would wipe
+# the idle clock's console every time this unit starts.
 StandardOutput=journal
 StandardError=journal
-TTYVTDisallocate=yes
 
+{# -nofreeze matters for the idle clock: without it UxPlay "leaves a frozen
+   screen in place after reset" (uxplay -h), i.e. keeps holding the display
+   after the -reset timeout, and fbcon stays suspended. #}
+{# NO -fs on this path. With kmssink, UxPlay's -fs sets force-modesetting=true,
+   and this driver cannot do it -- verified twice, by two routes:
+
+     matrix-20260731-153753, sink "kms-modeset": 0 of 24 runs started
+     uxplay -fs -vs kmssink and uxplay -vs "kmssink force-modesetting=true"
+       both fail with the identical pair of errors:
+         gst_kms_sink_start: Could not get allowed GstCaps of device
+         gst_kms_sink_start: driver does not provide mode settings configuration
+
+   UxPlay's own help hints at it: "kmssink with fullscreen option -fs may work
+   on some systems, but fail on others". It is not needed here anyway --
+   kmssink scales to the display on its own. #}
 {% set argv = [
      '-n "' ~ uxplay_advert_name ~ '"',
      '-a' if uxplay_suppress_audio else '',
      '-p ' ~ uxplay_port,
-     '-fs',
+     ('-s ' ~ uxplay_request_size | trim) if uxplay_request_size | trim | length > 0 else '',
      '-vd ' ~ uxplay_decoder,
-     '-vs "kmssink force-modesetting=true"',
+     '-vs "kmssink"',
+     '-nofreeze' if uxplay_nofreeze else '',
      uxplay_extra_args,
    ] | select | list %}
 ExecStart=/usr/bin/uxplay \

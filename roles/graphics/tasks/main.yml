@@ -1,19 +1,27 @@
 ---
 # Cherry Trail = Gen8 LP. intel-media-driver (iHD) does not cover it, so the
 # i965 driver is the only VA-API path that exists for this SoC.
-- name: Install the VA-API stack and GStreamer plugins
+# Exactly one of the two i965 packages -- see i965_nonfree_shaders in
+# group_vars. Installing both is impossible; they Conflict.
+- name: Install the i965 VA-API driver
+  ansible.builtin.apt:
+    name: "{{ 'i965-va-driver-shaders' if i965_nonfree_shaders else 'i965-va-driver' }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install the VA-API tooling and GStreamer plugins
   ansible.builtin.apt:
     name:
-      - i965-va-driver
-      - i965-va-driver-shaders   # multiverse; full shader set
       - vainfo
       - libdrm-tests             # modetest, for connector/plane discovery
       - gstreamer1.0-tools
       - gstreamer1.0-plugins-base
       - gstreamer1.0-plugins-good
       - gstreamer1.0-plugins-bad  # provides the 'va' plugin: vah264dec
-      - gstreamer1.0-plugins-ugly
       - gstreamer1.0-libav        # provides avdec_h264, the software baseline
+      # plugins-ugly deliberately omitted: nothing in the decode path needs it,
+      # and it drags in libx264/libdvdread on a 32 GB eMMC.
       - gstreamer1.0-vaapi        # legacy vaapih264dec, kept as a fallback
     state: present
     update_cache: true
@@ -32,23 +40,58 @@
     mode: "0644"
     create: true
 
-- name: Confirm the DRM device is present
-  ansible.builtin.stat:
-    path: /dev/dri/card0
-  register: gfx_card
+# Find the node i915 actually bound to, rather than assuming card0. The
+# stable PCI by-path link is preferred; the numbered node is only a fallback
+# for reporting.
+- name: Locate the i915 DRM node
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -o pipefail
+      stable="/dev/dri/by-path/pci-{{ drm_pci_slot }}-card"
+      if [ -e "$stable" ]; then
+        echo "$stable"
+        exit 0
+      fi
+      # Fall back to whichever card reports i915 as its driver.
+      for c in /dev/dri/card*; do
+        [ -e "$c" ] || continue
+        n=$(basename "$c")
+        d=$(basename "$(readlink -f "/sys/class/drm/$n/device/driver" 2>/dev/null)" 2>/dev/null)
+        if [ "$d" = "i915" ]; then
+          echo "$c"
+          exit 0
+        fi
+      done
+      exit 1
+  register: graphics_drm_probe
+  changed_when: false
+  failed_when: false
+  when: not drm_card_path
 
-- name: Require a DRM device
+# No graphics_ prefix on purpose: drm_card_path is declared in group_vars and
+# consumed by the uxplay role's unit templates, so it is play-scoped rather
+# than role-private. Prefixing it would misrepresent where it belongs.
+- name: Record the DRM node  # noqa: var-naming[no-role-prefix]
+  ansible.builtin.set_fact:
+    drm_card_path: >-
+      {{ drm_card_path if drm_card_path
+         else (graphics_drm_probe.stdout | default('') | trim) }}
+
+- name: Require a DRM device bound to i915
   ansible.builtin.assert:
-    that: gfx_card.stat.exists
+    that: drm_card_path | length > 0
     fail_msg: >-
-      /dev/dri/card0 is missing. i915 did not bind. Check
-      `dmesg | grep -i i915` before going further.
+      No DRM node bound to i915 was found. Check `dmesg | grep -i i915`
+      before going further. Note that card0 may be simpledrm rather than
+      the real GPU.
+    success_msg: "i915 DRM node: {{ drm_card_path }}"
 
 - name: Query VA-API capabilities
   ansible.builtin.command: vainfo --display drm --device /dev/dri/renderD128
   environment:
     LIBVA_DRIVER_NAME: "{{ libva_driver }}"
-  register: gfx_vainfo
+  register: graphics_vainfo
   changed_when: false
   failed_when: false
 
@@ -59,28 +102,86 @@
 - name: Require hardware H.264 decode
   ansible.builtin.assert:
     that:
-      - gfx_vainfo.rc == 0
-      - gfx_vainfo.stdout is search('VAProfileH264High\s*:\s*VAEntrypointVLD')
+      - graphics_vainfo.rc == 0
+      - graphics_vainfo.stdout is search('VAProfileH264High\s*:\s*VAEntrypointVLD')
     fail_msg: |-
       No VA-API H.264 decode entrypoint found. Software decode is not viable
       on this SoC, so this is fatal rather than degraded.
-      vainfo rc={{ gfx_vainfo.rc }}
-      {{ gfx_vainfo.stdout | default('') }}
-      {{ gfx_vainfo.stderr | default('') }}
+      vainfo rc={{ graphics_vainfo.rc }}
+      {{ graphics_vainfo.stdout | default('') }}
+      {{ graphics_vainfo.stderr | default('') }}
     success_msg: "VA-API hardware H.264 decode (VAEntrypointVLD) confirmed."
+
+# --- display mode -------------------------------------------------------
+# See the comment in group_vars: scanout bandwidth is the reason, not EDID
+# trouble.
+#
+# Three tasks rather than one, because "append if absent" is not convergent.
+# The add task's negative lookahead means that once ANY video=<connector>:...
+# token exists it never matches again -- so editing drm_force_mode on an
+# already-provisioned box would silently do nothing, and the device would
+# keep running the old mode while the play reported success. Each task below
+# is a no-op in the states the others handle, so together they converge and
+# stay idempotent.
+- name: Update an existing forced HDMI mode on the kernel cmdline
+  ansible.builtin.replace:
+    path: /etc/default/grub
+    regexp: 'video={{ drm_force_connector }}:[^ "]*'
+    replace: 'video={{ drm_force_connector }}:{{ drm_force_mode }}'
+  when: drm_force_mode | length > 0
+  register: graphics_cmdline_update
+  notify: Update grub
+
+- name: Add the forced HDMI mode to the kernel cmdline
+  ansible.builtin.replace:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX_DEFAULT="(?!.*video={{ drm_force_connector }})(.*)"$'
+    replace: 'GRUB_CMDLINE_LINUX_DEFAULT="\1 video={{ drm_force_connector }}:{{ drm_force_mode }}"'
+  when: drm_force_mode | length > 0
+  register: graphics_cmdline_add
+  notify: Update grub
+
+# drm_force_mode: "" is documented as "use whatever the EDID prefers", which
+# has to actually remove the token -- otherwise clearing the variable leaves
+# the last forced mode on the cmdline forever.
+- name: Drop the forced HDMI mode when drm_force_mode is empty
+  ansible.builtin.replace:
+    path: /etc/default/grub
+    regexp: ' *video={{ drm_force_connector }}:[^ "]*'
+    replace: ''
+  when: drm_force_mode | length == 0
+  register: graphics_cmdline_clear
+  notify: Update grub
+
+# Not a handler: this is a message to whoever is watching the run, and it
+# needs to appear at the point of change, not buried at the end of the play.
+- name: Warn that the new cmdline needs a reboot  # noqa: no-handler
+  ansible.builtin.debug:
+    msg: >-
+      Kernel cmdline now
+      {{ ('forces ' ~ drm_force_connector ~ ':' ~ drm_force_mode)
+         if drm_force_mode | length > 0
+         else (drm_force_connector ~ ' left at its EDID-preferred mode') }}.
+      REBOOT REQUIRED before this takes effect.
+  when: >-
+    graphics_cmdline_update is changed
+    or graphics_cmdline_add is changed
+    or graphics_cmdline_clear is changed
 
 - name: Report which GStreamer decoders actually registered
   ansible.builtin.shell:
+    executable: /bin/bash
     cmd: >-
+      set -o pipefail;
       gst-inspect-1.0 2>/dev/null
       | grep -E 'vah264dec|vaapih264dec|avdec_h264|kmssink|waylandsink'
       || true
   environment:
     LIBVA_DRIVER_NAME: "{{ libva_driver }}"
     GST_VA_ALL_DRIVERS: "1"
-  register: gfx_elements
+  register: graphics_elements
   changed_when: false
 
 - name: Show available decoders and sinks
   ansible.builtin.debug:
-    msg: "{{ gfx_elements.stdout_lines }}"
+    msg: "{{ graphics_elements.stdout_lines }}"

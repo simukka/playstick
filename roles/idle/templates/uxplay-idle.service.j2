@@ -1,0 +1,69 @@
+{{ ansible_managed | comment }}
+# What the projector shows when nobody is mirroring.
+#
+# This unit and uxplay-kms.service run at the same time and deliberately do
+# NOT conflict, but not for the reason the first version of this file claimed.
+# uxplay-kms takes DRM master at startup and never gives it back, so console
+# output cannot reach the screen at all while it runs. The clock therefore
+# writes pixels straight into the framebuffer, which is not subject to that
+# check. While a client mirrors, the CRTC scans out UxPlay's buffer and these
+# writes are invisible; when the session ends the CRTC returns to the fbdev
+# buffer and the clock is there, current.
+#
+# Unlike the two UxPlay units, this one is enabled by default: it is not a
+# probe result, it is the resting appearance of the device.
+
+[Unit]
+Description=UxPlay idle screen (clock on the framebuffer)
+After=systemd-user-sessions.service
+Conflicts=getty@{{ idle_tty | basename }}.service
+ConditionPathExists={{ idle_fb }}
+
+[Service]
+Type=simple
+TTYPath={{ idle_tty }}
+StandardOutput=journal
+StandardError=journal
+TTYReset=yes
+Environment=TERM=linux
+
+# No setfont here: glyphs are parsed from the PSF file by the clock itself, so
+# fbcon's blit-capability validation is out of the picture entirely.
+#
+# chvt makes tty1 the visible console. setterm --blank 0 is not optional: the
+# Linux console blanks itself after 10 minutes by default, which would black
+# the framebuffer out from under the clock. --powersave off keeps the HDMI
+# signal alive -- DPMS off makes a projector report "no signal" and re-sync on
+# wake. Both need the tty on stdin as well as stdout, because --powersave is
+# ioctl(STDIN_FILENO, TIOCLINUX, ...) and fails with ENOTTY against
+# systemd's default stdin of /dev/null.
+ExecStartPre=-/usr/bin/chvt {{ idle_tty | basename | regex_replace('^tty', '') }}
+ExecStartPre=-/bin/sh -c '/usr/bin/setterm --blank 0 --powersave off --cursor off <{{ idle_tty }} >{{ idle_tty }}'
+
+Environment=IDLE_FB={{ idle_fb }}
+Environment=IDLE_TTY={{ idle_tty }}
+Environment="IDLE_FONTS={{ idle_fonts | join(' ') }}"
+{% if idle_subtitle | length > 0 %}
+Environment="IDLE_SUBTITLE={{ idle_subtitle }}"
+{% else %}
+{#- UxPlay appends @hostname to the advertised name unless -nh is passed, and
+    the idle screen should say exactly what the AirPlay list will show. #}
+Environment="IDLE_SUBTITLE={{ uxplay_advert_name }}{{ '' if '-nh' in uxplay_extra_args.split() else '@' ~ ansible_hostname }}"
+{% endif %}
+{#- systemd expands '%' as a specifier in unit files -- an unescaped "%H:%M"
+    becomes the *hostname* followed by an undefined "%M". Doubling escapes it. #}
+Environment="IDLE_TIME_FORMAT={{ idle_time_format | replace('%', '%%') }}"
+Environment=IDLE_BLANK_MINUTES={{ idle_blank_minutes }}
+Environment=IDLE_POLL_SECONDS={{ idle_poll_seconds }}
+Environment=IDLE_CLOCK_SCALE={{ idle_clock_scale }}
+{# Drives only the blank countdown. Deliberately not "is the DRM node open":
+   uxplay-kms holds that for its whole lifetime and so can never distinguish
+   idle from mirroring. An established TCP connection to UxPlay's port can. #}
+Environment=IDLE_PORT={{ uxplay_port }}
+
+ExecStart=/usr/local/bin/uxplay-idle-clock.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

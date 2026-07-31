@@ -19,6 +19,12 @@
 
   roles:
     - base
+    # Trim before installing: autoremove then has nothing of ours to catch,
+    # and the freed disk is available to the package installs that follow.
+    - trim
     - graphics
     - uxplay
+    # After uxplay: the idle screen's subtitle is derived from the advertised
+    # AirPlay name, and its assert checks the flags uxplay was configured with.
+    - idle
     - probe

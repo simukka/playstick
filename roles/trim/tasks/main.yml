@@ -1,0 +1,205 @@
+---
+- name: Trim is enabled
+  when: trim_enabled | bool
+  block:
+
+    # Cheap insurance against someone adding lvm2 or openssh-server to the
+    # purge list during a late-night edit. Root lives on LVM here.
+    - name: Refuse to purge anything protected
+      ansible.builtin.assert:
+        that: trim_purge_packages | intersect(trim_protected_packages) | length == 0
+        fail_msg: >-
+          Refusing to run: {{ trim_purge_packages | intersect(trim_protected_packages) | join(', ') }}
+          appears in both trim_purge_packages and trim_protected_packages.
+        success_msg: "Purge list contains nothing protected."
+
+    - name: Measure before
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -o pipefail
+          printf 'mem_used_mb=%s\n' "$(free -m | awk '/^Mem:/{print $3}')"
+          printf 'root_used_mb=%s\n' "$(df -m --output=used / | tail -1 | tr -d ' ')"
+          printf 'services=%s\n' "$(systemctl list-units --type=service --state=running --no-legend --no-pager | wc -l)"
+      register: trim_before
+      changed_when: false
+
+    # --- packages -------------------------------------------------------
+    - name: Find which purge candidates are actually installed
+      ansible.builtin.package_facts:
+
+    - name: Purge unneeded packages
+      ansible.builtin.apt:
+        name: "{{ trim_purge_packages | select('in', ansible_facts.packages) | list }}"
+        state: absent
+        purge: true
+        autoremove: true
+      when: (trim_purge_packages | select('in', ansible_facts.packages) | list) | length > 0
+      register: trim_purged
+
+    # snapd leaves its trees behind even after a purge.
+    - name: Remove snapd leftovers
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/cache/snapd
+        - /var/lib/snapd
+        - /snap
+        - /root/snap
+      when: "'snapd' in trim_purge_packages"
+
+    # --- modules --------------------------------------------------------
+    - name: Blacklist modules that only produce boot errors
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/99-uxplay-blacklist.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible (uxplay-atom)
+          {% for m in trim_blacklist_modules %}
+          blacklist {{ m }}
+          install {{ m }} /bin/true
+          {% endfor %}
+      when: trim_blacklist_modules | length > 0
+      notify: Update initramfs
+
+    # Purging kdump-tools also removes /etc/default/grub.d/kdump-tools.cfg,
+    # which is where the crashkernel= cmdline comes from. On this box the
+    # reservation is zero bytes ("00000000-00000000 : Crash kernel" in
+    # /proc/iomem) because total RAM is below the 2G threshold in its own
+    # range list -- so the service was running for a crash kernel that could
+    # never exist. Removing the package is what actually drops the cmdline;
+    # editing /etc/default/grub would not.
+    - name: Regenerate grub after the kdump snippet is gone
+      ansible.builtin.command: update-grub
+      when: trim_purged is defined and trim_purged is changed
+      changed_when: true
+
+    # --- boot target ----------------------------------------------------
+    # The installer left this at graphical.target. There is no display
+    # manager, so nothing visibly breaks, but the target pulls in
+    # display-manager.service if one is ever installed -- which would take
+    # DRM master and lock kmssink out of the display entirely.
+    - name: Boot to multi-user, not graphical
+      ansible.builtin.file:
+        src: /lib/systemd/system/multi-user.target
+        dest: /etc/systemd/system/default.target
+        state: link
+        force: true
+      when: trim_set_multi_user_target | bool
+
+    # --- timers ---------------------------------------------------------
+    - name: Stop and mask periodic timers
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+        masked: true
+      loop: "{{ trim_disable_timers }}"
+      failed_when: false   # not every timer exists on every install
+
+    # --- unattended upgrades --------------------------------------------
+    - name: Stop unattended-upgrades running on its own
+      ansible.builtin.systemd:
+        name: unattended-upgrades.service
+        state: stopped
+        enabled: false
+      failed_when: false
+      when: trim_disable_unattended_upgrades | bool
+
+    - name: Turn off periodic apt activity
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/99-uxplay-no-periodic
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          // Managed by Ansible (uxplay-atom)
+          // Patching is manual on this box: an unattended apt run on a
+          // 1.44 GHz Atom would visibly disrupt a live mirroring session.
+          APT::Periodic::Enable "0";
+          APT::Periodic::Update-Package-Lists "0";
+          APT::Periodic::Unattended-Upgrade "0";
+          APT::Periodic::Download-Upgradeable-Packages "0";
+          APT::Periodic::AutocleanInterval "0";
+      when: trim_disable_unattended_upgrades | bool
+
+    # --- cloud-init -----------------------------------------------------
+    # Disabled, never purged: purging can take /etc/netplan/50-cloud-init.yaml
+    # with it, and that file is how this headless box gets on the network.
+    - name: Disable cloud-init
+      ansible.builtin.file:
+        path: /etc/cloud/cloud-init.disabled
+        state: touch
+        owner: root
+        group: root
+        mode: "0644"
+      when:
+        - trim_disable_cloud_init | bool
+        - "'cloud-init' in ansible_facts.packages"
+
+    # --- logging --------------------------------------------------------
+    - name: Ensure the journald drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/journald.conf.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Cap the journal
+      ansible.builtin.copy:
+        dest: /etc/systemd/journald.conf.d/99-uxplay.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible (uxplay-atom)
+          # journald is the only log sink now that rsyslog is gone. Keep logs
+          # persistent for debugging, but bounded so they cannot eat the eMMC.
+          [Journal]
+          SystemMaxUse={{ trim_journal_max_use }}
+          SystemMaxFileSize=16M
+          Compress=yes
+      notify: Restart journald
+
+    - name: Drop logs rsyslog left behind
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -o pipefail
+          rm -f /var/log/syslog* /var/log/kern.log* /var/log/auth.log* \
+                /var/log/debug* /var/log/messages* /var/log/daemon.log* 2>/dev/null
+          journalctl --vacuum-size={{ trim_journal_max_use }} 2>&1 | tail -1
+      register: trim_logs
+      changed_when: true
+      when: "'rsyslog' in trim_purge_packages"
+
+    # --- apt cache ------------------------------------------------------
+    # /var/cache/apt was 103 MB on this box.
+    - name: Clean the apt cache
+      ansible.builtin.apt:
+        autoclean: true
+        clean: true
+      when: trim_clean_apt_cache | bool
+
+    # --- report ---------------------------------------------------------
+    - name: Measure after
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -o pipefail
+          printf 'mem_used_mb=%s\n' "$(free -m | awk '/^Mem:/{print $3}')"
+          printf 'root_used_mb=%s\n' "$(df -m --output=used / | tail -1 | tr -d ' ')"
+          printf 'services=%s\n' "$(systemctl list-units --type=service --state=running --no-legend --no-pager | wc -l)"
+      register: trim_after
+      changed_when: false
+
+    - name: Report what the trim recovered
+      ansible.builtin.debug:
+        msg:
+          - "before: {{ trim_before.stdout_lines | join('  ') }}"
+          - "after:  {{ trim_after.stdout_lines | join('  ') }}"
+          - "purged: {{ (trim_purge_packages | select('in', ansible_facts.packages) | list) | join(', ') | default('nothing', true) }}"

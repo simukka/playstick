@@ -4,6 +4,6 @@
 all:
   hosts:
     vivostick:
-      ansible_host: CHANGEME       # IP or hostname of the TS10
-      ansible_user: CHANGEME       # login user with sudo
+      ansible_host: 10.0.1.228       # IP or hostname of the TS10
+      ansible_user: simukka       # login user with sudo
       ansible_python_interpreter: /usr/bin/python3

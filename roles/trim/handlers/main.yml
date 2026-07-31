@@ -1,0 +1,9 @@
+---
+- name: Restart journald
+  ansible.builtin.systemd:
+    name: systemd-journald
+    state: restarted
+
+- name: Update initramfs
+  ansible.builtin.command: update-initramfs -u
+  changed_when: true

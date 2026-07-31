@@ -1,0 +1,66 @@
+---
+- name: Idle screen is enabled
+  when: idle_enabled | bool
+  block:
+
+    # -nc keeps UxPlay's video window open after the client stops mirroring,
+    # so the CRTC goes on scanning out UxPlay's buffer and the framebuffer the
+    # clock draws into is never displayed again. "-nc no" cancels it and is
+    # therefore allowed. (uxplay_nofreeze is the same hazard on the -reset
+    # path, which is why it defaults to true.)
+    - name: Refuse to run against a UxPlay that never gives the screen back
+      ansible.builtin.assert:
+        that: uxplay_extra_args is not search('(^|\s)-nc(?!\s+no\b)')
+        fail_msg: >-
+          uxplay_extra_args contains -nc, which leaves UxPlay's last frame on
+          screen after a session. The idle clock would never be visible again.
+        success_msg: "UxPlay will hand the screen back between sessions."
+
+    - name: Install the console tools the idle screen needs
+      ansible.builtin.apt:
+        name:
+          - kbd                 # chvt
+          - console-setup       # ships the PSF fonts the clock renders from
+          - iproute2            # ss, for session detection
+        state: present
+
+    - name: Install the idle clock
+      ansible.builtin.copy:
+        src: uxplay-idle-clock.py
+        dest: /usr/local/bin/uxplay-idle-clock.py
+        owner: root
+        group: root
+        mode: "0755"
+      register: idle_script
+
+    - name: Install the idle screen unit
+      ansible.builtin.template:
+        src: uxplay-idle.service.j2
+        dest: /etc/systemd/system/uxplay-idle.service
+        owner: root
+        group: root
+        mode: "0644"
+      register: idle_unit
+
+    - name: Enable the idle screen
+      ansible.builtin.systemd:
+        name: uxplay-idle.service
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # Not a handler: a handler runs at the end of the play, and the point of
+    # this is to put the new clock on screen at the moment it is installed.
+    - name: Restart the idle screen after a change  # noqa: no-handler
+      ansible.builtin.systemd:
+        name: uxplay-idle.service
+        state: restarted
+      when: idle_script is changed or idle_unit is changed
+
+- name: Idle screen is disabled
+  when: not (idle_enabled | bool)
+  ansible.builtin.systemd:
+    name: uxplay-idle.service
+    enabled: false
+    state: stopped
+  failed_when: false

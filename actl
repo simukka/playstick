@@ -13,8 +13,8 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-UID_="$(id -u)"; GID_="$(id -g)"
-export UID="$UID_" GID="$GID_"
+# Not UID/GID: bash makes UID readonly, so exporting it aborts under set -e.
+export HOST_UID="$(id -u)" HOST_GID="$(id -g)"
 
 if [ -z "${SSH_AUTH_SOCK:-}" ]; then
   echo "warning: no SSH agent detected. Key-based auth will rely on the" >&2

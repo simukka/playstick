@@ -1,0 +1,123 @@
+---
+# Strip the Ubuntu Server install back toward what a kiosk actually needs.
+# Every list here was built from what is genuinely installed and running on
+# the device, not from a generic "debloat Ubuntu" checklist.
+
+trim_enabled: true
+
+# Purged outright. Each one is dead weight on a headless HDMI stick:
+#   apport              crash reporting, nothing to report to
+#   bolt                Thunderbolt; Cherry Trail has none
+#   fwupd               firmware updates; this stick is not flashed from Linux
+#   landscape-common    Canonical fleet management
+#   modemmanager        no WWAN modem
+#   multipath-tools     no multipath SAN
+#   networkd-dispatcher hook runner nothing hooks into
+#   open-iscsi          no iSCSI
+#   packagekit          nothing headless talks to it
+#   plymouth            boot splash on a box whose display is the payload
+#   rsyslog             duplicates journald into /var/log; eMMC writes matter
+#   snapd               no snaps installed
+#   udisks2             no removable-media management wanted
+#   ufw                 not needed (explicit decision)
+#   upower              no battery
+#   kdump-tools         see below -- it reserves nothing and cannot work
+trim_purge_packages:
+  - apport
+  - bolt
+  - fwupd
+  - kdump-tools
+  - landscape-common
+  - modemmanager
+  - multipath-tools
+  - networkd-dispatcher
+  - open-iscsi
+  - packagekit
+  - plymouth
+  - rsyslog
+  - snapd
+  - software-properties-common   # base edits sources directly; not needed
+  - udisks2
+  - ufw
+  - upower
+
+# Asserted against the purge list before anything is removed. These are not
+# suggestions -- removing any of them costs you the device.
+#
+#   lvm2            root is /dev/mapper/ubuntu--vg-ubuntu--lv. Removing this
+#                   makes the system unbootable.
+#   openssh-server  the only way in
+#   netplan.io      network configuration
+#   systemd-*       init, DNS, network
+#   dbus            required by logind and avahi
+#   avahi-daemon    AirPlay discovery is mDNS
+#   chrony          time sync; pairing and TLS care
+#   thermald        kept deliberately: a passively cooled stick doing
+#                   sustained video decode wants thermal management
+trim_protected_packages:
+  - lvm2
+  - openssh-server
+  - openssh-client
+  - netplan.io
+  - systemd
+  - systemd-resolved
+  - systemd-timesyncd
+  - dbus
+  - avahi-daemon
+  - chrony
+  - thermald
+  - sudo
+  - sudo-rs
+
+# Timers that wake a slow CPU to do work nobody asked for. fstrim.timer is
+# deliberately NOT here: TRIM is worth keeping on eMMC.
+trim_disable_timers:
+  - apt-daily.timer
+  - apt-daily-upgrade.timer
+  - motd-news.timer
+  - man-db.timer
+  - dpkg-db-backup.timer
+  - e2scrub_all.timer
+
+# Keep the package (so `apt upgrade` still works) but stop it running on its
+# own. An unattended apt run mid-presentation would wreck a mirroring session
+# on this CPU. The tradeoff: patching becomes manual.
+trim_disable_unattended_upgrades: true
+
+# Disable, do NOT purge. Purging cloud-init can take
+# /etc/netplan/50-cloud-init.yaml with it -- that is the network config, and
+# losing it on a headless device means losing SSH.
+trim_disable_cloud_init: true
+
+# journald is the only log sink once rsyslog is gone. Cap it so it cannot
+# grow into the eMMC.
+trim_journal_max_use: 64M
+
+trim_clean_apt_cache: true
+
+# Modules that cannot bind on this hardware and only emit boot errors onto a
+# console that happens to be the projector:
+#
+#   intel-spi intel-spi: unsupported C0DEN: 0xc
+#   intel-spi intel-spi: probe with driver intel-spi failed with error -22
+#
+# spi-intel drives the BIOS SPI flash. Nothing here needs it, it cannot work
+# on this firmware, and a driver capable of writing the BIOS is not one worth
+# leaving loaded on a kiosk. Both blacklist and install-/bin/true, because
+# blacklist alone does not stop a modalias-triggered load.
+trim_blacklist_modules:
+  - spi_intel_platform
+  - spi_intel
+
+# Quieting the boot console is tempting on a box whose display is the output,
+# but it is OFF by default on purpose: the kernel message that cracked the
+# performance investigation open was
+#   i915 0000:00:02.0: [drm] *ERROR* CPU pipe C FIFO underrun
+# read straight off tty1. Hiding that class of message costs more than the
+# tidier boot screen is worth while anything is still being measured.
+trim_quiet_boot: false
+
+# The installer left the default target at graphical.target. Nothing visibly
+# breaks today (no display manager is installed), but if one ever arrives it
+# would take DRM master and lock kmssink out of the display.
+trim_set_multi_user_target: true

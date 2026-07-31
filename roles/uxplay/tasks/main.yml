@@ -12,13 +12,13 @@
 
 - name: Record the installed UxPlay version
   ansible.builtin.command: uxplay -v
-  register: ux_version
+  register: uxplay_version
   changed_when: false
   failed_when: false
 
 - name: Show the installed UxPlay version
   ansible.builtin.debug:
-    msg: "{{ ux_version.stdout_lines | default(['unknown']) | first }}"
+    msg: "{{ uxplay_version.stdout_lines | default(['unknown']) | first }}"
 
 - name: Enable mDNS responder
   ansible.builtin.systemd:
@@ -83,17 +83,7 @@
   when: claim_tty1 | bool
 
 # --- firewall -----------------------------------------------------------
-- name: Check whether ufw is active
-  ansible.builtin.command: ufw status
-  register: ux_ufw
-  changed_when: false
-  failed_when: false
-
-- name: Open the AirPlay and mDNS ports
-  ansible.builtin.command: "ufw allow {{ item }}"
-  loop:
-    - "5353/udp"
-    - "{{ uxplay_port }}:{{ uxplay_port + 2 }}/tcp"
-    - "{{ uxplay_port }}:{{ uxplay_port + 2 }}/udp"
-  when: "'Status: active' in (ux_ufw.stdout | default(''))"
-  changed_when: true
+# None. ufw is purged by the trim role by explicit decision, so there are no
+# rules to open: UxPlay listens on {{ uxplay_port }}..{{ uxplay_port + 2 }}
+# (TCP and UDP) plus 5353/udp for mDNS, and nothing filters them. The device
+# is therefore only as protected as the LAN it sits on.

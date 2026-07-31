@@ -10,8 +10,13 @@ Documentation=https://github.com/FDH2/UxPlay
 After=network-online.target avahi-daemon.service seatd.service
 Wants=network-online.target
 Requires=avahi-daemon.service seatd.service
-Conflicts=uxplay-kms.service getty@tty1.service
-ConditionPathExists=/dev/dri/card0
+# Conflicts with the idle screen, unlike the KMS path. cage is a compositor:
+# it holds DRM master for its whole lifetime, not just while a client is
+# mirroring, so fbcon would stay suspended forever and the clock would never
+# appear. Better to stop it outright than to leave it running invisibly. An
+# idle screen for this path would have to be a Wayland client instead.
+Conflicts=uxplay-kms.service getty@tty1.service uxplay-idle.service
+ConditionPathExists={{ drm_card_path | default('/dev/dri/by-path/pci-' ~ drm_pci_slot ~ '-card', true) }}
 
 [Service]
 Type=simple
@@ -27,6 +32,8 @@ Environment=XDG_SESSION_TYPE=wayland
 Environment=WLR_BACKENDS=drm
 Environment=LIBSEAT_BACKEND=seatd
 
+# Kept here, unlike the KMS unit: wlroots' DRM backend genuinely needs a VT
+# and a seat, and cage owns the console for as long as it runs.
 TTYPath=/dev/tty1
 StandardInput=tty-force
 StandardOutput=journal
@@ -37,9 +44,11 @@ TTYVTDisallocate=yes
      '-n "' ~ uxplay_advert_name ~ '"',
      '-a' if uxplay_suppress_audio else '',
      '-p ' ~ uxplay_port,
+     ('-s ' ~ uxplay_request_size | trim) if uxplay_request_size | trim | length > 0 else '',
      '-fs',
      '-vd ' ~ uxplay_decoder,
      '-vs waylandsink',
+     '-nofreeze' if uxplay_nofreeze else '',
      uxplay_extra_args,
    ] | select | list %}
 ExecStart=/usr/bin/cage -d -- /usr/bin/uxplay \

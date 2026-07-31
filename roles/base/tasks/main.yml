@@ -1,31 +1,40 @@
 ---
-- name: Install repository management tooling
-  ansible.builtin.apt:
-    name: software-properties-common
-    state: present
-    update_cache: true
-    cache_valid_time: 3600
-
 # universe carries uxplay, cage and seatd; multiverse carries
-# i965-va-driver-shaders, without which the i965 driver falls back to a
-# reduced shader set -- a cost this hardware cannot absorb. Universe is on by
-# default on Ubuntu Server, but checking is cheap and a missing component
-# fails the whole run three roles later.
-- name: Check which apt components are enabled
-  ansible.builtin.command: apt-cache policy
-  register: base_apt_policy
-  changed_when: false
+# i965-va-driver-shaders, the same driver built with the non-free shader
+# binaries (it Conflicts with the DFSG-stripped universe build rather than
+# supplementing it -- see i965_nonfree_shaders).
+#
+# Edited directly rather than via add-apt-repository: that tool lives in
+# software-properties-common, which drags in a python stack the trim role
+# then wants to purge. Ubuntu 26.04 uses deb822, and the regex appends a
+# component only when it is missing, so this is idempotent.
+- name: Check for the deb822 sources file
+  ansible.builtin.stat:
+    path: /etc/apt/sources.list.d/ubuntu.sources
+  register: base_deb822
 
 - name: Enable the universe and multiverse components
-  ansible.builtin.command: "add-apt-repository -y {{ item }}"
+  ansible.builtin.replace:
+    path: /etc/apt/sources.list.d/ubuntu.sources
+    regexp: '^(Components:(?!.*\b{{ item }}\b).*)$'
+    replace: '\1 {{ item }}'
   loop:
     - universe
     - multiverse
-  when: item not in base_apt_policy.stdout
+  when: base_deb822.stat.exists
   register: base_components
-  changed_when: true
 
-- name: Refresh the package index
+- name: Require the components to be enabled
+  ansible.builtin.assert:
+    that: base_deb822.stat.exists
+    fail_msg: >-
+      /etc/apt/sources.list.d/ubuntu.sources not found. Enable the universe
+      and multiverse components by hand before re-running.
+
+# Deliberately not a handler: the index must be current *before* the apt
+# installs later in this run. A handler fires at end of play, which is too
+# late to be of any use here.
+- name: Refresh the package index  # noqa: no-handler
   ansible.builtin.apt:
     update_cache: true
   when: base_components is changed
@@ -53,6 +62,22 @@
       - video
       - render
     append: true
+
+# The VA-API plugins probe /dev/dri/renderD128 when they register, so without
+# render access `gst-inspect-1.0 vah264dec` and `vainfo` report nothing at all
+# and look exactly like a failed install. On a box whose whole purpose is
+# hand-running those commands, that is a trap worth closing.
+# Set base_login_gpu_access: false to skip.
+# ansible_user, not ansible_user_id: facts are gathered under become, so
+# ansible_user_id is "root" and this silently added the wrong account.
+- name: Give the login user GPU access for manual probing
+  ansible.builtin.user:
+    name: "{{ ansible_user }}"
+    groups:
+      - video
+      - render
+    append: true
+  when: base_login_gpu_access | bool
 
 # --- memory -------------------------------------------------------------
 # 2 GB of LPDDR3 total, and GStreamer's buffer pool plus the VA surface pool

@@ -4,8 +4,10 @@ services:
     build:
       context: .
       args:
-        UID: "${UID:-1000}"
-        GID: "${GID:-1000}"
+        # HOST_UID rather than UID: bash treats UID as readonly, so a wrapper
+        # cannot export it. Set by ./actl.
+        UID: "${HOST_UID:-1000}"
+        GID: "${HOST_GID:-1000}"
     image: uxplay-atom-ansible
     volumes:
       - .:/work

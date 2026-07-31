@@ -1,4 +1,15 @@
 ---
+# --- privilege escalation -----------------------------------------------
+# Ubuntu 26.04 makes sudo-rs the default `sudo` via update-alternatives.
+# sudo-rs does not honour the custom prompt ansible passes with -p, so
+# ansible never matches the prompt and become times out after 60s with
+# "Timeout waiting for privilege escalation prompt".
+#
+# Classic sudo is still installed alongside it, so point ansible at that
+# binary directly. This changes nothing on the device -- the alternatives
+# link and sudo-rs stay exactly as they are.
+ansible_become_exe: /usr/bin/sudo.ws
+
 # --- identity -----------------------------------------------------------
 uxplay_user: uxplay
 uxplay_home: /var/lib/uxplay
@@ -9,14 +20,72 @@ uxplay_advert_name: Projector
 # Pinning the port makes the firewall rules expressible. UxPlay uses
 # {{ uxplay_port }}..{{ uxplay_port + 2 }} on both TCP and UDP.
 uxplay_port: 7000
-# Decoder. vah264dec is the modern 'va' plugin (plugins-bad) and is what
-# UxPlay recommends; vaapih264dec is the deprecated gstreamer-vaapi element.
-# Set from probe results, do not guess.
-uxplay_decoder: vah264dec
+# Decoder. SOFTWARE, and that is a measured result, not a compromise.
+#
+# The earlier default (vaapih264dec) came from fakesink decode-ceiling rows,
+# which measure the one stage that is not the bottleneck. matrix-20260731-153753
+# is the first sweep taken at a native display mode -- 720p clip into a 720p
+# mode, no scaling anywhere -- and end to end only avdec_h264 ever held frame
+# rate. To an actual screen, via videoconvert ! kmssink:
+#
+#    720p  avdec_h264     29.19 fps   0.00% drop   40.1% CPU   <- ships
+#    720p  vah264dec      19.76 fps   0.33% drop   17.5% CPU
+#    720p  vaapih264dec   19.58 fps   0.00% drop   17.5% CPU
+#   1080p  avdec_h264     28.55 fps   0.51% drop   49.8% CPU  (skip-vsync)
+#   1080p  vaapih264dec   13.39 fps  16.58% drop   18.3% CPU  (skip-vsync)
+#
+# Note the "0.00% drop" at 19.58 fps: fpsdisplaysink only counts frames it
+# received, and 603 of 1800 never arrived. The hardware path is not slow at
+# decoding -- vaapih264dec into fakesink is 29.59 fps at 11.4% CPU, the
+# cheapest number in the matrix -- it is slow at *delivering*. Fitting the
+# to-screen rows against pixel count gives a per-frame cost of 20-32 ms that
+# does not scale with resolution at all, against a 33.3 ms budget, while the
+# CPU sits at 17.5% of four cores. That is a synchronisation stall, not a
+# compute or bandwidth limit: no memory:VAMemory or memory:DMABuf feature
+# appears in any negotiated caps, so zero-copy never happens and every frame
+# is read back from GPU memory. avdec_h264 decodes into system memory, never
+# reads back, costs 2.5x the CPU and wins anyway.
+#
+# This also retires the project's founding assumption -- "Airmont at 1.44 GHz
+# cannot sustain 1080p30 H.264 in software, so VA-API is a hard requirement".
+uxplay_decoder: avdec_h264
+# Resolution requested FROM the client (-s). UxPlay defaults to 1920x1080, so
+# an unconfigured install asks the iPhone for 1080p and then pays to refit
+# every frame into whatever the display actually is. That refit is expensive
+# here: in matrix-20260731-153753 the 1080p clip stayed 1920x1080 all the way
+# down to kmssink, which had to fit it into a 1280x720 mode, and the best row
+# managed 2.65 fps at 52% drop. The pixel-exact rows managed 29.19 fps at
+# 0.00%. Matching the request to the display is the single biggest win
+# available, and it is not something the matrix could measure -- it is a
+# property of the whole chain, not of any pipeline the probe builds.
+#
+# Derived from drm_force_mode so the two cannot drift apart. This is exactly
+# the pair that has to stay in step, and the display mode has already changed
+# three times on this box.
+#
+# The refresh is deliberately NOT taken from drm_force_mode: that is the
+# scanout rate (60 Hz here), whereas this is the rate the client encodes at,
+# and AirPlay mirroring is a 30 fps source. A 30 fps stream on a 60 Hz output
+# is simply shown twice per frame.
+#
+# Set explicitly to override; set to "" to leave UxPlay's own default alone.
+uxplay_request_fps: 30
+uxplay_request_size: >-
+  {{ (drm_force_mode.split('@')[0] ~ '@' ~ uxplay_request_fps)
+  if drm_force_mode | length > 0 else '' }}
 # Audio is deliberately suppressed (-a): the Cherry Trail LPE/SST audio
 # stack is the least reliable part of this platform and is out of scope.
 uxplay_suppress_audio: true
+# Release the display when a session ends rather than leaving the last frame
+# frozen on it. From `uxplay -h`: "-reset n" resets after n seconds of client
+# silence (default 15), and without -nofreeze UxPlay "leaves a frozen screen
+# in place after reset" -- meaning it keeps DRM master, fbcon stays suspended,
+# and the idle clock never comes back. Set false only if a frozen last frame
+# is wanted more than the idle screen.
+uxplay_nofreeze: true
 # Extra flags appended verbatim to both units, e.g. "-fps 30 -vsync no".
+# Note: "-nc" is rejected by the idle role -- it holds the display open after
+# the client stops, which permanently hides the idle clock. "-nc no" is fine.
 uxplay_extra_args: ""
 
 # --- graphics -----------------------------------------------------------
@@ -24,7 +93,90 @@ uxplay_extra_args: ""
 # cover it. Pinned so libva autodetection cannot wander off to iHD.
 libva_driver: i965
 
+# DRM node for the integrated graphics. Leave empty to auto-discover.
+#
+# Do NOT hardcode /dev/dri/card0: on this box simpledrm claims card0 as the
+# EFI framebuffer at boot and i915 then lands on card1, leaving a stale
+# by-path symlink behind. The numbering is a boot-order artifact, so the
+# PCI by-path link is what gets used.
+drm_card_path: ""
+drm_pci_slot: "0000:00:02.0"
+
+# Force the HDMI output mode via the kernel cmdline, e.g. "1920x1080@60".
+# Empty means "use whatever the EDID prefers".
+#
+# Why this matters here: the display engine reads pixels from memory into a
+# FIFO on a fixed clock, and Cherry Trail's memory subsystem is shared with
+# the CPU and GPU. When the FIFO runs dry mid-scanline the kernel logs
+#   i915 0000:00:02.0: [drm] *ERROR* CPU pipe C FIFO underrun
+# and the picture corrupts, whatever fps the pipeline claims.
+#
+# Scanout bandwidth scales with the pixel clock. The attached display is a
+# Panasonic PT-AE4000 projector (EDID monitor name "AE-4000", 2009). Its
+# modes, with scanout cost at 4 B/px (modetest, connector 120):
+#   #0  1920x1080i @ 60.00   74250 kHz  ->  ~297 MB/s   EDID *preferred*
+#   #1  1920x1080  @ 60.00  148500 kHz  ->  ~594 MB/s
+#   #4  1920x1080  @ 50.00  148500 kHz  ->  ~594 MB/s
+#   #7  1920x1080  @ 24.00   74250 kHz  ->  ~297 MB/s
+#   #8  1920x1080  @ 23.98   74176 kHz  ->  ~297 MB/s
+#   #9  1280x720   @ 60.00   74250 kHz  ->  ~297 MB/s   <- this one
+#
+# Note what the preferred mode is: 1080*i*. Both detailed timings in the base
+# EDID block are interlaced, so leaving this empty does not merely cost
+# bandwidth -- it puts a deinterlacer in the path.
+#
+# The projector advertises no 1080p30 at all: CEA VIC 34 is absent from its
+# video data block. The earlier "1920x1080@30" was therefore a kernel-
+# synthesized CVT mode (modetest reported "type: userdef") at 80192 kHz --
+# legal for this panel (range descriptor: 24-61 Hz, 28-68 kHz, 150 MHz max;
+# HDMI VSDB: 190 MHz max TMDS) but not one it declares.
+#
+# Why 720p60 rather than one of the 1080p modes. All the cheap modes cost the
+# same ~297 MB/s, so the choice is about frame pacing, not bandwidth:
+#
+#   1080p24  matches nothing. AirPlay mirroring is a 30 fps source, and 24 Hz
+#            cannot show it evenly -- one frame in five is dropped or held.
+#   1080p60  smooth at full resolution, but 594 MB/s, which is the territory
+#            the FIFO underruns came from.
+#   720p60   297 MB/s AND an exact multiple of a 30 fps source: every frame is
+#            shown twice, evenly. Trades resolution for pacing.
+#
+# It also removes the last scaling stage in the chain. With uxplay_request_size
+# derived from this value the client encodes 1280x720, the decoder decodes
+# 1280x720 and the display scans out 1280x720 -- and the pixel-exact rows are
+# the only ones in matrix-20260731-153753 that held 30 fps with zero drops
+# (29.19 fps / 0.00%, against 2.65 fps / 52% for a 1080p frame refit to 720p).
+#
+# Aside, kept because it cost an hour: "@23.98" cannot be expressed here.
+# drm_mode_parse_cmdline_refresh() reads the refresh with simple_strtol, so the
+# "." ends the parse, the whole video= argument is discarded, and the connector
+# silently falls back to the preferred mode -- 1080i60. A fractional parser
+# would not help either: drm_mode_vrefresh() rounds with DIV_ROUND_CLOSEST, so
+# 23.976 and 24.000 both report 24 and the first match in the list wins.
+#
+# Set to "" to fall back to whatever the EDID prefers (here: 1080i60).
+# Requires a reboot to take effect -- and uxplay_request_size follows it, so
+# the units need re-templating too.
+drm_force_mode: "1280x720@60"
+drm_force_connector: HDMI-A-1
+
+# i965-va-driver-shaders REPLACES i965-va-driver -- they Conflict. It is the
+# same driver built with the non-free shader binaries rather than an add-on;
+# the universe package is the same source with those shaders stripped (note
+# its +dfsg1 version suffix). Exactly one may be installed.
+#
+#   true  -> i965-va-driver-shaders  (multiverse, full shader set)
+#   false -> i965-va-driver          (universe, DFSG-free)
+#
+# Defaults to the full set: this SoC has no performance to spare.
+i965_nonfree_shaders: true
+
 # --- base ---------------------------------------------------------------
+# Add the SSH login user to video/render so vainfo and gst-inspect work
+# without sudo. Without this they silently report nothing, which is
+# indistinguishable from a broken install. Takes effect on next login.
+base_login_gpu_access: true
+
 enable_zram: true
 # Claim tty1 for the kmssink unit by masking getty@tty1. tty2 is left as a
 # rescue console. Rollback: systemctl unmask --now getty@tty1

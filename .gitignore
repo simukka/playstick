@@ -5,3 +5,5 @@ results/
 roles/probe/files/*.h264
 
 *.retry
+__pycache__/
+*.pyc
