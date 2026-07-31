@@ -1,0 +1,99 @@
+---
+- name: Install UxPlay, mDNS and the kiosk compositor
+  ansible.builtin.apt:
+    name:
+      - uxplay          # 1.73.2-1 in resolute
+      - avahi-daemon    # AirPlay discovery is mDNS; not optional
+      - cage            # minimal Wayland kiosk for the waylandsink path
+      - seatd           # seat management for cage under a system service
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Record the installed UxPlay version
+  ansible.builtin.command: uxplay -v
+  register: ux_version
+  changed_when: false
+  failed_when: false
+
+- name: Show the installed UxPlay version
+  ansible.builtin.debug:
+    msg: "{{ ux_version.stdout_lines | default(['unknown']) | first }}"
+
+- name: Enable mDNS responder
+  ansible.builtin.systemd:
+    name: avahi-daemon
+    enabled: true
+    state: started
+
+- name: Enable seat management for the cage path
+  ansible.builtin.systemd:
+    name: seatd
+    enabled: true
+    state: started
+
+- name: Add the service account to the seat group
+  ansible.builtin.user:
+    name: "{{ uxplay_user }}"
+    groups: _seatd
+    append: true
+  failed_when: false   # group name varies by packaging; cage falls back to logind
+
+# --- the two mutually exclusive units -----------------------------------
+- name: Install the KMS (no compositor) unit
+  ansible.builtin.template:
+    src: uxplay-kms.service.j2
+    dest: /etc/systemd/system/uxplay-kms.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Install the cage (Wayland kiosk) unit
+  ansible.builtin.template:
+    src: uxplay-cage.service.j2
+    dest: /etc/systemd/system/uxplay-cage.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd
+
+- name: Flush handlers so the units are known before anything starts them
+  ansible.builtin.meta: flush_handlers
+
+# Neither unit is enabled here. Which one wins is a probe result, not a
+# guess -- see README, "Choosing the output path".
+- name: Report how to enable an output path
+  ansible.builtin.debug:
+    msg:
+      - "Units installed but NOT enabled -- run the probes first."
+      - "  systemctl enable --now uxplay-kms.service    # pure DRM/KMS"
+      - "  systemctl enable --now uxplay-cage.service   # cage + waylandsink"
+
+# --- tty1 ---------------------------------------------------------------
+# kmssink becomes DRM master by being the first process to open the card.
+# i915's fbdev emulation is in-kernel and holds no master, so the only real
+# contender is a getty painting the console. tty2 stays as a rescue login.
+- name: Claim tty1 for the KMS path
+  ansible.builtin.systemd:
+    name: getty@tty1.service
+    enabled: false
+    state: stopped
+    masked: true
+  when: claim_tty1 | bool
+
+# --- firewall -----------------------------------------------------------
+- name: Check whether ufw is active
+  ansible.builtin.command: ufw status
+  register: ux_ufw
+  changed_when: false
+  failed_when: false
+
+- name: Open the AirPlay and mDNS ports
+  ansible.builtin.command: "ufw allow {{ item }}"
+  loop:
+    - "5353/udp"
+    - "{{ uxplay_port }}:{{ uxplay_port + 2 }}/tcp"
+    - "{{ uxplay_port }}:{{ uxplay_port + 2 }}/udp"
+  when: "'Status: active' in (ux_ufw.stdout | default(''))"
+  changed_when: true

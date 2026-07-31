@@ -1,0 +1,64 @@
+---
+- name: Create the probe directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ probe_results_dir }}"
+    - "{{ probe_clip_dir }}"
+
+- name: Install the probe scripts
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - uxplay-probe-facts.sh
+    - uxplay-probe-matrix.sh
+
+- name: Write probe defaults for the scripts
+  ansible.builtin.copy:
+    dest: /etc/default/uxplay-probe
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (uxplay-atom)
+      PROBE_RESULTS_DIR={{ probe_results_dir }}
+      PROBE_CLIP_DIR={{ probe_clip_dir }}
+      PROBE_IPERF_SERVER={{ probe_iperf_server }}
+      LIBVA_DRIVER_NAME={{ libva_driver }}
+
+# Encoding on Airmont would take longer than the measurement, so the clips are
+# built on the control machine by scripts/make-testclip.sh and shipped here.
+- name: Look for locally generated test clips
+  ansible.builtin.find:
+    paths: "{{ role_path }}/files"
+    patterns: "*.h264"
+  delegate_to: localhost
+  become: false
+  register: probe_local_clips
+
+- name: Ship the test clips
+  ansible.builtin.copy:
+    src: "{{ item.path }}"
+    dest: "{{ probe_clip_dir }}/{{ item.path | basename }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ probe_local_clips.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+
+- name: Warn when no clips were shipped
+  ansible.builtin.debug:
+    msg:
+      - "No test clips found in roles/probe/files/."
+      - "Generate them on the control machine, then re-run this role:"
+      - "  ./scripts/make-testclip.sh"
+  when: probe_local_clips.files | length == 0

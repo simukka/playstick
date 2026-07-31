@@ -1,0 +1,64 @@
+---
+# Run the probes on the device and pull the output back to results/.
+#   ansible-playbook fetch-results.yml
+#   ansible-playbook fetch-results.yml -e run_matrix=true
+- name: Run probes and collect results
+  hosts: vivostick
+  become: true
+  gather_facts: false
+
+  vars:
+    run_facts: true
+    run_matrix: false      # opt-in: the matrix takes ~20 minutes and owns the display
+
+  tasks:
+    - name: Run the facts probe
+      ansible.builtin.command: /usr/local/bin/uxplay-probe-facts.sh "{{ probe_iperf_server }}"
+      environment:
+        PROBE_RESULTS_DIR: "{{ probe_results_dir }}"
+        LIBVA_DRIVER_NAME: "{{ libva_driver }}"
+      register: probe_facts
+      changed_when: false
+      when: run_facts | bool
+
+    - name: Stop any running UxPlay unit before the matrix takes the display
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - uxplay-kms.service
+        - uxplay-cage.service
+      failed_when: false
+      when: run_matrix | bool
+
+    - name: Run the measurement matrix
+      ansible.builtin.command: /usr/local/bin/uxplay-probe-matrix.sh
+      environment:
+        PROBE_RESULTS_DIR: "{{ probe_results_dir }}"
+        PROBE_CLIP_DIR: "{{ probe_clip_dir }}"
+        LIBVA_DRIVER_NAME: "{{ libva_driver }}"
+      register: probe_matrix
+      changed_when: false
+      timeout: 3600
+      when: run_matrix | bool
+
+    - name: List everything the probes produced
+      ansible.builtin.find:
+        paths: "{{ probe_results_dir }}"
+        recurse: true
+        file_type: file
+      register: probe_output
+
+    - name: Fetch results to the control machine
+      ansible.builtin.fetch:
+        src: "{{ item.path }}"
+        dest: "results/"
+        flat: false
+      loop: "{{ probe_output.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: Summarise the matrix
+      ansible.builtin.debug:
+        msg: "{{ probe_matrix.stdout_lines[-25:] }}"
+      when: run_matrix | bool and probe_matrix.stdout_lines is defined

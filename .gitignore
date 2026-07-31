@@ -1,0 +1,7 @@
+# Probe output fetched back from the device
+results/
+
+# Generated test clips (large; rebuild with scripts/make-testclip.sh)
+roles/probe/files/*.h264
+
+*.retry

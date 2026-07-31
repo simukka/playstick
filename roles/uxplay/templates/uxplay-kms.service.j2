@@ -1,0 +1,53 @@
+{{ ansible_managed | comment }}
+# Path A: UxPlay renders straight to a DRM plane on the integrated Gen8 LP
+# graphics. No X, no Wayland, no compositor of any kind.
+#
+# DRM master: the first process to open /dev/dri/card0 becomes master, and
+# nothing else holds it -- i915's fbdev console emulation lives in the kernel
+# and is not a DRM client. The only real contender is a getty painting tty1,
+# which is why this unit conflicts with getty@tty1.
+
+[Unit]
+Description=UxPlay AirPlay receiver (direct KMS, no compositor)
+Documentation=https://github.com/FDH2/UxPlay
+After=network-online.target avahi-daemon.service
+Wants=network-online.target
+Requires=avahi-daemon.service
+Conflicts=uxplay-cage.service getty@tty1.service
+ConditionPathExists=/dev/dri/card0
+
+[Service]
+Type=simple
+User={{ uxplay_user }}
+WorkingDirectory={{ uxplay_home }}
+RuntimeDirectory=uxplay
+RuntimeDirectoryMode=0700
+Environment=XDG_RUNTIME_DIR=/run/uxplay
+Environment=LIBVA_DRIVER_NAME={{ libva_driver }}
+Environment=GST_VA_ALL_DRIVERS=1
+
+# Owning a VT is what makes this the active console, and TTYVTDisallocate
+# clears the login text before the first frame lands.
+TTYPath=/dev/tty1
+StandardInput=tty-force
+StandardOutput=journal
+StandardError=journal
+TTYVTDisallocate=yes
+
+{% set argv = [
+     '-n "' ~ uxplay_advert_name ~ '"',
+     '-a' if uxplay_suppress_audio else '',
+     '-p ' ~ uxplay_port,
+     '-fs',
+     '-vd ' ~ uxplay_decoder,
+     '-vs "kmssink force-modesetting=true"',
+     uxplay_extra_args,
+   ] | select | list %}
+ExecStart=/usr/bin/uxplay \
+    {{ argv | join(' \\\n    ') }}
+
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

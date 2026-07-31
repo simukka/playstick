@@ -1,0 +1,9 @@
+---
+# Fill in ansible_host and ansible_user for the VivoStick, then:
+#   ansible -m ping vivostick
+all:
+  hosts:
+    vivostick:
+      ansible_host: CHANGEME       # IP or hostname of the TS10
+      ansible_user: CHANGEME       # login user with sudo
+      ansible_python_interpreter: /usr/bin/python3

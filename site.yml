@@ -1,0 +1,24 @@
+---
+- name: Provision the VivoStick TS10 as a no-X AirPlay receiver
+  hosts: vivostick
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Confirm we are on the expected platform
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['architecture'] == 'x86_64'
+        fail_msg: >-
+          Expected Ubuntu on x86_64; found
+          {{ ansible_facts['distribution'] }} on {{ ansible_facts['architecture'] }}.
+        success_msg: >-
+          {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }},
+          kernel {{ ansible_facts['kernel'] }}, {{ ansible_facts['memtotal_mb'] }} MB RAM.
+
+  roles:
+    - base
+    - graphics
+    - uxplay
+    - probe

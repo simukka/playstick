@@ -1,0 +1,86 @@
+---
+# Cherry Trail = Gen8 LP. intel-media-driver (iHD) does not cover it, so the
+# i965 driver is the only VA-API path that exists for this SoC.
+- name: Install the VA-API stack and GStreamer plugins
+  ansible.builtin.apt:
+    name:
+      - i965-va-driver
+      - i965-va-driver-shaders   # multiverse; full shader set
+      - vainfo
+      - libdrm-tests             # modetest, for connector/plane discovery
+      - gstreamer1.0-tools
+      - gstreamer1.0-plugins-base
+      - gstreamer1.0-plugins-good
+      - gstreamer1.0-plugins-bad  # provides the 'va' plugin: vah264dec
+      - gstreamer1.0-plugins-ugly
+      - gstreamer1.0-libav        # provides avdec_h264, the software baseline
+      - gstreamer1.0-vaapi        # legacy vaapih264dec, kept as a fallback
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# Set in /etc/environment so interactive SSH sessions see the same driver the
+# services do (the units also carry an explicit Environment= -- systemd system
+# services do not read /etc/environment).
+- name: Pin the VA-API driver for login sessions
+  ansible.builtin.lineinfile:
+    path: /etc/environment
+    regexp: '^LIBVA_DRIVER_NAME='
+    line: "LIBVA_DRIVER_NAME={{ libva_driver }}"
+    owner: root
+    group: root
+    mode: "0644"
+    create: true
+
+- name: Confirm the DRM device is present
+  ansible.builtin.stat:
+    path: /dev/dri/card0
+  register: gfx_card
+
+- name: Require a DRM device
+  ansible.builtin.assert:
+    that: gfx_card.stat.exists
+    fail_msg: >-
+      /dev/dri/card0 is missing. i915 did not bind. Check
+      `dmesg | grep -i i915` before going further.
+
+- name: Query VA-API capabilities
+  ansible.builtin.command: vainfo --display drm --device /dev/dri/renderD128
+  environment:
+    LIBVA_DRIVER_NAME: "{{ libva_driver }}"
+  register: gfx_vainfo
+  changed_when: false
+  failed_when: false
+
+# This is the gate the whole design rests on. 4x1.44 GHz Airmont cannot
+# sustain 1080p30 H.264 in software, so a box without hardware VLD is not
+# worth configuring further -- fail loudly here rather than ship something
+# that silently limps.
+- name: Require hardware H.264 decode
+  ansible.builtin.assert:
+    that:
+      - gfx_vainfo.rc == 0
+      - gfx_vainfo.stdout is search('VAProfileH264High\s*:\s*VAEntrypointVLD')
+    fail_msg: |-
+      No VA-API H.264 decode entrypoint found. Software decode is not viable
+      on this SoC, so this is fatal rather than degraded.
+      vainfo rc={{ gfx_vainfo.rc }}
+      {{ gfx_vainfo.stdout | default('') }}
+      {{ gfx_vainfo.stderr | default('') }}
+    success_msg: "VA-API hardware H.264 decode (VAEntrypointVLD) confirmed."
+
+- name: Report which GStreamer decoders actually registered
+  ansible.builtin.shell:
+    cmd: >-
+      gst-inspect-1.0 2>/dev/null
+      | grep -E 'vah264dec|vaapih264dec|avdec_h264|kmssink|waylandsink'
+      || true
+  environment:
+    LIBVA_DRIVER_NAME: "{{ libva_driver }}"
+    GST_VA_ALL_DRIVERS: "1"
+  register: gfx_elements
+  changed_when: false
+
+- name: Show available decoders and sinks
+  ansible.builtin.debug:
+    msg: "{{ gfx_elements.stdout_lines }}"

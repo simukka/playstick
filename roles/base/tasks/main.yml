@@ -1,0 +1,91 @@
+---
+- name: Install repository management tooling
+  ansible.builtin.apt:
+    name: software-properties-common
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# universe carries uxplay, cage and seatd; multiverse carries
+# i965-va-driver-shaders, without which the i965 driver falls back to a
+# reduced shader set -- a cost this hardware cannot absorb. Universe is on by
+# default on Ubuntu Server, but checking is cheap and a missing component
+# fails the whole run three roles later.
+- name: Check which apt components are enabled
+  ansible.builtin.command: apt-cache policy
+  register: base_apt_policy
+  changed_when: false
+
+- name: Enable the universe and multiverse components
+  ansible.builtin.command: "add-apt-repository -y {{ item }}"
+  loop:
+    - universe
+    - multiverse
+  when: item not in base_apt_policy.stdout
+  register: base_components
+  changed_when: true
+
+- name: Refresh the package index
+  ansible.builtin.apt:
+    update_cache: true
+  when: base_components is changed
+
+- name: Install baseline utilities
+  ansible.builtin.apt:
+    name:
+      - pciutils
+      - usbutils
+      - iperf3
+      - jq
+    state: present
+
+# --- service account ----------------------------------------------------
+# video  -> /dev/dri/card0 is 0660 root:video, needed for KMS/DRM master
+# render -> /dev/dri/renderD128, needed for VA-API decode
+- name: Create the uxplay service account
+  ansible.builtin.user:
+    name: "{{ uxplay_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ uxplay_home }}"
+    create_home: true
+    groups:
+      - video
+      - render
+    append: true
+
+# --- memory -------------------------------------------------------------
+# 2 GB of LPDDR3 total, and GStreamer's buffer pool plus the VA surface pool
+# are not free. zram rather than a swapfile: the eMMC has finite writes.
+- name: Install the zram generator
+  ansible.builtin.apt:
+    name: systemd-zram-generator
+    state: present
+  when: enable_zram | bool
+
+- name: Configure zram swap
+  ansible.builtin.copy:
+    dest: /etc/systemd/zram-generator.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (uxplay-atom)
+      [zram0]
+      zram-size = ram
+      compression-algorithm = zstd
+  when: enable_zram | bool
+  notify: Reload systemd for zram
+
+- name: Favour zram over reclaim pressure
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-uxplay.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (uxplay-atom)
+      # Swapping to compressed RAM is cheap; swapping to eMMC is not.
+      vm.swappiness = 100
+  when: enable_zram | bool
+  notify: Apply sysctl settings

@@ -1,0 +1,39 @@
+---
+# --- identity -----------------------------------------------------------
+uxplay_user: uxplay
+uxplay_home: /var/lib/uxplay
+# Name the projector advertises over mDNS / shows in the iOS AirPlay list.
+uxplay_advert_name: Projector
+
+# --- uxplay runtime -----------------------------------------------------
+# Pinning the port makes the firewall rules expressible. UxPlay uses
+# {{ uxplay_port }}..{{ uxplay_port + 2 }} on both TCP and UDP.
+uxplay_port: 7000
+# Decoder. vah264dec is the modern 'va' plugin (plugins-bad) and is what
+# UxPlay recommends; vaapih264dec is the deprecated gstreamer-vaapi element.
+# Set from probe results, do not guess.
+uxplay_decoder: vah264dec
+# Audio is deliberately suppressed (-a): the Cherry Trail LPE/SST audio
+# stack is the least reliable part of this platform and is out of scope.
+uxplay_suppress_audio: true
+# Extra flags appended verbatim to both units, e.g. "-fps 30 -vsync no".
+uxplay_extra_args: ""
+
+# --- graphics -----------------------------------------------------------
+# Cherry Trail (Gen8 LP) is i965-only; intel-media-driver/iHD does not
+# cover it. Pinned so libva autodetection cannot wander off to iHD.
+libva_driver: i965
+
+# --- base ---------------------------------------------------------------
+enable_zram: true
+# Claim tty1 for the kmssink unit by masking getty@tty1. tty2 is left as a
+# rescue console. Rollback: systemctl unmask --now getty@tty1
+claim_tty1: true
+
+# --- probe --------------------------------------------------------------
+probe_results_dir: /var/log/uxplay-probe
+probe_clip_dir: /usr/local/share/uxplay-probe
+# Address of the control machine (X1) running `iperf3 -s`. Leave empty to
+# skip the throughput test. The TS10's Wi-Fi is SDIO-attached and 1080p
+# mirroring wants ~10-25 Mbps sustained, so this number matters.
+probe_iperf_server: ""

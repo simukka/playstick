@@ -1,0 +1,10 @@
+---
+# Deliberately ansible.builtin only: this repo targets a plain ansible-core
+# install with no extra collections.
+- name: Reload systemd for zram
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Apply sysctl settings
+  ansible.builtin.command: sysctl --system
+  changed_when: true

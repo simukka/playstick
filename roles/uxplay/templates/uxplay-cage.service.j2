@@ -1,0 +1,52 @@
+{{ ansible_managed | comment }}
+# Path B: UxPlay under cage, a single-window wlroots kiosk compositor. Still
+# no X anywhere. Costs ~30 MB of the 2 GB, and buys seat/DRM-master handling
+# plus EDID re-read on projector hotplug -- which is where this path is
+# expected to beat bare kmssink.
+
+[Unit]
+Description=UxPlay AirPlay receiver (cage kiosk, Wayland)
+Documentation=https://github.com/FDH2/UxPlay
+After=network-online.target avahi-daemon.service seatd.service
+Wants=network-online.target
+Requires=avahi-daemon.service seatd.service
+Conflicts=uxplay-kms.service getty@tty1.service
+ConditionPathExists=/dev/dri/card0
+
+[Service]
+Type=simple
+User={{ uxplay_user }}
+WorkingDirectory={{ uxplay_home }}
+RuntimeDirectory=uxplay
+# wlroots refuses an XDG_RUNTIME_DIR that others can read.
+RuntimeDirectoryMode=0700
+Environment=XDG_RUNTIME_DIR=/run/uxplay
+Environment=LIBVA_DRIVER_NAME={{ libva_driver }}
+Environment=GST_VA_ALL_DRIVERS=1
+Environment=XDG_SESSION_TYPE=wayland
+Environment=WLR_BACKENDS=drm
+Environment=LIBSEAT_BACKEND=seatd
+
+TTYPath=/dev/tty1
+StandardInput=tty-force
+StandardOutput=journal
+StandardError=journal
+TTYVTDisallocate=yes
+
+{% set argv = [
+     '-n "' ~ uxplay_advert_name ~ '"',
+     '-a' if uxplay_suppress_audio else '',
+     '-p ' ~ uxplay_port,
+     '-fs',
+     '-vd ' ~ uxplay_decoder,
+     '-vs waylandsink',
+     uxplay_extra_args,
+   ] | select | list %}
+ExecStart=/usr/bin/cage -d -- /usr/bin/uxplay \
+    {{ argv | join(' \\\n    ') }}
+
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
