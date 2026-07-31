@@ -1,0 +1,32 @@
+services:
+  # Main control node. `docker compose run --rm ansible '<command>'`
+  ansible:
+    build:
+      context: .
+      args:
+        UID: "${UID:-1000}"
+        GID: "${GID:-1000}"
+    image: uxplay-atom-ansible
+    volumes:
+      - .:/work
+      # Read-only on purpose: the container should never be able to rewrite
+      # your keys or known_hosts. Consequence -- SSH to the stick once from
+      # the host first so its host key is already recorded.
+      - ${HOME}/.ssh:/home/ansible/.ssh:ro
+      # Agent forwarding, so passphrase-protected keys work without the
+      # passphrase ever entering the container.
+      - ${SSH_AUTH_SOCK:-/dev/null}:/ssh-agent
+    environment:
+      SSH_AUTH_SOCK: /ssh-agent
+      ANSIBLE_CONFIG: /work/ansible.cfg
+    working_dir: /work
+    # Interactive so --check --diff output and any prompts behave.
+    stdin_open: true
+    tty: true
+
+  # `docker compose up iperf` -- the server end of the throughput probe.
+  # Host networking so the stick can reach it on the LAN.
+  iperf:
+    image: uxplay-atom-ansible
+    network_mode: host
+    entrypoint: ["iperf3", "-s"]

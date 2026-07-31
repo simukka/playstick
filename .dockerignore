@@ -1,0 +1,5 @@
+# The clips are ~114 MB and are bind-mounted at run time, not baked in.
+roles/probe/files/*.h264
+results/
+.git/
+*.retry

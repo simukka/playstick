@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Run an Ansible command inside the control-node container.
+#
+#   ./actl ansible -m ping vivostick
+#   ./actl ansible-playbook site.yml --check --diff
+#   ./actl ansible-playbook fetch-results.yml -e run_matrix=true
+#   ./actl ./scripts/make-testclip.sh
+#   ./actl bash                      # poke around
+#
+# Wraps `docker compose run` so UID/GID are exported and the image is built on
+# first use. Everything lands in the mounted repo owned by you.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+UID_="$(id -u)"; GID_="$(id -g)"
+export UID="$UID_" GID="$GID_"
+
+if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+  echo "warning: no SSH agent detected. Key-based auth will rely on the" >&2
+  echo "         read-only ~/.ssh mount, which cannot prompt for a passphrase." >&2
+fi
+
+# Build once; Docker caches thereafter.
+if ! docker image inspect uxplay-atom-ansible >/dev/null 2>&1; then
+  echo "==> building the control-node image (first run only)"
+  docker compose build ansible
+fi
+
+if [ $# -eq 0 ]; then
+  set -- "ansible-playbook --syntax-check site.yml fetch-results.yml && echo OK"
+fi
+
+# The entrypoint is `bash -lc`, so pass the command as a single string.
+exec docker compose run --rm ansible "$*"
