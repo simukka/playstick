@@ -16,6 +16,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     ANSIBLE_FORCE_COLOR=1
 
+# `ansible-vault create` and `edit` shell out to an editor, and a slim image
+# has none -- not even vi, which is what ansible falls back to. Without this
+# the documented way to write the NAS credentials fails at the last step.
+# Override per invocation: docker compose run -e EDITOR=vim ansible ...
+ENV EDITOR=nano
+
 RUN apt-get update && apt-get install --no-install-recommends -y \
         openssh-client \
         sshpass \
@@ -25,6 +31,7 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
         git \
         ca-certificates \
         less \
+        nano \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \

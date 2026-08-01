@@ -17,6 +17,36 @@ uxplay_home: /var/lib/uxplay
 uxplay_advert_name: Projector
 
 # --- uxplay runtime -----------------------------------------------------
+# Which output path runs. Both units are always installed; this one is
+# enabled and started, and the other is stopped and disabled.
+#
+#   kms   -> uxplay-kms.service    straight to a DRM plane, no compositor
+#   cage  -> uxplay-cage.service   UxPlay inside the cage kiosk compositor
+#   none  -> install both, enable neither, and print how to start one by hand
+#
+# They Conflicts= each other and exactly one may be enabled, so this is a
+# choice rather than a pair of switches. Changing it and re-running site.yml
+# swaps the path; "none" is the state this repo shipped before the sweep that
+# settled the question, kept because a probe run wants nothing holding the
+# display and because an operator may want to decide by hand.
+#
+# kms is the default because it is the only path with a measurement behind
+# it. The matrix scored waylandsink 0 of 18, but that number says nothing --
+# the probe runs pipelines bare under openvt with no compositor for the sink
+# to connect to, so it was measuring the harness. What cage buys is real and
+# still unmeasured: seat handling and an EDID re-read when the projector is
+# unplugged between sessions, which is the normal case here. Expect that, not
+# throughput, to be what eventually decides this.
+#
+# Two consequences of choosing cage, both enforced rather than documented:
+#   - the idle clock cannot coexist with it. A compositor holds the CRTC for
+#     its whole lifetime and never hands the framebuffer back, so the clock
+#     would be invisible -- and because Conflicts= runs both ways, starting
+#     the clock would stop the receiver. The idle role refuses the pair.
+#   - player_airplay_unit follows this variable, so the film player stops and
+#     restarts whichever receiver is actually running.
+uxplay_output_path: kms
+
 # Pinning the port makes the firewall rules expressible. UxPlay uses
 # {{ uxplay_port }}..{{ uxplay_port + 2 }} on both TCP and UDP.
 uxplay_port: 7000
@@ -181,6 +211,82 @@ enable_zram: true
 # Claim tty1 for the kmssink unit by masking getty@tty1. tty2 is left as a
 # rescue console. Rollback: systemctl unmask --now getty@tty1
 claim_tty1: true
+
+# --- NAS ----------------------------------------------------------------
+# The movie library: a read-only SMB/CIFS share, mounted on demand.
+#
+# Set nas_server and nas_share to switch the feature on; both empty is the
+# shipping default and skips the role entirely. Keep the password out of this
+# file -- it is in git:
+#   ./actl 'ansible-vault create host_vars/vivostick/vault.yml'
+#   ./actl 'ansible-playbook site.yml --ask-vault-pass'
+#
+# host_vars, and the path is load-bearing. vivostick is a HOST in inventory.yml,
+# not a group: group_vars/vivostick/ is never read, and group_vars/all/ is worse
+# than useless -- a directory of that name SHADOWS this file, silently taking
+# every tunable in it out of play. See docs/install.md.
+nas_server: ""
+nas_share: ""
+nas_mount_point: /srv/movies
+
+# --- movie player --------------------------------------------------------
+# mpv on a bare DRM plane, driven from a phone browser on the LAN.
+#
+# THE ONE THING TO KNOW: AirPlay is unavailable while a film plays, and that
+# is a property of the hardware rather than a shortcut. There is one CRTC and
+# one DRM master, and uxplay-kms takes the card when the *service* starts, not
+# when a client connects -- which is the same fact that forces the idle clock
+# to write pixels instead of text. So the receiver has to be stopped for the
+# length of a film. While it is stopped the stick does not appear in the iOS
+# AirPlay list at all, because UxPlay is what publishes the mDNS record; it
+# comes back a few seconds after the film ends. The interlock in the other
+# direction is a check: a film will not start while somebody is mirroring,
+# because somebody is standing there holding a phone.
+#
+# Video output. THIS IS THE ONE TO MEASURE FIRST.
+#
+# It looks like it contradicts uxplay_decoder above, and it does not. That
+# result -- software beats VA-API end to end -- was measured on GStreamer's
+# path, where no memory:DMABuf or memory:VAMemory feature ever appeared in the
+# negotiated caps, so every frame was read back out of GPU memory over an
+# uncached mapping into videoconvert, at a resolution-independent 20-32 ms
+# against a 33.3 ms budget. That is a synchronisation stall in one specific
+# pipeline, not a property of the silicon.
+#
+# It does not carry over to mpv's --vo=gpu --gpu-context=drm --hwdec=vaapi
+# path, where the VA surface is exported with vaExportSurfaceHandle, imported
+# as an EGLImage via EGL_EXT_image_dma_buf_import, and sampled by the GPU.
+# Nothing is read back. The stall that decided the UxPlay path is structurally
+# absent, so the expectation is that hardware decode WINS here -- and does any
+# scaling on the GPU for free, which --vo=drm pays for in libswscale.
+#
+# It is an expectation, not a result, and this repo does not ship those.
+# Nothing on this box has ever run GL: no X, no compositor, and Mesa's iris
+# driver has never been exercised (Gen8 goes to iris for GL; the libva driver
+# stays i965). So the default is the configuration with the fewest unproven
+# parts -- software decode into a dumb buffer, the closest structural analogue
+# of the 29.19 fps / 0.00% drop row that ships for UxPlay.
+#
+# Settle it, then change these two lines:
+#   ./actl 'ansible-playbook fetch-results.yml -e run_player_probe=true'
+player_vo: drm                 # drm | gpu | gpu-next
+player_hwdec: "no"             # no | vaapi | vaapi-copy | auto-safe
+
+# Audio is deliberately off, and films therefore play SILENTLY.
+#
+# UxPlay has always run with -a, so no sample has ever left this box. On
+# Cherry Trail, HDMI audio does not come out of an HDA codec at hw:0,3 the way
+# it does on desktop Intel -- it goes through the i915-created hdmi-lpe-audio
+# platform device, i.e. the same LPE block that uxplay_suppress_audio exists
+# to avoid, on an ALSA card whose number is not stable.
+#
+# The facts probe now reports the ALSA cards, their ELD state and whether the
+# LPE module is bound. Read that, then set player_audio: true and, if the
+# discovery is ambiguous, player_audio_device (e.g. "alsa/hw:0,3"). If the
+# platform turns out to be as unreliable as the README warns, a USB audio
+# adapter sidesteps the SoC path entirely and player_audio_device is the only
+# line that changes.
+player_audio: false
 
 # --- probe --------------------------------------------------------------
 probe_results_dir: /var/log/uxplay-probe

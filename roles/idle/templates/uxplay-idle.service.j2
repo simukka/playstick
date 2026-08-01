@@ -10,8 +10,10 @@
 # writes are invisible; when the session ends the CRTC returns to the fbdev
 # buffer and the clock is there, current.
 #
-# Unlike the two UxPlay units, this one is enabled by default: it is not a
-# probe result, it is the resting appearance of the device.
+# It runs alongside whichever receiver uxplay_output_path enabled -- with one
+# exception the role asserts rather than documents: not the cage path, which
+# Conflicts= this unit in both directions. Starting the clock there would stop
+# the receiver.
 
 [Unit]
 Description=UxPlay idle screen (clock on the framebuffer)
@@ -60,6 +62,11 @@ Environment=IDLE_CLOCK_SCALE={{ idle_clock_scale }}
    uxplay-kms holds that for its whole lifetime and so can never distinguish
    idle from mirroring. An established TCP connection to UxPlay's port can. #}
 Environment=IDLE_PORT={{ uxplay_port }}
+{# The movie player writes this file while it owns the display. Without it the
+   blank countdown would run out partway through a film -- harmlessly, since
+   the writes are invisible, but the clock would then reappear blanked. Empty
+   when the player role is not in use. #}
+Environment=IDLE_BUSY_FILE={{ idle_busy_file }}
 
 ExecStart=/usr/local/bin/uxplay-idle-clock.py
 Restart=always

@@ -20,6 +20,7 @@
   loop:
     - uxplay-probe-facts.sh
     - uxplay-probe-matrix.sh
+    - playstick-probe-player.sh
 
 - name: Write probe defaults for the scripts
   ansible.builtin.copy:
@@ -32,7 +33,10 @@
       PROBE_RESULTS_DIR={{ probe_results_dir }}
       PROBE_CLIP_DIR={{ probe_clip_dir }}
       PROBE_IPERF_SERVER={{ probe_iperf_server }}
+      PROBE_NAS_MOUNT={{ nas_mount_point }}
       LIBVA_DRIVER_NAME={{ libva_driver }}
+      DRM_CONNECTOR={{ drm_force_connector }}
+      DRM_MODE={{ drm_force_mode }}
 
 # Encoding on Airmont would take longer than the measurement, so the clips are
 # built on the control machine by scripts/make-testclip.sh and shipped here.

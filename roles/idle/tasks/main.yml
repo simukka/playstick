@@ -16,6 +16,22 @@
           screen after a session. The idle clock would never be visible again.
         success_msg: "UxPlay will hand the screen back between sessions."
 
+    # Conflicts= runs both ways, and that is the dangerous half. cage holding
+    # the CRTC for its whole lifetime only makes the clock invisible; starting
+    # the clock afterwards would stop the AirPlay receiver, which is a working
+    # projector traded for a screen nobody can see.
+    - name: Refuse an idle screen the cage path can never show
+      ansible.builtin.assert:
+        that: uxplay_output_path | default('kms') != 'cage'
+        fail_msg: >-
+          uxplay_output_path is cage, which cannot have this idle screen: a
+          compositor owns the CRTC for its whole lifetime and never hands the
+          framebuffer back, and uxplay-cage.service Conflicts=uxplay-idle.service
+          in both directions -- starting the clock would stop the receiver. Set
+          idle_enabled: false, or uxplay_output_path: kms. An idle screen for
+          the cage path would have to be a Wayland client.
+        success_msg: "The clock and the receiver can share the framebuffer."
+
     - name: Install the console tools the idle screen needs
       ansible.builtin.apt:
         name:

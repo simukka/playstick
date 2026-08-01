@@ -4,6 +4,10 @@ results/
 # Generated test clips (large; rebuild with scripts/make-testclip.sh)
 roles/probe/files/*.h264
 
+# The vault password itself. The vault FILE is meant to be committed --
+# host_vars/vivostick/vault.yml is encrypted -- but the key to it is not.
+.vault-pass
+
 *.retry
 __pycache__/
 *.pyc

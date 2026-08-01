@@ -1,0 +1,107 @@
+---
+- name: NAS library is enabled
+  when:
+    - nas_enabled | bool
+    - nas_server | length > 0
+    - nas_share | length > 0
+  block:
+
+    - name: Install the CIFS mount helper
+      ansible.builtin.apt:
+        name: cifs-utils
+        state: present
+
+    - name: Create the configuration directory
+      ansible.builtin.file:
+        path: "{{ nas_credentials_file | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    # Kept out of the unit file, which is world-readable in /etc/systemd/system.
+    # no_log because the whole point of the task is the password.
+    - name: Install the share credentials
+      ansible.builtin.template:
+        src: nas.cred.j2
+        dest: "{{ nas_credentials_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      when: nas_username | length > 0
+      notify: Reload systemd
+
+    - name: Create the mount point
+      ansible.builtin.file:
+        path: "{{ nas_mount_point }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # systemd derives unit names from the path by its own escaping rules, and
+    # getting them wrong by hand produces a unit that installs cleanly and
+    # never triggers. Ask systemd rather than guess.
+    - name: Work out the systemd unit names for the mount point
+      ansible.builtin.command: >-
+        systemd-escape --path --suffix=mount {{ nas_mount_point | quote }}
+      register: nas_escaped
+      changed_when: false
+
+    - name: Remember the derived unit names
+      ansible.builtin.set_fact:
+        nas_mount_unit: "{{ nas_escaped.stdout | trim }}"
+        nas_automount_unit: "{{ nas_escaped.stdout | trim | regex_replace('\\.mount$', '.automount') }}"
+
+    - name: Install the mount unit
+      ansible.builtin.template:
+        src: nas.mount.j2
+        dest: "/etc/systemd/system/{{ nas_mount_unit }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload systemd
+
+    - name: Install the automount unit
+      ansible.builtin.template:
+        src: nas.automount.j2
+        dest: "/etc/systemd/system/{{ nas_automount_unit }}"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload systemd
+
+    - name: Flush handlers so systemd knows the units before they are enabled
+      ansible.builtin.meta: flush_handlers
+
+    # Only the automount is enabled. The .mount is pulled in by the kernel
+    # walking into the directory, which is the whole point of the arrangement.
+    - name: Enable the automount
+      ansible.builtin.systemd:
+        name: "{{ nas_automount_unit }}"
+        enabled: true
+        state: started
+
+    # Non-fatal on purpose: a NAS that happens to be off must not fail the
+    # play. The player role reports an unreachable library at runtime.
+    - name: Check that the share is reachable
+      ansible.builtin.command: "ls -1 {{ nas_mount_point | quote }}"
+      register: nas_listing
+      changed_when: false
+      failed_when: false
+
+    - name: Report what the library looks like
+      ansible.builtin.debug:
+        msg: >-
+          {{ ('%d entries under %s' | format(nas_listing.stdout_lines | length, nas_mount_point))
+             if nas_listing.rc == 0
+             else ('Share not reachable right now (rc=%d) -- the automount will retry on next access.'
+                   | format(nas_listing.rc)) }}
+
+- name: NAS library is not configured
+  when: not (nas_enabled | bool) or nas_server | length == 0 or nas_share | length == 0
+  ansible.builtin.debug:
+    msg: >-
+      Skipping the NAS mount: set nas_server and nas_share (and vault
+      nas_username / nas_password) to enable the movie library.

@@ -1,0 +1,119 @@
+# The movie player's web UI, on a development machine.
+#
+#   docker compose up gui     ->  http://localhost:8080/
+#
+# This is a second image with a different job from the Dockerfile next to it:
+# that one is the Ansible control node, this one runs the thing Ansible would
+# have installed. It exists so that roles/player/files/{playstick-web,
+# playstick-ui.html} can be iterated on without a VivoStick, a projector or a
+# NAS in the loop.
+#
+# WHAT IT TESTS FAITHFULLY
+#
+# The daemon and the page are the repository's own files, unmodified -- compose
+# bind-mounts them over the copies baked in here, so editing the HTML and
+# reloading the browser is the whole cycle. mpv is real, so the library scan,
+# clean_title(), the poster pipeline, the play/pause/stop state machine, the
+# progress bar and the AirPlay interlock all behave exactly as they do on the
+# device.
+#
+# WHAT IT CANNOT TELL YOU
+#
+# Anything about the display, which is most of what makes this project hard.
+# A container has no DRM node, no tty1, no VA-API and no systemd, so --vo=drm,
+# --drm-mode, the DRM-master arbitration against uxplay-kms.service and every
+# performance number in the README stay device-only questions. mpv runs with
+# --vo=null here: the film is decoded and paced in real time and nothing is
+# drawn. Absent systemctl, unit_active() answers false, so the daemon correctly
+# decides it has no receiver to stop and none to restore -- the same path an
+# operator running neither UxPlay unit takes on the real box.
+FROM python:3.13-slim
+
+# mpv does the decoding, the frame extraction and the IPC channel, exactly as
+# on the device -- and ffmpeg, which is not installed there for want of eMMC,
+# is here to generate the sample library. iproute2 is ss, for the AirPlay gate.
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        mpv \
+        ffmpeg \
+        iproute2 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY roles/player/files/playstick-web /usr/local/bin/playstick-web
+COPY roles/player/files/playstick-ui.html /usr/local/share/playstick/ui.html
+COPY scripts/gui-entrypoint.sh /usr/local/bin/playstick-gui-entrypoint
+COPY scripts/gui-fake-airplay.py /usr/local/bin/fake-airplay
+RUN chmod 0755 /usr/local/bin/playstick-gui-entrypoint \
+               /usr/local/bin/fake-airplay
+
+# Everything the daemon reads is environmental, so the whole configuration is
+# here rather than in a config file -- see playstick-web.service.j2 for the
+# values the appliance uses. Only the deviations are commented.
+ENV PLAYSTICK_BIND=0.0.0.0 \
+    PLAYSTICK_PORT=8080 \
+    PLAYSTICK_UI=/usr/local/share/playstick/ui.html \
+    PLAYSTICK_LIBRARY=/srv/movies \
+    PLAYSTICK_THUMB_DIR=/var/cache/playstick/thumbs \
+    PLAYSTICK_THUMB_AT=20% \
+    PLAYSTICK_THUMB_TIMEOUT=60 \
+    PLAYSTICK_MPV=/usr/bin/mpv \
+    PLAYSTICK_MPV_SOCKET=/run/playstick/mpv.sock \
+    PLAYSTICK_BUSY_FILE=/run/playstick/playing \
+    PLAYSTICK_RESTORE_FILE=/run/playstick/restore-airplay \
+    PLAYSTICK_AIRPLAY_UNIT=uxplay-kms.service \
+    PLAYSTICK_SCAN_DEPTH=2
+
+# The generated clips are a few MB each; the device's 100 MB floor -- which is
+# what removes samples and extras there for free -- would hide the entire
+# library. The skip regex is left to do that job alone, so it gets exercised.
+ENV PLAYSTICK_MIN_SIZE_MB=0
+
+# 300 s on the device, where a rescan means stat-ing every file over CIFS.
+# Nothing is remote here and adding a file and waiting five minutes to see it
+# is not a development cycle.
+ENV PLAYSTICK_SCAN_INTERVAL=30
+
+# mpv's DRM backend wants a VT for console switching and there is none. Empty
+# disables it; the daemon logs the absence and carries on.
+ENV PLAYSTICK_MPV_TTY=""
+
+# Films play silently on the device (player_audio: false), which also hides the
+# page's volume controls. They are switched on here so that half of the UI can
+# be looked at; set 0 to see the layout as it currently ships.
+ENV PLAYSTICK_AUDIO=1
+
+# The port the interlock watches. Nothing listens on it until you run
+# `fake-airplay`, which is the point -- see scripts/gui-fake-airplay.py.
+ENV PLAYSTICK_AIRPLAY_PORT=7000
+
+# The device's argv minus the display: --vo=drm, --drm-device, --drm-connector,
+# --drm-mode and --hwdec have no meaning in a container. Everything that shapes
+# the daemon's view of mpv is kept, and --idle=no / --keep-open=no are as
+# load-bearing here as there -- mpv exiting at end of file is how the daemon
+# learns the film is over. --really-quiet is dropped so mpv's complaints reach
+# `docker compose logs`.
+ENV PLAYSTICK_MPV_ARGS="--no-config --vo=null --ao=null --hwdec=no \
+--profile=fast --video-sync=audio --framedrop=vo --interpolation=no \
+--osd-level=0 --no-osc --input-terminal=no --idle=no --keep-open=no \
+--sub-auto=fuzzy --cache=yes --demuxer-max-bytes=48MiB \
+--demuxer-max-back-bytes=16MiB --cache-on-disk=no"
+
+# Identical to the unit's: poster extraction is one part of this that a
+# container reproduces exactly.
+ENV PLAYSTICK_THUMB_ARGS="--no-config --really-quiet --frames=1 --aid=no \
+--sid=no --hwdec=no --vf=scale=320:-2 --vo=image --vo-image-format=jpg \
+--vo-image-jpeg-quality=80"
+
+# Runs as root, as on the appliance (player_user: root) though for far less
+# reason: nothing here needs DRM master or systemctl. It keeps /run/playstick
+# and the poster cache writable without inventing an account, and the only
+# host-visible path is the library, which the daemon never writes to.
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
+
+ENTRYPOINT ["/usr/local/bin/playstick-gui-entrypoint"]
+# python3 rather than executing the file: compose bind-mounts it from the repo,
+# where it is 0644 -- the executable bit comes from the ansible copy, not git.
+CMD ["python3", "/usr/local/bin/playstick-web"]

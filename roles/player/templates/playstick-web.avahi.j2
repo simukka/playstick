@@ -1,0 +1,12 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+{{ ansible_managed | comment('xml') }}
+<!-- So nobody has to remember the stick's IP address. avahi-daemon is already
+     running for AirPlay discovery, so this costs one file. -->
+<service-group>
+  <name replace-wildcards="yes">Movies on %h</name>
+  <service>
+    <type>_http._tcp</type>
+    <port>{{ player_port }}</port>
+  </service>
+</service-group>

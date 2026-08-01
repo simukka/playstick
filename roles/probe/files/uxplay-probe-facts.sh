@@ -69,8 +69,55 @@ run() { printf '\n--- %s\n' "$*"; "$@" 2>&1 || printf '(exit %d)\n' "$?"; }
   pgrep -a wayland || echo '  no stray wayland compositor: good'
   run systemctl get-default
 
-  section "Audio (out of scope, recorded for completeness)"
+  # UxPlay runs with -a and the movie player runs with --ao=null, so nothing
+  # on this box has ever produced a sample. This section is what the decision
+  # to change that should be made from.
+  #
+  # On Cherry Trail, HDMI audio is NOT an HDA codec at hw:0,3 the way it is on
+  # desktop Intel -- it comes out of the i915-created hdmi-lpe-audio platform
+  # device, on a card whose number is not stable across kernels. The signal
+  # worth having is eld_valid: it is the only thing here that distinguishes a
+  # live HDMI sink from a PCM that merely exists.
+  section "Audio (HDMI via the Cherry Trail LPE path)"
   run aplay -l
+  run cat /proc/asound/cards
+  printf '\n--- ELD (is a sink actually attached?)\n'
+  found_eld=0
+  for eld in /proc/asound/card*/eld*; do
+    [ -e "$eld" ] || continue
+    found_eld=1
+    printf '  %s\n' "$eld"
+    grep -E 'eld_valid|monitor_present|monitor_name|sad0' "$eld" | sed 's/^/    /'
+  done
+  [ "$found_eld" = 1 ] || echo '  (no ELD nodes -- LPE audio exposes none on some kernels)'
+  printf '\n--- sound modules\n'
+  lsmod | grep -E 'snd_hdmi_lpe|snd_hda|snd_soc' || echo '  (none bound)'
+
+  section "Movie player"
+  run mpv --version
+  printf '\n--- video outputs\n'
+  mpv --vo=help 2>&1 | grep -E '^\s+(drm|gpu|gpu-next|image)\b' || echo '  (none of interest)'
+  printf '\n--- gpu contexts\n'
+  mpv --gpu-context=help 2>&1 | sed 's/^/  /' | head -20
+  # A large slice of a modern library is H.265. If this profile is absent,
+  # software HEVC on 4x1.44 GHz Airmont is not going to save it, and the
+  # honest answer is "H.264 only" rather than a slideshow.
+  printf '\n--- decodable profiles\n'
+  vainfo --display drm --device /dev/dri/renderD128 2>/dev/null \
+    | grep -E 'H264|HEVC|VP9|VC1' | sed 's/^/  /' || echo '  (vainfo failed)'
+
+  section "NAS share"
+  NAS_MOUNT="${PROBE_NAS_MOUNT:-/srv/movies}"
+  run findmnt -o TARGET,SOURCE,FSTYPE,OPTIONS "$NAS_MOUNT"
+  if [ -d "$NAS_MOUNT" ]; then
+    # Walking the share is what the player does every scan interval, and over
+    # SDIO-attached Wi-Fi the per-file stat is the whole cost. Measure it here
+    # rather than guess at a scan interval.
+    printf '\n--- how slow is a library scan, really\n'
+    scan_start=$SECONDS
+    scan_files=$(find "$NAS_MOUNT" -maxdepth 2 -type f 2>/dev/null | wc -l)
+    printf '  %s files under %s in %d s\n' "$scan_files" "$NAS_MOUNT" "$((SECONDS - scan_start))"
+  fi
 
   # The TS10's Wi-Fi is SDIO-attached. 1080p mirroring wants ~10-25 Mbps
   # sustained with low jitter; if this comes back thin, a USB Ethernet

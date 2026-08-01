@@ -27,4 +27,11 @@
     # After uxplay: the idle screen's subtitle is derived from the advertised
     # AirPlay name, and its assert checks the flags uxplay was configured with.
     - idle
+    # The share before the player, so the library exists to be scanned the
+    # moment the daemon starts.
+    - nas
+    # Last of the display consumers: the player has to stop the AirPlay unit
+    # to take DRM master, so it asserts that unit is installed, and it needs
+    # drm_card_path from graphics and uxplay_port for the mirroring gate.
+    - player
     - probe

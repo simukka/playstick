@@ -14,7 +14,16 @@ services:
       # Read-only on purpose: the container should never be able to rewrite
       # your keys or known_hosts. Consequence -- SSH to the stick once from
       # the host first so its host key is already recorded.
+      #
+      # Mounted at BOTH homes because which user runs depends on the daemon:
+      # rootful Docker uses the UID-matched `ansible` account, rootless uses
+      # root (see actl). OpenSSH resolves ~ from the passwd database and
+      # ignores $HOME, so a single mount at /home/ansible leaves root looking
+      # in /root/.ssh, finding no known_hosts, and failing every connection
+      # with "Host key verification failed" while the host knows the key
+      # perfectly well.
       - ${HOME}/.ssh:/home/ansible/.ssh:ro
+      - ${HOME}/.ssh:/root/.ssh:ro
       # Agent forwarding, so passphrase-protected keys work without the
       # passphrase ever entering the container.
       - ${SSH_AUTH_SOCK:-/dev/null}:/ssh-agent
@@ -32,3 +41,45 @@ services:
     image: uxplay-atom-ansible
     network_mode: host
     entrypoint: ["iperf3", "-s"]
+
+  # `docker compose up gui` -- the movie player's web UI on a dev machine,
+  # at http://localhost:8080/. See Dockerfile.gui for what this does and does
+  # not prove; the short version is that everything except the display is real.
+  gui:
+    build:
+      context: .
+      dockerfile: Dockerfile.gui
+    image: playstick-gui
+    # Published on every interface, like the device is: the page is meant to be
+    # driven from a phone and looking at it on one is most of the point. It has
+    # no authentication, there or here.
+    ports:
+      - "${PLAYSTICK_GUI_PORT:-8080}:8080"
+    volumes:
+      # The repository's own daemon and page, over the copies baked into the
+      # image. Edit the HTML and reload the browser; the daemon re-reads it on
+      # every request. Python changes need `docker compose restart gui`.
+      - ./roles/player/files/playstick-ui.html:/usr/local/share/playstick/ui.html:ro
+      - ./roles/player/files/playstick-web:/usr/local/bin/playstick-web:ro
+      # A generated test library by default. Point it at your own films with
+      # PLAYSTICK_GUI_LIBRARY=/path/to/movies -- read-write only because the
+      # generator populates an empty volume; nothing else here ever writes
+      # under it, and it will not generate into a directory that has files.
+      - "${PLAYSTICK_GUI_LIBRARY:-playstick-gui-library}:/srv/movies"
+      # Named rather than a bind mount, so extracted posters do not turn up in
+      # the repo owned by root. `docker compose down -v` resets both.
+      - playstick-gui-thumbs:/var/cache/playstick/thumbs
+    environment:
+      # The one the device sets and the image cannot: the role's default skip
+      # regex, kept in step with player_skip_pattern.
+      PLAYSTICK_SKIP_PATTERN: 'sample|trailer|extras?\b|behind[ ._-]the[ ._-]scenes'
+      PLAYSTICK_EXTENSIONS: ".mkv .mp4 .m4v .avi .mov .m2ts .ts"
+      # player_allow_networks is deliberately not set: the Docker bridge is
+      # inside 172.16.0.0/12 and would pass it anyway, so enforcing it here
+      # would only ever reject the host and teach nothing.
+    stdin_open: true
+    tty: true
+
+volumes:
+  playstick-gui-library:
+  playstick-gui-thumbs:

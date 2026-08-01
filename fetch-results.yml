@@ -10,6 +10,7 @@
   vars:
     run_facts: true
     run_matrix: false      # opt-in: the matrix takes ~20 minutes and owns the display
+    run_player_probe: false  # opt-in: settles player_vo / player_hwdec; owns the display
     # Narrow the sweep, e.g. -e probe_decoders=vaapih264dec
     #                       -e probe_sinks=fakesink,kms-primary,kms-novsync
     probe_decoders: ""
@@ -26,15 +27,19 @@
       changed_when: false
       when: run_facts | bool
 
-    - name: Stop any running UxPlay unit before the matrix takes the display
+    # Exactly one process may hold DRM master, so anything that can take it has
+    # to be down or every row measures the harness. playstick-web is in the
+    # list because it will start mpv on demand.
+    - name: Stop anything that can take the display before a sweep
       ansible.builtin.systemd:
         name: "{{ item }}"
         state: stopped
       loop:
         - uxplay-kms.service
         - uxplay-cage.service
+        - playstick-web.service
       failed_when: false
-      when: run_matrix | bool
+      when: run_matrix | bool or run_player_probe | bool
 
     - name: Run the measurement matrix
       ansible.builtin.command: /usr/local/bin/uxplay-probe-matrix.sh
@@ -49,6 +54,44 @@
       changed_when: false
       timeout: 3600
       when: run_matrix | bool
+
+    - name: Run the mpv output sweep
+      ansible.builtin.command: /usr/local/bin/playstick-probe-player.sh
+      environment:
+        PROBE_RESULTS_DIR: "{{ probe_results_dir }}"
+        PROBE_CLIP_DIR: "{{ player_probe_clip_dir | default(probe_clip_dir, true) }}"
+        LIBVA_DRIVER_NAME: "{{ libva_driver }}"
+        DRM_CONNECTOR: "{{ drm_force_connector }}"
+        DRM_MODE: "{{ drm_force_mode }}"
+        PROBE_VT: "{{ probe_vt }}"
+        RUNS: "{{ player_probe_runs | default('', true) }}"
+      register: probe_player
+      changed_when: false
+      timeout: 1800
+      when: run_player_probe | bool
+
+    # Whatever the sweeps took down, the device should not be left without.
+    #
+    # This matters more than it reads: the receiver is enabled and running as
+    # of uxplay_output_path, so without this a 20-minute matrix run ends with
+    # the projector dark and stays that way until somebody reboots. It is the
+    # same shape as the failure the player daemon exists to avoid -- something
+    # stopped the receiver for a good reason and nothing owns starting it again.
+    - name: Bring the AirPlay receiver back after a sweep
+      ansible.builtin.systemd:
+        name: "uxplay-{{ uxplay_output_path }}.service"
+        state: started
+      failed_when: false
+      when:
+        - run_matrix | bool or run_player_probe | bool
+        - uxplay_output_path | default('none') != 'none'
+
+    - name: Bring the player back after a sweep
+      ansible.builtin.systemd:
+        name: playstick-web.service
+        state: started
+      failed_when: false
+      when: (run_matrix | bool or run_player_probe | bool) and player_enabled | default(true) | bool
 
     - name: List everything the probes produced
       ansible.builtin.find:
@@ -70,3 +113,8 @@
       ansible.builtin.debug:
         msg: "{{ probe_matrix.stdout_lines[-25:] }}"
       when: run_matrix | bool and probe_matrix.stdout_lines is defined
+
+    - name: Summarise the mpv output sweep
+      ansible.builtin.debug:
+        msg: "{{ probe_player.stdout_lines[-20:] }}"
+      when: run_player_probe | bool and probe_player.stdout_lines is defined

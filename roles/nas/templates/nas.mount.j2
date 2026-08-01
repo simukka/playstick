@@ -1,0 +1,46 @@
+{{ ansible_managed | comment }}
+# The movie library share. Triggered by the matching .automount unit, never
+# started directly and deliberately NOT enabled -- see roles/nas/tasks/main.yml.
+
+[Unit]
+Description=Movie library from //{{ nas_server }}/{{ nas_share }}
+Documentation=man:mount.cifs(8)
+After=network-online.target
+Wants=network-online.target
+
+[Mount]
+What=//{{ nas_server }}/{{ nas_share }}
+Where={{ nas_mount_point }}
+Type=cifs
+
+{# Options, and why each one is here:
+
+    ro            the library is read-only from this device. A child holding
+                  the web UI cannot delete the film collection, and neither
+                  can a bug in the player.
+    credentials=  the password never appears in this unit file, which is
+                  world-readable in /etc/systemd/system. The credentials file
+                  is 0600 root:root.
+    vers=         pinned, see nas_smb_version in defaults/main.yml.
+    iocharset=utf8  film names have accents in them.
+    file_mode/dir_mode  cifs cannot map ownership without unix extensions, so
+                  these are what the mount presents. Read-only to match `ro`.
+    nobrl         suppresses byte-range locks. mpv does not need them and some
+                  NAS firmware answers them slowly or not at all.
+    cache=loose   the library scan stats every file in the share, and CIFS
+                  stat over this box's SDIO-attached Wi-Fi is the expensive
+                  part of building the poster grid. Safe precisely because the
+                  mount is read-only: there is no writer to be incoherent with.
+    actimeo=60    same reason -- hold attributes for a minute instead of
+                  re-asking the server for each of them.
+
+    No _netdev here: that is an fstab-generator option, and ordering against
+    the network is expressed by After=/Wants= above instead. #}
+Options=ro,{% if nas_username | length > 0 %}credentials={{ nas_credentials_file }}{% else %}guest{% endif %},vers={{ nas_smb_version }},iocharset=utf8,file_mode=0444,dir_mode=0555,nobrl,cache=loose,actimeo=60{{ ',' ~ nas_mount_options_extra if nas_mount_options_extra | length > 0 else '' }}
+
+# Fail fast rather than hang. Something walking into the mount point while the
+# NAS is off blocks in the kernel until this expires, and the thing walking in
+# is the player's library scan. 15s is long enough for a sleeping NAS to answer
+# and short enough that the web UI can say "unavailable" while a child is still
+# looking at it.
+TimeoutSec=15

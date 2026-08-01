@@ -1,0 +1,110 @@
+---
+# The movie player: mpv on a bare DRM plane, driven from a phone browser.
+#
+# See the header of files/playstick-web for why the daemon arbitrates the
+# display itself rather than expressing it with Conflicts=. The short version:
+# uxplay-kms takes DRM master when the service starts, DRM master is exclusive,
+# and systemd will stop a conflicting unit but never start it again.
+
+player_enabled: true
+
+# Which unit owns the display when nothing is playing, i.e. the one to stop
+# for the length of a film and start again afterwards.
+#
+# Derived from uxplay_output_path rather than set, so the daemon cannot end up
+# stopping a unit that was never running while the one that was goes on holding
+# the card -- the film would then play to a black screen and AirPlay would stay
+# up. Falls back to the KMS unit when uxplay_output_path is "none": both unit
+# files exist either way, and the arbiter only ever restores what it actually
+# took away.
+#
+# Override to pin it to a specific unit; the two just have to agree.
+player_airplay_unit: >-
+  uxplay-{{ uxplay_output_path
+            if uxplay_output_path | default('kms') in ['kms', 'cage']
+            else 'kms' }}.service
+
+# Root, and stated plainly rather than worked around. mpv has to become DRM
+# master and the arbiter has to start and stop a system unit; the alternative
+# is a dedicated account in video/render plus a polkit rule for two systemctl
+# verbs, which is more moving parts than it protects on an appliance with one
+# service on it and no firewall. The control that actually matters is that no
+# filesystem path ever crosses the HTTP boundary -- see the module header in
+# files/playstick-web.
+player_user: root
+player_bind: "0.0.0.0"
+player_port: 8080
+
+# Advertise the UI as _http._tcp so it is reachable at
+# http://<hostname>.local:<port>/ without anyone typing an IP address.
+# avahi-daemon is already required for AirPlay, so this is free.
+player_advertise_mdns: true
+
+# Reject clients outside these networks at the handler. ufw is purged by the
+# trim role by explicit decision, so this is the only filtering there is --
+# and it is thin: it keeps a misconfigured router from exposing the UI, not a
+# determined neighbour off your Wi-Fi. Empty disables the check.
+player_allow_networks:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 127.0.0.0/8
+
+# --- library ------------------------------------------------------------
+player_library_path: "{{ nas_mount_point }}"
+player_extensions: [".mkv", ".mp4", ".m4v", ".avi", ".mov", ".m2ts", ".ts"]
+
+# Two filters, in the order they cost. The size test is free -- the scan has
+# already stat'ed the file -- and removes samples, trailers and stray extras
+# without needing the regex to be right. The regex is the backstop.
+player_min_size_mb: 100
+player_skip_pattern: "sample|trailer|extras?\\b|behind[ ._-]the[ ._-]scenes"
+
+# How deep to recurse. 2 is "the share, and one folder per film". Recursion is
+# the expensive part over CIFS, and a media library that needs more than two
+# levels is a library that wants a metadata database, not this.
+player_scan_depth: 2
+player_scan_interval: 300
+
+# --- posters ------------------------------------------------------------
+player_thumb_dir: /var/cache/playstick/thumbs
+player_thumb_width: 320
+# A fifth of the way in, so tiles show the film rather than a distributor's
+# logo or a black fade-in.
+player_thumb_at: "20%"
+player_thumb_timeout: 60
+
+# --- mpv ----------------------------------------------------------------
+# Video output. THIS IS THE ONE TO MEASURE FIRST -- see the rationale in
+# group_vars/all.yml, which is where these two are set.
+#
+#   drm  = software decode into a dumb buffer. The closest structural analogue
+#          of the pipeline that ships for UxPlay (29.19 fps, 0.00% drop), and
+#          the configuration with the fewest unproven parts, which is why it
+#          is the default.
+#   gpu  = GBM/EGL. Lets --hwdec=vaapi keep frames on the GPU via dmabuf and
+#          does any scaling there too -- probably faster, entirely unproven on
+#          this box, where nothing has ever run GL.
+player_vo: drm
+player_gpu_context: drm
+player_hwdec: "no"
+
+# Audio is out of scope for now: on Cherry Trail, HDMI audio goes through
+# snd_hdmi_lpe_audio -- the same LPE block that uxplay_suppress_audio exists
+# to avoid -- and nothing on this box has ever produced a sample. False means
+# --ao=null and silent films, and the page hides its volume buttons rather
+# than showing a child two controls that do nothing.
+#
+# The facts probe now reports what ALSA devices exist and whether any of them
+# has a live ELD, which is what this decision should be made from. When it is
+# made: set this true and set player_audio_device.
+player_audio: false
+player_audio_device: ""            # e.g. "alsa/hw:0,3"; empty means mpv's default
+player_audio_channels: stereo
+
+player_mpv_extra_args: ""
+
+# Seconds to wait after the AirPlay unit reports inactive before mpv reaches
+# for the card. The fd is closed by the kernel when the process exits, so this
+# is slack rather than a requirement.
+player_settle_seconds: 1.0

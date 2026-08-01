@@ -1,0 +1,51 @@
+---
+# The movie library: a read-only CIFS share from the NAS, mounted on demand.
+#
+# Mounted through a systemd .automount rather than a plain fstab entry. The
+# difference matters on a headless stick: an fstab CIFS entry that cannot
+# reach the server delays boot until it times out, and this device has no
+# console to explain itself with. An .automount unit is satisfied instantly at
+# boot and only attempts the mount when something walks into the directory --
+# so a NAS that is off, or a network that came up late, costs nothing.
+
+nas_enabled: true
+
+# Server and share. Both empty means "not configured yet": the role then
+# installs nothing and the player role reports the library as unavailable
+# rather than failing the play.
+nas_server: ""
+nas_share: ""
+
+# Where the share appears. The systemd unit names are derived from this via
+# systemd-escape, so /srv/movies becomes srv-movies.mount / srv-movies.automount.
+nas_mount_point: /srv/movies
+
+# Credentials. Put these in a vault file, not here:
+#   ./actl 'ansible-vault create host_vars/vivostick/vault.yml'
+# and reference them as nas_username / nas_password there.
+#
+# NOT group_vars/all/vault.yml: a directory named group_vars/all shadows
+# group_vars/all.yml outright, which would take every tunable in that file out
+# of play at the same time as it enabled the share. See docs/install.md.
+#
+# An empty username mounts as guest, which is what a NAS share published
+# without authentication wants.
+nas_username: ""
+nas_password: ""
+nas_domain: ""
+nas_credentials_file: /etc/playstick/nas.cred
+
+# SMB dialect. Pinned rather than negotiated: cifs.ko's autonegotiation starts
+# at the highest dialect and walks down, and each rejected attempt costs a
+# round trip on a link that is already SDIO-attached Wi-Fi. 3.1.1 is what any
+# NAS made since about 2015 speaks. Drop to "2.1" for older firmware; do not
+# drop to "1.0" -- SMB1 is off by default in the kernel for good reasons.
+nas_smb_version: "3.1.1"
+
+# Unmount the share after this many seconds with nothing reading it. Keeps a
+# dropped NAS from leaving a hung mount behind, and lets the Wi-Fi go quiet
+# between films. 0 disables the idle timeout.
+nas_idle_timeout: 600
+
+# Appended verbatim to the mount options, e.g. "sec=ntlmssp" or "nounix".
+nas_mount_options_extra: ""

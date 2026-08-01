@@ -40,6 +40,18 @@
   failed_when: false   # group name varies by packaging; cage falls back to logind
 
 # --- the two mutually exclusive units -----------------------------------
+- name: Accept only an output path that exists
+  ansible.builtin.assert:
+    # default('') rather than a bare reference: an undefined variable here
+    # would abort with a Jinja error instead of the message below.
+    that: uxplay_output_path | default('') in ['kms', 'cage', 'none']
+    fail_msg: >-
+      uxplay_output_path is {{ uxplay_output_path | default('undefined') }};
+      it must be kms, cage or none.
+    success_msg: >-
+      Output path: {{ 'neither unit enabled' if uxplay_output_path == 'none'
+                      else 'uxplay-' ~ uxplay_output_path ~ '.service' }}.
+
 - name: Install the KMS (no compositor) unit
   ansible.builtin.template:
     src: uxplay-kms.service.j2
@@ -47,6 +59,7 @@
     owner: root
     group: root
     mode: "0644"
+  register: uxplay_kms_unit
   notify: Reload systemd
 
 - name: Install the cage (Wayland kiosk) unit
@@ -56,19 +69,51 @@
     owner: root
     group: root
     mode: "0644"
+  register: uxplay_cage_unit
   notify: Reload systemd
 
 - name: Flush handlers so the units are known before anything starts them
   ansible.builtin.meta: flush_handlers
 
-# Neither unit is enabled here. Which one wins is a probe result, not a
-# guess -- see README, "Choosing the output path".
-- name: Report how to enable an output path
+# Both units are installed; exactly one runs. Stop the other one FIRST --
+# Conflicts= would have systemd do it anyway when the winner starts, but that
+# leaves it enabled, and an enabled loser comes back at the next boot and
+# takes the display from the winner in whatever order the two units happen to
+# reach. Disabling it is the part that makes this stick.
+- name: Disable the output path that is not in use
+  ansible.builtin.systemd:
+    name: "uxplay-{{ item }}.service"
+    enabled: false
+    state: stopped
+  loop: "{{ ['kms', 'cage'] | difference([uxplay_output_path]) }}"
+
+- name: Enable and start the AirPlay receiver
+  ansible.builtin.systemd:
+    name: "uxplay-{{ uxplay_output_path }}.service"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: uxplay_output_path != 'none'
+
+# Not a handler, for the reason the idle and player roles say: a handler runs
+# at the end of the play, and a re-provision should leave the projector
+# showing the receiver that was just configured, not the previous one. A
+# running mirroring session is dropped, which is correct for a re-provision.
+- name: Restart the receiver after a change  # noqa: no-handler
+  ansible.builtin.systemd:
+    name: "uxplay-{{ uxplay_output_path }}.service"
+    state: restarted
+  when:
+    - uxplay_output_path != 'none'
+    - (uxplay_kms_unit if uxplay_output_path == 'kms' else uxplay_cage_unit) is changed
+
+- name: Report that no output path was enabled
   ansible.builtin.debug:
     msg:
-      - "Units installed but NOT enabled -- run the probes first."
+      - "uxplay_output_path is 'none' -- both units installed, neither enabled."
       - "  systemctl enable --now uxplay-kms.service    # pure DRM/KMS"
       - "  systemctl enable --now uxplay-cage.service   # cage + waylandsink"
+  when: uxplay_output_path == 'none'
 
 # --- tty1 ---------------------------------------------------------------
 # kmssink becomes DRM master by being the first process to open the card.

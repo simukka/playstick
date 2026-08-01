@@ -31,5 +31,24 @@ if [ $# -eq 0 ]; then
   set -- "ansible-playbook --syntax-check site.yml fetch-results.yml && echo OK"
 fi
 
+# Rootless Docker inverts the ownership problem this script exists to solve.
+#
+# Rootful: the daemon runs as root, container UID n == host UID n, so the image
+# builds a user matching yours and files written into /work come back yours.
+#
+# Rootless: the daemon runs as you, and the namespace maps container UID 0 to
+# your host UID -- everything else in the container goes to a subuid with no
+# claim on your files. So the matched-UID user is precisely the one that CANNOT
+# write to the mounted repo: `ansible-vault create`, make-testclip.sh and
+# fetch-results' fetch into results/ all fail with "not writable" or
+# "Permission denied". Running as container root is what maps back to you.
+#
+# Both cases therefore want "the user that owns your files", and which UID that
+# is depends on the daemon, so ask it.
+run_as=()
+if docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q 'name=rootless'; then
+  run_as=(--user root)
+fi
+
 # The entrypoint is `bash -lc`, so pass the command as a single string.
-exec docker compose run --rm ansible "$*"
+exec docker compose run --rm "${run_as[@]}" ansible "$*"

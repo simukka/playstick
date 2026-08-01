@@ -73,17 +73,23 @@ source of failure. If audio is wanted later, a USB audio adapter sidesteps the S
 ansible.cfg              inventory path, pipelining, longer timeouts
 inventory.yml            single host: vivostick  <- fill in host + user
 group_vars/all.yml       every tunable lives here
-site.yml                 base -> trim -> graphics -> uxplay -> idle -> probe
+site.yml                 base -> trim -> graphics -> uxplay -> idle -> nas -> player -> probe
 fetch-results.yml        run the probes, pull output into results/
+Dockerfile               the Ansible control node
+Dockerfile.gui           the web UI on a dev machine, no hardware needed
 scripts/make-testclip.sh build H.264 test clips on the CONTROL machine
+scripts/gui-*            entrypoint and AirPlay stub for Dockerfile.gui
 roles/
   base/      apt components, uxplay service account, zram
   trim/      strip services/packages the kiosk does not need
   graphics/  i965 VA-API stack, modetest, the hardware-decode assert gate
-  uxplay/    uxplay + avahi + cage/seatd, both systemd units, tty1
+  uxplay/    uxplay + avahi + cage/seatd, both units, one of them started, tty1
   idle/      the framebuffer clock shown when nothing is mirroring
+  nas/       read-only CIFS automount for the movie library
+  player/    mpv + the web UI a child drives it from, and the display arbiter
   probe/     measurement scripts and test clips
-docs/        matrix-narrative.md — how this was measured, and what fooled me
+docs/        install.md — every command, in order, including the vault
+             matrix-narrative.md — how this was measured, and what fooled me
 results/     probe output fetched back (gitignored)
 ```
 
@@ -102,7 +108,12 @@ test clips, iperf3 for the throughput probe — so Docker is the only host requi
 ./actl ./scripts/make-testclip.sh
 ./actl bash                                   # poke around
 docker compose up iperf                       # iperf3 -s on host networking
+docker compose up gui                         # the web UI at :8080, no device
 ```
+
+That last one is a different image with a different job — `Dockerfile.gui` runs
+what Ansible would have installed rather than installing it. See
+[The UI, on a development machine](#the-ui-on-a-development-machine).
 
 `actl` wraps `docker compose run`, exporting `HOST_UID`/`HOST_GID` so anything written into the
 mounted repo — `results/`, generated clips — comes back owned by you rather than by root. (Not
@@ -138,6 +149,9 @@ sudo-rs gains prompt support.
 
 ## Usage
 
+The short version is below. Every command in order, including the vault, is in
+**[docs/install.md](docs/install.md)**.
+
 ```bash
 # 0. control machine: a test clip (skip if using ./actl for everything)
 ./scripts/make-testclip.sh             # needs ffmpeg; writes to roles/probe/files/
@@ -159,8 +173,11 @@ ansible-playbook fetch-results.yml -K -e probe_iperf_server=<x1-ip>
 ansible-playbook fetch-results.yml -K -e run_matrix=true   # ~20 min, owns the display
 ```
 
-Neither UxPlay unit is enabled by `site.yml`. That is deliberate — which one wins is a probe
-result, not a guess.
+`site.yml` enables and starts one UxPlay unit — `uxplay_output_path`, which defaults to `kms`.
+It used to enable neither, on the grounds that which one wins is a probe result rather than a
+guess; the sweep has since been run, and a device that comes up as an AirPlay receiver by itself
+is worth more than that reservation. Set `uxplay_output_path: none` to get the old behaviour
+back.
 
 Step 3 is not optional on first provision: `drm_force_mode` writes the kernel cmdline, and until
 the box reboots you are still measuring the old display mode.
@@ -172,8 +189,11 @@ Shorten them with `DURATION=30 ./scripts/make-testclip.sh` if you want faster sw
 ## Choosing the output path
 
 Two units are installed, `Conflicts=` each other, and only one should ever be enabled.
+`uxplay_output_path` picks which — `kms`, `cage`, or `none` for neither — and the `uxplay` role
+enables and starts that one while stopping *and disabling* the other. Disabling matters: an
+enabled loser comes back at the next boot and races the winner for the card.
 
-**`uxplay-kms.service`** — pure DRM/KMS, no compositor at all.
+**`uxplay-kms.service`** — pure DRM/KMS, no compositor at all. The default.
 
 UxPlay's GStreamer pipeline ends in `kmssink`, which writes to a DRM plane on the i915 node. It
 becomes DRM master simply by being the first process to open the card: i915's fbdev console
@@ -200,15 +220,21 @@ Connectors present: `card1-HDMI-A-1` (the projector) and `card1-DP-1`.
 no X. Costs ~30 MB and one more moving part, and buys seat/DRM-master handling plus EDID re-read
 on projector hotplug.
 
-Enable the winner:
+Switch paths:
 
 ```bash
-ansible vivostick -b -m systemd -a 'name=uxplay-kms.service enabled=true state=started'
+./actl 'ansible-playbook site.yml -K -e uxplay_output_path=cage'   # try it
+$EDITOR group_vars/all.yml                                         # keep it
 ```
 
 Expect the hotplug behaviour to be the deciding factor rather than raw throughput: a projector
 that gets unplugged between sessions is the normal case, and wlroots handles that re-read where
 bare `kmssink` may not.
+
+Two things follow the choice automatically, and both would be silent bugs if they did not.
+`player_airplay_unit` is derived from it, so the film player stops and restarts whichever
+receiver is actually running rather than a hardcoded one. And the `idle` role refuses to run at
+all on the cage path — see [Limitations](#limitations) below.
 
 ## Idle screen
 
@@ -287,12 +313,172 @@ compositor owns the CRTC for its whole lifetime and never returns it to the fbde
 clock would be permanently invisible. An idle screen for that path would have to be a Wayland
 client.
 
+Now that the receiver is started rather than left for an operator, the `idle` role asserts the
+combination away: `uxplay_output_path: cage` with `idle_enabled: true` fails the play and names
+the line to change. The dangerous half is not the invisible clock — `Conflicts=` runs both ways,
+so starting the clock afterwards would *stop the receiver*, trading a working projector for a
+screen nobody can see.
+
 **Stop it during probe sweeps.** `uxplay-probe-matrix.sh` runs pipelines on VT1 via `openvt`;
 `systemctl stop uxplay-idle` first removes the variable.
 
 ```bash
 systemctl disable --now uxplay-idle.service    # rollback
 ```
+
+## Movies from the NAS
+
+The second thing this box does: play files off a read-only CIFS share directly, with no
+compositor and no phone in the loop, driven from a web page anyone on the LAN can open.
+The page is deliberately small enough for a child — a grid of posters, tap one, then a
+large play/pause and a large stop. There is no seek bar; a control that can lose your
+place is a control that produces tears.
+
+```bash
+# group_vars/all.yml
+nas_server: "10.0.1.5"
+nas_share: "movies"
+
+# host_vars/vivostick/vault.yml -- encrypted, and that path is load-bearing
+nas_username: "kyle"
+nas_password: "…"
+```
+
+`vivostick` is a *host*, so `group_vars/vivostick/` is silently never read and
+`group_vars/all/` silently shadows `group_vars/all.yml`. The full command sequence is in
+[docs/install.md](docs/install.md#4-secrets-the-vault).
+
+Then `http://vivostick.local:8080/` from any phone on the LAN — the `player` role
+advertises the UI over the avahi daemon that is already running for AirPlay, so nobody
+has to know the stick's IP address.
+
+### AirPlay is unavailable while a film plays
+
+This is a property of the hardware, not a shortcut, and it is the same fact that forced
+the idle clock to draw pixels: **there is one CRTC and one DRM master, and `uxplay-kms`
+takes the card when the service starts, not when a client connects.** mpv therefore cannot
+share it. The receiver has to be stopped for the length of a film, and while it is stopped
+the stick does not appear in the iOS AirPlay list at all, because UxPlay is what publishes
+the mDNS record. It comes back a few seconds after the film ends.
+
+The interlock in the other direction is a check rather than a race: `playstick-web` refuses
+to start a film while an established TCP connection to UxPlay's port says somebody is
+mirroring. Mirroring wins, because somebody is standing there holding a phone. The check is
+debounced over two samples a second apart — iOS opens brief connections to `:7000` merely
+from having the AirPlay picker on screen, and a single sample would refuse to play a film
+because someone across the room glanced at a menu.
+
+### Why the daemon arbitrates instead of `Conflicts=`
+
+`Conflicts=uxplay-kms.service` on an mpv unit was the first design. systemd will happily
+stop the receiver for the conflict and then has no reason to ever start it again — a film
+that ends at 21:30 leaves the projector with no AirPlay until somebody notices. Restoring
+it is a decision, so it lives in the daemon, which records what it took the display from
+before it stops anything. If the daemon is killed mid-film, `Restart=always` brings it back
+and it reads that record on startup; `KillMode=control-group` means mpv died with it, and
+`ExecStopPost=` covers a clean stop. `/run` is tmpfs, so a reboot clears the lot, which is
+correct — a boot starts the receiver itself.
+
+The idle clock needs no arbitration, for the reason it never did: it holds no DRM master,
+its writes land in the fbdev buffer, and they are invisible while anything else scans out.
+It gains exactly one thing, `IDLE_BUSY_FILE`, so the blank countdown does not run out
+partway through a film and leave the clock blanked when it comes back.
+
+### What is unproven, and how to settle it
+
+**`player_vo` and `player_hwdec` ship at `drm` / `no`** — software decode into a dumb
+buffer, the closest structural analogue of the pipeline that measured 29.19 fps / 0.00%
+drop for UxPlay. That looks like it contradicts the VA-API result above and it does not:
+that result was a *GStreamer* readback stall, and mpv's `--vo=gpu --gpu-context=drm
+--hwdec=vaapi` path exports the VA surface as a dmabuf and samples it on the GPU, so the
+stall is structurally absent. Hardware decode very likely wins here. It is an expectation,
+not a measurement, and nothing on this box has ever run GL — so the default is the
+configuration with the fewest unproven parts until the sweep says otherwise:
+
+```bash
+./actl 'ansible-playbook fetch-results.yml -e run_player_probe=true'
+```
+
+Watch the `hwdec_used` column: a `vaapi` run that reports `vaapi-copy` fell back to the
+readback path, and its numbers are not measuring the hypothesis.
+
+`--drm-mode` is pinned to `drm_force_mode` and that is load-bearing. `kmssink` never
+modesets, so UxPlay inherits whatever the kernel cmdline set; **mpv picks its own mode**,
+and left at `preferred` it would choose this projector's EDID-preferred `1920x1080i@60` —
+silently undoing `drm_force_mode` and putting a deinterlacer back in the path.
+
+**Audio is off and films play silently.** `player_audio: false`, mpv runs `--ao=null`. On
+Cherry Trail, HDMI audio does not come out of an HDA codec at `hw:0,3` the way it does on
+desktop Intel — it goes through the i915-created `hdmi-lpe-audio` device, i.e. the same LPE
+block `uxplay_suppress_audio` exists to avoid. Nothing on this box has ever produced a
+sample. The facts probe now reports the ALSA cards, their ELD state and whether the LPE
+module is bound; read that, then set `player_audio: true` and `player_audio_device`. If the
+platform is as unreliable as this README warns elsewhere, a USB audio adapter sidesteps the
+SoC path entirely and `player_audio_device` is the only line that changes.
+
+**H.265 is the real content risk, not 1080p.** If `vainfo` shows no `VAProfileHEVCMain :
+VAEntrypointVLD`, software HEVC on 4×1.44 GHz Airmont will not save it. The facts probe
+prints the decodable profiles.
+
+### No authentication
+
+`ufw` is purged by explicit decision, so port 8080 is open to the LAN and anyone on it can
+start a film — consistent with UxPlay next door accepting unauthenticated mirroring.
+`player_allow_networks` rejects clients outside RFC1918 at the handler, which keeps a
+misconfigured router from publishing the UI to the internet and is not a defence against
+anybody already on your Wi-Fi. The control that does matter is that no filesystem path ever
+crosses the HTTP boundary: the page addresses films by an opaque id that indexes a table
+the daemon built by walking the share, every resolved path is re-checked for containment
+before it reaches mpv, and there is no endpoint that streams file bytes.
+
+```bash
+systemctl disable --now playstick-web.service   # rollback
+systemctl disable --now srv-movies.automount    # and the share
+```
+
+### The UI, on a development machine
+
+`Dockerfile.gui` runs the player without a VivoStick, a projector or a NAS in
+the loop, so the page can be iterated on at a desk — and looked at on a phone,
+which is what it is for.
+
+```bash
+docker compose up gui                            # http://localhost:8080/
+PLAYSTICK_GUI_LIBRARY=~/Videos docker compose up gui   # your own films
+docker compose down -v                           # reset the library and posters
+```
+
+The daemon and the page are bind-mounted from `roles/player/files/`, and the
+daemon re-reads `ui.html` on every request: edit the HTML, reload the browser.
+Python changes need `docker compose restart gui`. With no library mounted the
+entrypoint generates one out of lavfi test patterns, named the way a real
+collection is — most of what the library code does is undo those names, and a
+test library of `movie1.mkv` would never exercise it. Two of the seven files
+are filtered on purpose, one by the skip regex and one by `player_scan_depth`.
+
+**What it tests faithfully.** mpv is real, so the library scan, `clean_title`,
+the poster pipeline, the play/pause/stop state machine, the progress bar and
+the AirPlay interlock behave exactly as they do on the device. The interlock is
+the interesting one, and it needs no iPhone — the daemon only ever asks `ss`
+whether something holds an established connection to UxPlay's port:
+
+```bash
+docker compose exec gui fake-airplay    # ^C to release
+```
+
+The grid greys out, and a play request is refused with 409. Expect the refusal
+to take two seconds: `airplay_confirmed()` samples twice, a second apart.
+
+**What it cannot tell you: anything about the display**, which is most of what
+makes this project hard. A container has no DRM node, no tty1, no VA-API and no
+systemd, so `--vo=drm`, `--drm-mode`, the DRM-master arbitration against
+`uxplay-kms.service` and every number under [Results](#results-so-far) stay
+device-only questions. mpv runs `--vo=null` here: the film is decoded and paced
+in real time and nothing is drawn. Two deviations from the unit are deliberate
+and worth knowing before trusting what you see — `PLAYSTICK_MIN_SIZE_MB=0`,
+because the generated clips are a few MB against the device's 100 MB floor, and
+`PLAYSTICK_AUDIO=1`, because the page hides its volume controls otherwise and
+they would never be looked at. Set it to `0` to see the layout as it ships.
 
 ## Results so far
 
@@ -533,6 +719,9 @@ systemctl disable --now uxplay-idle.service   # stop the console clock
 systemctl unmask --now getty@tty1.service     # restore the local console
 ```
 
+The first line is undone by the next `site.yml` run, which is the point of `uxplay_output_path`:
+set it to `none` if the receiver should stay off across provisions.
+
 `uxplay-idle.service` sets `TTYReset=yes`, so stopping it hands tty1 back in a usable state. The
 console font and blanking timeout it changed are not restored — `setfont` with no argument and
 `setterm --blank 10` do that, or just reboot.
@@ -546,6 +735,7 @@ All in `group_vars/all.yml`.
 | `drm_force_mode` | `1280x720@60` | Forces the HDMI mode via kernel cmdline. **Reboot required.** |
 | `drm_force_connector` | `HDMI-A-1` | Which connector the above applies to |
 | `drm_card_path` | *(auto)* | i915 DRM node; discovered, not assumed to be `card0` |
+| `uxplay_output_path` | `kms` | Which receiver is enabled and started: `kms`, `cage` or `none` |
 | `uxplay_decoder` | `avdec_h264` | Software. See [Results](#results-so-far) — measured, not a compromise |
 | `uxplay_request_size` | *(derived)* | `-s`, the resolution asked of the client. Follows `drm_force_mode` |
 | `uxplay_request_fps` | `30` | Frame rate asked of the client; not the scanout rate |
@@ -564,6 +754,16 @@ All in `group_vars/all.yml`.
 | `enable_zram` / `claim_tty1` | `true` / `true` | zram swap; mask `getty@tty1` for kmssink |
 | `trim_enabled` | `true` | The whole trim role |
 | `probe_iperf_server` | `""` | Control-machine address for the throughput test |
+| `nas_server` / `nas_share` | `""` / `""` | The CIFS movie library. Both empty skips the role entirely |
+| `nas_mount_point` | `/srv/movies` | Where the share appears; the unit names are derived from it |
+| `nas_username` / `nas_password` | `""` | Vault these. Empty username mounts as guest |
+| `player_vo` / `player_hwdec` | `drm` / `no` | Unproven pair — see [Movies from the NAS](#movies-from-the-nas) |
+| `player_audio` | `false` | `--ao=null`. **Films play silently** until HDMI audio is probed |
+| `player_enabled` / `player_port` | `true` / `8080` | The web UI |
+| `player_airplay_unit` | *(derived)* | The unit the player stops to take DRM master. Follows `uxplay_output_path` |
+
+The rest live in `roles/nas/defaults/main.yml` and `roles/player/defaults/main.yml`, the way
+`idle_*` and `trim_*` already do.
 
 ### On `drm_force_mode`
 

@@ -46,6 +46,7 @@ BLANK_MINUTES = int(os.environ.get("IDLE_BLANK_MINUTES", "30") or 0)
 POLL_SECONDS = max(1, int(os.environ.get("IDLE_POLL_SECONDS", "5") or 5))
 PORT = os.environ.get("IDLE_PORT", "")
 CLOCK_SCALE = int(os.environ.get("IDLE_CLOCK_SCALE", "0") or 0)
+BUSY_FILE = os.environ.get("IDLE_BUSY_FILE", "")
 
 CLOCK_LEVEL = 0xFF          # white
 SUBTITLE_LEVEL = 0xA0       # dimmer, so the time reads first
@@ -203,13 +204,21 @@ def compose(screen, font, text, subtitle):
 # --- session detection ----------------------------------------------------
 
 def session_active():
-    """True while a client holds a TCP connection to UxPlay.
+    """True while something else is using the display.
 
     Deliberately NOT 'is the DRM node open': uxplay-kms holds that from
     startup to shutdown, so it can never distinguish idle from mirroring. This
     only drives the blank countdown -- drawing is unconditional, because
     writes made during a session are invisible rather than harmful.
+
+    Two things count. An established TCP connection to UxPlay's port means
+    somebody is mirroring. IDLE_BUSY_FILE existing means the movie player has
+    taken the display; without that check the blank countdown would fire
+    partway through a film -- invisibly, but the clock would then come back
+    blanked and stay that way until the minute ticked over.
     """
+    if BUSY_FILE and os.path.exists(BUSY_FILE):
+        return True
     if not PORT:
         return False
     try:

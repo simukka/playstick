@@ -1,0 +1,163 @@
+{{ ansible_managed | comment }}
+# The movie player: a web UI on the LAN and the arbiter that decides who owns
+# the display. See the header of /usr/local/bin/playstick-web for why the
+# arbitration lives in the daemon rather than in Conflicts= directives.
+#
+# Not ordered After= the NAS automount on purpose. RequiresMountsFor= or a
+# dependency on the .mount unit sounds right and defeats the point of the
+# automount: it forces a real mount at unit start, so a NAS that is switched
+# off turns "no films tonight" into "the player service failed to start". The
+# daemon treats an unreachable share as a state to report, not a reason to die.
+
+[Unit]
+Description=Playstick movie player (web UI and display arbiter)
+Documentation=file:///usr/local/bin/playstick-web
+After=network-online.target {{ player_airplay_unit }}
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ player_user }}
+
+# Holds the mpv IPC socket, the busy flag the idle clock watches, and the
+# record of which unit we took the display from. Preserved across a restart of
+# this service so a crashed daemon can still work out what it owes.
+RuntimeDirectory=playstick
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+Environment=PLAYSTICK_BIND={{ player_bind }}
+Environment=PLAYSTICK_PORT={{ player_port }}
+Environment=PLAYSTICK_UI=/usr/local/share/playstick/ui.html
+Environment=PLAYSTICK_LIBRARY={{ player_library_path }}
+Environment="PLAYSTICK_EXTENSIONS={{ player_extensions | join(' ') }}"
+Environment=PLAYSTICK_MIN_SIZE_MB={{ player_min_size_mb }}
+Environment=PLAYSTICK_SCAN_DEPTH={{ player_scan_depth }}
+Environment=PLAYSTICK_SCAN_INTERVAL={{ player_scan_interval }}
+Environment="PLAYSTICK_SKIP_PATTERN={{ player_skip_pattern }}"
+Environment="PLAYSTICK_ALLOW_NETWORKS={{ player_allow_networks | join(' ') }}"
+Environment=PLAYSTICK_THUMB_DIR={{ player_thumb_dir }}
+{# systemd expands '%' as a specifier in unit files, so the "20%" that means
+   "a fifth of the way in" would arrive as an undefined specifier. Doubling
+   escapes it -- the same trap the idle unit hits with its "%H:%M". #}
+Environment=PLAYSTICK_THUMB_AT={{ player_thumb_at | replace('%', '%%') }}
+Environment=PLAYSTICK_THUMB_TIMEOUT={{ player_thumb_timeout }}
+Environment=PLAYSTICK_MPV_SOCKET=/run/playstick/mpv.sock
+Environment=PLAYSTICK_BUSY_FILE={{ idle_busy_file }}
+Environment=PLAYSTICK_RESTORE_FILE=/run/playstick/restore-airplay
+Environment=PLAYSTICK_AIRPLAY_UNIT={{ player_airplay_unit }}
+Environment=PLAYSTICK_SETTLE_SECONDS={{ player_settle_seconds }}
+Environment=PLAYSTICK_AUDIO={{ 1 if player_audio | bool else 0 }}
+{# The gate that refuses to start a film while somebody is mirroring. Same
+   port, same question, as the idle clock's blank countdown. #}
+Environment=PLAYSTICK_AIRPLAY_PORT={{ uxplay_port }}
+{# Pinned for the same reason it is pinned on the UxPlay unit: iHD does not
+   cover Gen8 LP, and libva autodetection will find it anyway. #}
+Environment=LIBVA_DRIVER_NAME={{ libva_driver }}
+
+{# mpv's flags. Built here rather than in the daemon so that policy stays in
+    Ansible and the Python stays mechanism.
+
+    --drm-mode is the one that is easy to miss and expensive to get wrong.
+    kmssink never modesets -- force-modesetting=true fails on this driver, 0 of
+    24 runs -- so UxPlay simply inherits whatever mode the kernel cmdline set.
+    mpv is the first thing on this box that picks its own mode, and left at
+    "preferred" it would pick the connector's preferred mode. On this projector
+    both detailed timings in the base EDID block are interlaced, so that is
+    1920x1080i@60: it would silently undo drm_force_mode and put a deinterlacer
+    back in the path. Pin it to the mode the cmdline already forces.
+
+    --video-sync=audio rather than display-resample: the latter resamples audio
+    against the display clock every frame, and this CPU has no headroom to
+    spend on that. --profile=fast selects bilinear scaling and no dither, which
+    is the right trade on 12 execution units.
+
+    --input-terminal=no matters because the daemon hands mpv tty1 on stdin (its
+    DRM backend wants a VT for console switching). Without this mpv would put
+    that terminal into raw mode and act on stray console keystrokes.
+
+    --keep-open=no and --idle=no are load-bearing for the arbitration: mpv must
+    exit at end of file, because its exit is how the daemon learns to give the
+    display back. #}
+{% set mpv_argv = [
+     '--no-config',
+     '--really-quiet',
+     '--vo=' ~ player_vo,
+     ('--gpu-context=' ~ player_gpu_context) if player_vo in ['gpu', 'gpu-next'] else '',
+     '--drm-device=' ~ (drm_card_path | default('/dev/dri/by-path/pci-' ~ drm_pci_slot ~ '-card', true)),
+     '--drm-connector=' ~ drm_force_connector,
+     '--drm-mode=' ~ (drm_force_mode if drm_force_mode | length > 0 else 'preferred'),
+     '--hwdec=' ~ player_hwdec,
+     '--profile=fast',
+     '--video-sync=audio',
+     '--framedrop=vo',
+     '--interpolation=no',
+     '--osd-level=0',
+     '--no-osc',
+     '--input-terminal=no',
+     '--idle=no',
+     '--keep-open=no',
+     '--sub-auto=fuzzy',
+     '--cache=yes',
+     '--demuxer-max-bytes=48MiB',
+     '--demuxer-max-back-bytes=16MiB',
+     '--cache-on-disk=no',
+     ('--ao=alsa' if player_audio | bool else '--ao=null'),
+     ('--audio-device=' ~ player_audio_device) if (player_audio | bool and player_audio_device | length > 0) else '',
+     ('--audio-channels=' ~ player_audio_channels) if player_audio | bool else '',
+     player_mpv_extra_args,
+   ] | select | list %}
+Environment="PLAYSTICK_MPV_ARGS={{ mpv_argv | join(' ') }}"
+
+{# Poster extraction. The same binary, so ffmpeg never has to be installed:
+    there is no room on the eMMC and no CPU to spare for a second decoder.
+    nice/ionice because this competes with nothing that matters and should
+    lose to everything that does. #}
+{% set thumb_argv = [
+     '--no-config',
+     '--really-quiet',
+     '--frames=1',
+     '--aid=no',
+     '--sid=no',
+     '--hwdec=no',
+     '--vf=scale=' ~ player_thumb_width ~ ':-2',
+     '--vo=image',
+     '--vo-image-format=jpg',
+     '--vo-image-jpeg-quality=80',
+   ] %}
+Environment="PLAYSTICK_THUMB_ARGS={{ thumb_argv | join(' ') }}"
+
+ExecStart=/usr/local/bin/playstick-web
+
+# Belt and braces for the case the daemon never gets to run its own teardown:
+# if it was killed between stopping the AirPlay receiver and starting it back,
+# the marker file is still there and this puts the projector right.
+ExecStopPost=-/bin/sh -c 'if [ -e /run/playstick/restore-airplay ]; then /bin/systemctl start {{ player_airplay_unit }}; rm -f /run/playstick/restore-airplay; fi; rm -f {{ idle_busy_file }}'
+
+StandardOutput=journal
+StandardError=journal
+
+Restart=always
+RestartSec=2
+# mpv is a child of this daemon, so it goes down with it. Without this a
+# killed daemon would leave a film playing that nothing could stop.
+KillMode=control-group
+TimeoutStopSec=20
+
+# ProtectSystem=full rather than strict: strict remounts the whole hierarchy
+# read-only inside the service's mount namespace, and this service has to be
+# able to see the CIFS automount trigger and the mount that appears under it.
+# full gets the part that matters -- /usr and /etc read-only -- without that
+# question. The real control on this daemon is not the sandbox, it is that no
+# filesystem path ever crosses the HTTP boundary; see the module header.
+ProtectSystem=full
+ProtectHome=yes
+NoNewPrivileges=yes
+ReadWritePaths={{ player_thumb_dir }}
+# AF_NETLINK is not optional and its absence fails in the dangerous direction:
+# ss reads NETLINK_SOCK_DIAG, and without it the AirPlay gate would silently
+# answer "nobody is mirroring" and take the display out from under a session.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

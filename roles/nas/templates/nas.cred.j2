@@ -1,0 +1,8 @@
+{{ ansible_managed | comment }}
+# Read by mount.cifs via the credentials= option. Mode 0600, root-owned: the
+# mount unit itself is world-readable, so the secret cannot live there.
+username={{ nas_username }}
+password={{ nas_password }}
+{% if nas_domain | length > 0 %}
+domain={{ nas_domain }}
+{% endif %}

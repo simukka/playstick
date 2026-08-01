@@ -1,0 +1,23 @@
+{{ ansible_managed | comment }}
+# Mount the library on first access rather than at boot.
+#
+# This is the unit that gets enabled. An fstab-style CIFS mount on a headless
+# stick is a boot hazard: if the NAS is off, or the Wi-Fi associates late, the
+# boot blocks until the mount times out and there is no console to say so. An
+# .automount is satisfied immediately and only reaches for the server when
+# something actually opens the directory.
+
+[Unit]
+Description=Automount for the movie library
+Documentation=man:systemd.automount(5)
+
+[Automount]
+Where={{ nas_mount_point }}
+{% if nas_idle_timeout | int > 0 %}
+# Drop the mount when nothing has read it for a while, so a NAS that goes away
+# between films does not leave a stale mount to hang the next scan on.
+TimeoutIdleSec={{ nas_idle_timeout }}
+{% endif %}
+
+[Install]
+WantedBy=multi-user.target

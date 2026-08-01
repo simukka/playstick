@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<!-- Managed by Ansible (uxplay-atom)
+
+     The whole UI, in one file. No CDN, no web fonts, no external images: the
+     stick may have no route to the internet and the phone holding this page
+     very well might not either.
+
+     Everything here is sized for a child holding a phone in a dark room. The
+     poster tiles are the buttons, the play/pause control is 40% of the screen,
+     and there is no seek bar -- a control that can lose your place is a
+     control that produces tears.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Playstick</title>
+<style>
+:root {
+  --bg: #0b0b0d;
+  --card: #17171c;
+  --ink: #f2f2f5;
+  --dim: #9a9aa8;
+  --accent: #4da3ff;
+  --stop: #d8443c;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: var(--bg); color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* A child taps twice, drags, and long-presses. None of that should zoom the
+     page, select text, or flash a grey box. */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none; user-select: none;
+  overscroll-behavior: none;
+}
+button { font: inherit; color: inherit; border: 0; background: none; cursor: pointer; }
+button:disabled { opacity: .45; }
+
+.view { display: none; padding: env(safe-area-inset-top) 12px calc(20px + env(safe-area-inset-bottom)); }
+.view.on { display: block; }
+
+/* --- banner ------------------------------------------------------------ */
+#banner {
+  display: none; margin: 12px 0 4px; padding: 14px 16px; border-radius: 14px;
+  background: #2a2317; color: #ffd79a; font-size: 17px; line-height: 1.35;
+}
+#banner.on { display: block; }
+
+/* --- grid -------------------------------------------------------------- */
+h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .2px; }
+#grid {
+  display: grid; gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+.tile {
+  display: block; width: 100%; text-align: left;
+  border-radius: 16px; overflow: hidden; background: var(--card);
+  transition: transform .08s ease;
+}
+.tile:active { transform: scale(.96); }
+.tile img {
+  display: block; width: 100%; aspect-ratio: 2 / 3; object-fit: cover;
+  background: #202028;
+}
+.tile span {
+  display: block; padding: 10px 10px 12px; font-size: 16px; line-height: 1.25;
+  font-weight: 600;
+  /* Two lines, then ellipsis: a long filename must not push the grid around. */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+#grid.blocked { opacity: .35; pointer-events: none; }
+#empty { color: var(--dim); font-size: 18px; padding: 40px 8px; line-height: 1.5; }
+
+/* --- now playing ------------------------------------------------------- */
+#playing { text-align: center; }
+#nowTitle {
+  font-size: 26px; font-weight: 700; margin: 26px 8px 4px; line-height: 1.2;
+}
+#nowSub { color: var(--dim); font-size: 17px; margin-bottom: 26px; }
+#bar { height: 6px; border-radius: 3px; background: #26262e; margin: 0 4px 30px; overflow: hidden; }
+#barFill { height: 100%; width: 0; background: var(--accent); transition: width .8s linear; }
+
+#toggle {
+  width: min(46vw, 220px); aspect-ratio: 1; border-radius: 50%;
+  background: var(--accent); color: #06121f;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: min(20vw, 96px); line-height: 1;
+  transition: transform .08s ease;
+}
+#toggle:active { transform: scale(.94); }
+
+#stop {
+  display: block; width: 100%; margin: 34px auto 0; max-width: 420px;
+  min-height: 96px; border-radius: 20px; background: var(--stop);
+  font-size: 26px; font-weight: 700; letter-spacing: .5px;
+}
+#stop:active { transform: scale(.97); }
+
+#volume { display: none; margin: 24px auto 0; max-width: 420px; gap: 14px; }
+#volume.on { display: flex; }
+#volume button {
+  flex: 1; min-height: 72px; border-radius: 18px; background: var(--card);
+  font-size: 32px; font-weight: 700;
+}
+</style>
+</head>
+<body>
+<div id="banner"></div>
+
+<div id="library" class="view on">
+  <h1>Playstick</h1>
+  <div id="grid"></div>
+  <div id="empty" hidden></div>
+</div>
+
+<div id="playing" class="view">
+  <div id="nowTitle"></div>
+  <div id="nowSub"></div>
+  <div id="bar"><div id="barFill"></div></div>
+  <button id="toggle" aria-label="Play or pause">&#10074;&#10074;</button>
+  <button id="stop">STOP</button>
+  <div id="volume">
+    <button id="volDown" aria-label="Quieter">&minus;</button>
+    <button id="volUp" aria-label="Louder">&plus;</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+var el = function (id) { return document.getElementById(id); };
+var state = "idle";
+var library = [];
+var thumbState = {};      // id -> whether the server said it has a real poster
+var libraryFetchedAt = 0;
+var busyUntil = 0;        // debounce: a double tap must not fire twice
+
+function post(path, body) {
+  return fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {})
+  }).then(function (r) {
+    return r.json().then(function (d) { return { ok: r.ok, data: d }; });
+  });
+}
+
+function guard() {
+  // Every control locks itself briefly after a press. Children press twice.
+  var now = Date.now();
+  if (now < busyUntil) { return false; }
+  busyUntil = now + 800;
+  return true;
+}
+
+function showBanner(text) {
+  var b = el("banner");
+  if (text) { b.textContent = text; b.classList.add("on"); }
+  else { b.classList.remove("on"); }
+}
+
+function showView(name) {
+  el("library").classList.toggle("on", name === "library");
+  el("playing").classList.toggle("on", name === "playing");
+}
+
+/* --- library ----------------------------------------------------------- */
+
+function renderLibrary(items) {
+  var grid = el("grid");
+  grid.textContent = "";
+  items.forEach(function (item) {
+    var tile = document.createElement("button");
+    tile.className = "tile";
+    tile.type = "button";
+
+    var img = document.createElement("img");
+    img.src = "/api/thumb/" + item.id;
+    img.alt = "";
+    img.loading = "lazy";
+
+    var label = document.createElement("span");
+    label.textContent = item.title;
+
+    tile.appendChild(img);
+    tile.appendChild(label);
+    tile.addEventListener("click", function () { play(item); });
+    grid.appendChild(tile);
+
+    thumbState[item.id] = item.has_thumb;
+  });
+
+  var empty = el("empty");
+  empty.hidden = items.length > 0;
+  if (!items.length) {
+    empty.textContent = "No movies found yet.";
+  }
+}
+
+function refreshThumbs(items) {
+  // Posters are extracted in the background, one at a time. When the server
+  // starts saying it has one, swap that single tile -- the placeholder is
+  // served no-store, so a plain re-request gets the real frame.
+  var imgs = el("grid").getElementsByTagName("img");
+  items.forEach(function (item, i) {
+    if (item.has_thumb && !thumbState[item.id] && imgs[i]) {
+      imgs[i].src = "/api/thumb/" + item.id + "?t=" + Date.now();
+    }
+    thumbState[item.id] = item.has_thumb;
+  });
+}
+
+function loadLibrary() {
+  return fetch("/api/library").then(function (r) { return r.json(); }).then(function (d) {
+    libraryFetchedAt = Date.now();
+    var changed = d.items.length !== library.length ||
+      d.items.some(function (it, i) { return !library[i] || library[i].id !== it.id; });
+    if (changed) { renderLibrary(d.items); }
+    else { refreshThumbs(d.items); }
+    library = d.items;
+    if (!d.available) {
+      el("empty").hidden = false;
+      el("empty").textContent = "Can't reach the movies right now.";
+    }
+  }).catch(function () { /* the status poll reports the outage */ });
+}
+
+/* --- playback ---------------------------------------------------------- */
+
+function play(item) {
+  if (!guard()) { return; }
+  el("nowTitle").textContent = item.title;
+  el("nowSub").textContent = "Starting…";
+  el("barFill").style.width = "0";
+  showView("playing");
+  post("/api/play", { id: item.id }).then(function (res) {
+    if (!res.ok) {
+      showView("library");
+      showBanner(res.data.error || "That didn't work.");
+      setTimeout(function () { showBanner(""); }, 6000);
+    } else {
+      apply(res.data);
+    }
+  }).catch(function () { showView("library"); });
+}
+
+function clock(seconds) {
+  seconds = Math.max(0, Math.round(seconds));
+  var h = Math.floor(seconds / 3600);
+  var m = Math.round((seconds % 3600) / 60);
+  if (h && m) { return h + " h " + m + " min left"; }
+  if (h) { return h + " h left"; }
+  return m + " min left";
+}
+
+function apply(s) {
+  state = s.state;
+
+  if (state === "playing" || state === "paused") {
+    showView("playing");
+    if (s.title) { el("nowTitle").textContent = s.title; }
+    el("toggle").innerHTML = state === "paused" ? "&#9654;" : "&#10074;&#10074;";
+    el("volume").classList.toggle("on", !!s.audio);
+    if (s.duration > 0) {
+      el("barFill").style.width = (100 * s.position / s.duration).toFixed(1) + "%";
+      el("nowSub").textContent = state === "paused"
+        ? "Paused" : clock(s.duration - s.position);
+    } else {
+      el("nowSub").textContent = state === "paused" ? "Paused" : "Playing";
+    }
+    return;
+  }
+
+  // Anything else means the projector is ours to offer again.
+  showView("library");
+  el("grid").classList.toggle("blocked", state === "airplay");
+  if (state === "airplay") {
+    showBanner("Someone is using the projector to show their phone. " +
+               "The movies come back when they stop.");
+  } else if (state === "unavailable") {
+    showBanner("Can't reach the movies right now — the NAS may be off.");
+  } else {
+    showBanner("");
+  }
+}
+
+function poll() {
+  fetch("/api/status").then(function (r) { return r.json(); }).then(function (s) {
+    apply(s);
+    // The grid only needs the library occasionally; the now-playing view not
+    // at all. Posters arriving is the only thing that changes it.
+    var onGrid = state !== "playing" && state !== "paused";
+    if (onGrid && Date.now() - libraryFetchedAt > 10000) { loadLibrary(); }
+  }).catch(function () {
+    showView("library");
+    showBanner("Lost the projector. Trying again…");
+  }).then(function () {
+    var soon = (state === "playing" || state === "paused") ? 1000 : 3000;
+    setTimeout(poll, soon);
+  });
+}
+
+/* --- controls ---------------------------------------------------------- */
+
+el("toggle").addEventListener("click", function () {
+  if (!guard()) { return; }
+  post(state === "paused" ? "/api/resume" : "/api/pause").then(function (r) {
+    if (r.ok) { apply(r.data); }
+  });
+});
+
+el("stop").addEventListener("click", function () {
+  if (!guard()) { return; }
+  showView("library");
+  post("/api/stop").then(function (r) { if (r.ok) { apply(r.data); } });
+});
+
+el("volDown").addEventListener("click", function () {
+  post("/api/volume", { delta: -10 });
+});
+el("volUp").addEventListener("click", function () {
+  post("/api/volume", { delta: 10 });
+});
+
+loadLibrary();
+poll();
+</script>
+</body>
+</html>

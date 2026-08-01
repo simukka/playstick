@@ -45,3 +45,9 @@ idle_poll_seconds: 5
 # Second line, under the clock. Empty derives it from uxplay_advert_name plus
 # the hostname UxPlay appends -- i.e. exactly what iOS will list.
 idle_subtitle: ""
+
+# Written by the movie player while it owns the display, so the blank
+# countdown does not run out partway through a film. Empty leaves the clock
+# entirely independent of the player role, which is how it behaves when
+# player_enabled is false.
+idle_busy_file: /run/playstick/playing

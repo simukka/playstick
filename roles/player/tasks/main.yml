@@ -1,0 +1,157 @@
+---
+- name: Movie player is enabled
+  when: player_enabled | bool
+  block:
+
+    # The daemon stops this unit to take DRM master and starts it again
+    # afterwards. If it does not exist, the arbitration has nothing to arbitrate
+    # and the failure would show up as a film that plays over a black screen.
+    - name: Require the AirPlay unit the player arbitrates against
+      ansible.builtin.stat:
+        path: "/etc/systemd/system/{{ player_airplay_unit }}"
+      register: player_airplay_stat
+
+    - name: Refuse to install an arbiter with nothing to arbitrate
+      ansible.builtin.assert:
+        that: player_airplay_stat.stat.exists
+        fail_msg: >-
+          {{ player_airplay_unit }} is not installed. The player has to stop it
+          to take DRM master -- uxplay-kms holds the card from service start,
+          not from the first client. Set player_airplay_unit to the unit you
+          actually run, or run the uxplay role first.
+        success_msg: "Arbitrating the display against {{ player_airplay_unit }}."
+
+    - name: Install the player
+      ansible.builtin.apt:
+        name:
+          - mpv          # decoder, container support, DRM output and the IPC channel
+          - iproute2     # ss, for the AirPlay gate
+        state: present
+
+    - name: Record the installed mpv version
+      ansible.builtin.command: mpv --version
+      register: player_mpv_version
+      changed_when: false
+      failed_when: false
+
+    - name: Show the installed mpv version
+      ansible.builtin.debug:
+        msg: "{{ player_mpv_version.stdout_lines | default(['unknown']) | first }}"
+
+    # Not fatal: which video output works here is a probe result, and asserting
+    # on it would block the install that ships the probe.
+    - name: Check that mpv has the configured video output
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -o pipefail
+          mpv --vo=help 2>/dev/null | grep -qE '^\s+{{ player_vo }}\b'
+      register: player_vo_check
+      changed_when: false
+      failed_when: false
+
+    - name: Warn if the configured video output is missing
+      ansible.builtin.debug:
+        msg: >-
+          mpv does not list a "{{ player_vo }}" video output. Playback will
+          fail -- run the player probe and set player_vo from the result.
+      when: player_vo_check.rc != 0
+
+    - name: Create the poster cache
+      ansible.builtin.file:
+        path: "{{ player_thumb_dir }}"
+        state: directory
+        owner: "{{ player_user }}"
+        group: "{{ player_user }}"
+        mode: "0755"
+
+    - name: Create the UI directory
+      ansible.builtin.file:
+        path: /usr/local/share/playstick
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the player daemon
+      ansible.builtin.copy:
+        src: playstick-web
+        dest: /usr/local/bin/playstick-web
+        owner: root
+        group: root
+        mode: "0755"
+      register: player_script
+
+    - name: Install the web UI
+      ansible.builtin.copy:
+        src: playstick-ui.html
+        dest: /usr/local/share/playstick/ui.html
+        owner: root
+        group: root
+        mode: "0644"
+      register: player_ui
+
+    - name: Install the player unit
+      ansible.builtin.template:
+        src: playstick-web.service.j2
+        dest: /etc/systemd/system/playstick-web.service
+        owner: root
+        group: root
+        mode: "0644"
+      register: player_unit
+      notify: Reload systemd
+
+    # avahi-daemon is already installed and required for AirPlay discovery, so
+    # advertising the web UI on it costs a file. The point is that nobody has
+    # to know the stick's IP address: http://{{ ansible_hostname }}.local:{{ player_port }}/
+    # resolves from any iOS or macOS device on the LAN.
+    - name: Advertise the web UI over mDNS
+      ansible.builtin.template:
+        src: playstick-web.avahi.j2
+        dest: /etc/avahi/services/playstick-web.service
+        owner: root
+        group: root
+        mode: "0644"
+      when: player_advertise_mdns | bool
+      notify: Reload avahi
+
+    - name: Flush handlers so the unit is known before it is started
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable the player
+      ansible.builtin.systemd:
+        name: playstick-web.service
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    # Not a handler, for the same reason the idle role does this: a handler
+    # runs at the end of the play, and a re-provision should leave the new
+    # daemon running, not the old one.
+    #
+    # Worth knowing rather than discovering: this stops a film that happens to
+    # be playing. That is the right behaviour for a re-provision.
+    - name: Restart the player after a change  # noqa: no-handler
+      ansible.builtin.systemd:
+        name: playstick-web.service
+        state: restarted
+      when: player_script is changed or player_ui is changed or player_unit is changed
+
+    - name: Report where the UI is
+      ansible.builtin.debug:
+        msg:
+          - "Movie player: http://{{ ansible_host | default(ansible_hostname) }}:{{ player_port }}/"
+          - "        also: http://{{ ansible_hostname }}.local:{{ player_port }}/"
+          - >-
+            Audio is
+            {{ 'on, via ' ~ (player_audio_device | default('mpv default', true))
+               if player_audio | bool
+               else 'OFF -- films play silently. See player_audio.' }}
+
+- name: Movie player is disabled
+  when: not (player_enabled | bool)
+  ansible.builtin.systemd:
+    name: playstick-web.service
+    enabled: false
+    state: stopped
+  failed_when: false
