@@ -1,4 +1,37 @@
 ---
+# Runs on the control machine before anything tries to connect. The site file
+# carries ansible_host, so a fresh clone without it does not fail with a
+# missing variable -- Ansible quietly falls back to the inventory name and the
+# run dies at "Could not resolve hostname vivostick", which points at DNS
+# rather than at the file you have not created yet.
+- name: Check the site configuration exists
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags: always
+  # Without this the assert fails localhost and the run carries on: failures
+  # are per-host, and the play that follows targets a different host entirely.
+  any_errors_fatal: true
+
+  tasks:
+    - name: Look for the site file
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/host_vars/vivostick/local.yml"
+      register: site_local_vars
+
+    - name: Require the site file
+      ansible.builtin.assert:
+        that: site_local_vars.stat.exists
+        fail_msg: >-
+          host_vars/vivostick/local.yml is missing. It holds the values that
+          are specific to your LAN -- the stick's address, the login, the NAS
+          -- and it is gitignored, so a fresh clone never has one. Create it:
+          cp host_vars/vivostick/local.yml.example host_vars/vivostick/local.yml
+          and edit it. Secrets are a separate file: host_vars/vivostick/vault.yml,
+          encrypted, and that one IS committed.
+        success_msg: "Site configuration found."
+
 - name: Provision the VivoStick TS10 as a no-X AirPlay receiver
   hosts: vivostick
   become: true

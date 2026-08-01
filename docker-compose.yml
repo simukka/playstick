@@ -53,14 +53,20 @@ services:
     # Published on every interface, like the device is: the page is meant to be
     # driven from a phone and looking at it on one is most of the point. It has
     # no authentication, there or here.
+    #
+    # 8080 on the host, 80 in the container. The container port matches
+    # player_port so the dev image runs the device's configuration; the host
+    # port does not, because a published port below 1024 is refused outright
+    # under rootless Docker and usually taken on any other machine. Set
+    # PLAYSTICK_GUI_PORT=80 if you want the real thing and your host allows it.
     ports:
-      - "${PLAYSTICK_GUI_PORT:-8080}:8080"
+      - "${PLAYSTICK_GUI_PORT:-8080}:80"
     volumes:
       # The repository's own daemon and page, over the copies baked into the
       # image. Edit the HTML and reload the browser; the daemon re-reads it on
       # every request. Python changes need `docker compose restart gui`.
       - ./roles/player/files/playstick-ui.html:/usr/local/share/playstick/ui.html:ro
-      - ./roles/player/files/playstick-web:/usr/local/bin/playstick-web:ro
+      - ./roles/player/files/playstick-web.py:/usr/local/bin/playstick-web.py:ro
       # A generated test library by default. Point it at your own films with
       # PLAYSTICK_GUI_LIBRARY=/path/to/movies -- read-write only because the
       # generator populates an empty volume; nothing else here ever writes

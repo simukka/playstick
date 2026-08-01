@@ -11,7 +11,7 @@
 
 [Unit]
 Description=Playstick movie player (web UI and display arbiter)
-Documentation=file:///usr/local/bin/playstick-web
+Documentation=file:///usr/local/bin/playstick-web.py
 After=network-online.target {{ player_airplay_unit }}
 Wants=network-online.target
 
@@ -127,7 +127,7 @@ Environment="PLAYSTICK_MPV_ARGS={{ mpv_argv | join(' ') }}"
    ] %}
 Environment="PLAYSTICK_THUMB_ARGS={{ thumb_argv | join(' ') }}"
 
-ExecStart=/usr/local/bin/playstick-web
+ExecStart=/usr/local/bin/playstick-web.py
 
 # Belt and braces for the case the daemon never gets to run its own teardown:
 # if it was killed between stopping the AirPlay receiver and starting it back,

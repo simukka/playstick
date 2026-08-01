@@ -8,6 +8,13 @@ roles/probe/files/*.h264
 # host_vars/vivostick/vault.yml is encrypted -- but the key to it is not.
 .vault-pass
 
+# Site-specific values: addresses, the login, the share name. Plaintext and
+# unpublished, which is why secrets do NOT go here -- those belong in the
+# encrypted vault above, which IS committed. The pattern deliberately does not
+# match local.yml.example, the committed template.
+host_vars/*/local.yml
+host_vars/*/vault.yml
+
 *.retry
 __pycache__/
 *.pyc

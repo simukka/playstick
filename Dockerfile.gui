@@ -1,6 +1,6 @@
 # The movie player's web UI, on a development machine.
 #
-#   docker compose up gui     ->  http://localhost:8080/
+#   docker compose up gui     ->  http://localhost:8080/  (port 80 inside)
 #
 # This is a second image with a different job from the Dockerfile next to it:
 # that one is the Ansible control node, this one runs the thing Ansible would
@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY roles/player/files/playstick-web /usr/local/bin/playstick-web
+COPY roles/player/files/playstick-web.py /usr/local/bin/playstick-web.py
 COPY roles/player/files/playstick-ui.html /usr/local/share/playstick/ui.html
 COPY scripts/gui-entrypoint.sh /usr/local/bin/playstick-gui-entrypoint
 COPY scripts/gui-fake-airplay.py /usr/local/bin/fake-airplay
@@ -50,7 +50,7 @@ RUN chmod 0755 /usr/local/bin/playstick-gui-entrypoint \
 # here rather than in a config file -- see playstick-web.service.j2 for the
 # values the appliance uses. Only the deviations are commented.
 ENV PLAYSTICK_BIND=0.0.0.0 \
-    PLAYSTICK_PORT=8080 \
+    PLAYSTICK_PORT=80 \
     PLAYSTICK_UI=/usr/local/share/playstick/ui.html \
     PLAYSTICK_LIBRARY=/srv/movies \
     PLAYSTICK_THUMB_DIR=/var/cache/playstick/thumbs \
@@ -108,12 +108,15 @@ ENV PLAYSTICK_THUMB_ARGS="--no-config --really-quiet --frames=1 --aid=no \
 # reason: nothing here needs DRM master or systemctl. It keeps /run/playstick
 # and the poster cache writable without inventing an account, and the only
 # host-visible path is the library, which the daemon never writes to.
-EXPOSE 8080
+# 80 inside, matching player_port on the device. The container runs as root so
+# the low port binds; compose still publishes it on 8080 by default, because a
+# host port below 1024 is refused outright under rootless Docker.
+EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:80/healthz', timeout=3)"
 
 ENTRYPOINT ["/usr/local/bin/playstick-gui-entrypoint"]
 # python3 rather than executing the file: compose bind-mounts it from the repo,
 # where it is 0644 -- the executable bit comes from the ansible copy, not git.
-CMD ["python3", "/usr/local/bin/playstick-web"]
+CMD ["python3", "/usr/local/bin/playstick-web.py"]

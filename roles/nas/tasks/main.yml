@@ -6,6 +6,27 @@
     - nas_share | length > 0
   block:
 
+    # A share name and a server-side path are not the same thing, and on a
+    # Synology they look alike enough to swap by accident: the movie folder is
+    # /volume1/video on the NAS's own disks and //backup/video on the wire.
+    # Both wrong forms fail below the play, in the kernel, naming neither the
+    # variable nor the role -- "Malformed UNC in devname" in dmesg for the
+    # absolute path, mount error(2) for the volume prefix. Catch it here, where
+    # there is room to say which variable and what to put in it.
+    - name: Refuse a server-side path where a share name belongs
+      ansible.builtin.assert:
+        that:
+          - nas_share_unc | length > 0
+          - nas_share_unc is not match('volume\d+/')
+        fail_msg: >-
+          nas_share is "{{ nas_share }}", which is where the folder lives on
+          the NAS, not what the NAS exports. Use the share name alone -- for a
+          Synology serving /volume1/video that is "video", giving
+          //{{ nas_server }}/video. Check the exported names under DSM ->
+          Control Panel -> Shared Folder, or with
+          `smbclient -L {{ nas_server }} -U <user>`.
+        success_msg: "Library share is //{{ nas_server }}/{{ nas_share_unc }}."
+
     - name: Install the CIFS mount helper
       ansible.builtin.apt:
         name: cifs-utils
@@ -32,6 +53,28 @@
       when: nas_username | length > 0
       notify: Reload systemd
 
+    # Only on the first run, when the directory is a directory. Once the
+    # automount is installed the path is an autofs trigger, and touching its
+    # attributes is a lookup -- which mounts the share, read-only, and then
+    # applies owner and mode to the CIFS root instead of to the mountpoint
+    # underneath it. That fails with EROFS, on a re-run, after the share
+    # started working: "[Errno 30] Read-only file system: b'/srv/movies'".
+    #
+    # findmnt reads /proc/self/mountinfo rather than walking the path, so
+    # asking the question does not itself trigger the automount. rc is 1 when
+    # nothing is mounted there, including when the directory does not exist.
+    - name: Look for anything already mounted on the mount point
+      ansible.builtin.command:
+        argv:
+          - findmnt
+          - --noheadings
+          - --output=FSTYPE
+          - --mountpoint
+          - "{{ nas_mount_point }}"
+      register: nas_existing_mount
+      changed_when: false
+      failed_when: false
+
     - name: Create the mount point
       ansible.builtin.file:
         path: "{{ nas_mount_point }}"
@@ -39,6 +82,18 @@
         owner: root
         group: root
         mode: "0755"
+      when: nas_existing_mount.rc != 0
+
+    - name: Note that the mount point is in use
+      ansible.builtin.debug:
+        msg: >-
+          {{ nas_mount_point }} already carries a
+          {{ nas_existing_mount.stdout_lines | last | trim }} mount, so its
+          ownership is left alone -- what is visible there belongs to the
+          share, not to this directory. (Two mounts stack here once this is
+          working: the autofs trigger, and the CIFS mount on top of it. The
+          last line is the one you can see.)
+      when: nas_existing_mount.rc == 0
 
     # systemd derives unit names from the path by its own escaping rules, and
     # getting them wrong by hand produces a unit that installs cleanly and

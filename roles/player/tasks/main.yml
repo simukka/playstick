@@ -75,8 +75,8 @@
 
     - name: Install the player daemon
       ansible.builtin.copy:
-        src: playstick-web
-        dest: /usr/local/bin/playstick-web
+        src: playstick-web.py
+        dest: /usr/local/bin/playstick-web.py
         owner: root
         group: root
         mode: "0755"
@@ -137,11 +137,16 @@
         state: restarted
       when: player_script is changed or player_ui is changed or player_unit is changed
 
+    # The port is omitted at 80 rather than printed as ":80" -- this line is
+    # what somebody types into a phone, and it should be the shortest thing
+    # that works.
     - name: Report where the UI is
+      vars:
+        player_url_port: "{{ '' if player_port | int == 80 else ':' ~ player_port }}"
       ansible.builtin.debug:
         msg:
-          - "Movie player: http://{{ ansible_host | default(ansible_hostname) }}:{{ player_port }}/"
-          - "        also: http://{{ ansible_hostname }}.local:{{ player_port }}/"
+          - "Movie player: http://{{ ansible_host | default(ansible_hostname) }}{{ player_url_port }}/"
+          - "        also: http://{{ ansible_hostname }}.local{{ player_url_port }}/"
           - >-
             Audio is
             {{ 'on, via ' ~ (player_audio_device | default('mpv default', true))

@@ -45,7 +45,7 @@ Install Ubuntu Server, then, **device**:
 
 ```bash
 sudo apt update && sudo apt install -y openssh-server
-ip -brief addr                 # note the address; it goes in inventory.yml
+ip -brief addr                 # note the address; it goes in host_vars/vivostick/local.yml
 id                             # the login user must be able to sudo
 ```
 
@@ -78,8 +78,8 @@ Then set up SSH **from the host, not the container** — this is the one step th
 happen inside it:
 
 ```bash
-ssh-copy-id simukka@10.0.1.228   # or your user@address
-ssh simukka@10.0.1.228 true      # records the host key in ~/.ssh/known_hosts
+ssh-copy-id <user>@<host>        # the ansible_user and ansible_host from section 3
+ssh <user>@<host> true           # records the host key in ~/.ssh/known_hosts
 ```
 
 Both matter. `~/.ssh` is mounted **read-only** so the container can never rewrite your
@@ -116,16 +116,41 @@ raw `docker compose run` does not.
 
 ## 3. Point the inventory at the stick
 
-**control** — edit `inventory.yml`:
+`inventory.yml` declares the host and nothing else. Where the stick is, who to log in
+as, and which NAS to mount are facts about your LAN rather than about the appliance, so
+they go in `host_vars/vivostick/local.yml` — which is **gitignored**, so a fresh clone
+never has one and yours is never published.
+
+**control**:
+
+```bash
+cp host_vars/vivostick/local.yml.example host_vars/vivostick/local.yml
+$EDITOR host_vars/vivostick/local.yml
+```
 
 ```yaml
-all:
-  hosts:
-    vivostick:
-      ansible_host: 10.0.1.228        # your device
-      ansible_user: simukka           # login user with sudo
-      ansible_python_interpreter: /usr/bin/python3
+ansible_host: <host>            # IP or hostname of your device
+ansible_user: <user>            # login user with sudo
+
+nas_server: "10.0.1.5"          # optional, section 5
+nas_share: "movies"
 ```
+
+Three files, three jobs, and the split is worth holding onto:
+
+| file | in git? | holds |
+|---|---|---|
+| `group_vars/all.yml` | yes | decisions about how the appliance behaves — the same for everyone |
+| `host_vars/vivostick/local.yml` | **no** | addresses, logins, share names — true of your LAN only |
+| `host_vars/vivostick/vault.yml` | yes, **encrypted** | secrets, and nothing else |
+
+Secrets do not go in `local.yml`. Gitignored is not encrypted: one `git add -f`, one
+tarball, one backup of your home directory and it is readable. That is what section 4 is
+for.
+
+Where a variable is defined in both `local.yml` and `vault.yml`, **`vault.yml` wins** —
+files in a `host_vars` directory load in lexical order and the later one takes effect.
+Keep each variable in exactly one of them.
 
 ```bash
 ./actl 'ansible -m ping vivostick'
@@ -245,7 +270,7 @@ drm_force_connector: HDMI-A-1
 uxplay_output_path: kms          # kms | cage | none -- which receiver runs
 uxplay_advert_name: Projector    # what iOS shows in the AirPlay list
 nas_server: "10.0.1.5"           # both empty skips the movie library entirely
-nas_share: "movies"
+nas_share: "movies"              # the SHARE NAME, not /volume1/movies -- see below
 player_audio: false              # films play SILENTLY until HDMI audio is probed
 ```
 
@@ -261,6 +286,15 @@ Three of those have consequences worth knowing before the run rather than after:
   starts neither.
 - **`nas_server`/`nas_share` empty** skips the NAS and player roles cleanly. You can turn
   the library on later with a re-run.
+- **`nas_share` is the exported share name**, not the path the files sit at on the NAS.
+  A Synology shows the movie folder as `/volume1/video` and exports it as `//nas/video`,
+  so the share is `video` — `/volume1` is a disk volume on the NAS and never crosses the
+  wire. The role asserts on this, because both wrong forms fail underneath Ansible where
+  the message names neither the variable nor the role: `/volume1/video` builds the
+  non-UNC `//nas//volume1/video` and shows up only as `Malformed UNC in devname` in
+  `dmesg`, and `volume1/video` asks for a share called `volume1` and returns
+  `mount error(2): No such file or directory`. `smbclient -L <nas> -U <user>` lists the
+  real names.
 
 ---
 
@@ -369,11 +403,13 @@ dmesg | grep -i 'fifo underrun'                    # silence is the good answer
 # the movie library, if you configured one
 systemctl status srv-movies.automount
 ls /srv/movies                                     # triggers the automount
-curl -s localhost:8080/healthz                     # the web UI
+curl -s localhost/healthz                          # the web UI, on port 80
+ss -ltnp | grep ':80 '                             # who owns it: python3, as root
 ```
 
-From a phone on the same LAN: `http://vivostick.local:8080/` for the films, or the
-AirPlay picker for mirroring.
+From a phone on the same LAN: `http://vivostick.local/` for the films, or the AirPlay
+picker for mirroring. No port to type — `player_port` is 80, which the daemon can bind
+because `player_user` is root already.
 
 **control** — one command for the whole picture, written to `results/`:
 
@@ -425,7 +461,7 @@ dark. What the columns mean, and which of them to distrust, is in the README und
 ./actl 'ansible-playbook site.yml -K -e uxplay_output_path=cage -e idle_enabled=false'
 
 # the web UI on your laptop, no device involved
-docker compose up gui                              # http://localhost:8080/
+docker compose up gui                              # http://localhost:8080/ -> :80 inside
 ```
 
 **device** — rollback, in decreasing order of severity:
@@ -466,6 +502,10 @@ sudo apt update && sudo apt full-upgrade
 | `No VA-API H.264 decode entrypoint found` | The `graphics` gate. Run `vainfo --display drm --device /dev/dri/renderD128` on the device as root — outside the `render` group it reports nothing at all, which looks identical to a broken install |
 | Projector shows the boot log and a cursor | The idle clock is not running: `systemctl status uxplay-idle`. If `uxplay_output_path` is `cage`, it never can — that is enforced, not a bug |
 | Nothing in the iOS AirPlay list | A film is playing (UxPlay is stopped for its duration, by design), or the phone is on a different L2 segment — discovery is mDNS and does not route |
+| `playstick-web` fails at startup with `Permission denied` or `Address already in use` | It binds `player_port`, which is 80. Permission denied means `player_user` is no longer root — put the port above 1024 or add `AmbientCapabilities=CAP_NET_BIND_SERVICE` to the unit. Address in use means something else took 80; `ss -ltnp \| grep ':80 '` names it |
+| `Malformed UNC in devname` in `dmesg`, the mount unit failing with nothing useful in its own journal | `nas_share` holds a path, not a share name. `/volume1/video` renders `//nas//volume1/video`, which is not a UNC. Use `video`. The role now asserts before this reaches the kernel |
+| `mount error(2): No such file or directory` on the share | The share name does not exist on the server — `volume1/video` asks for a share called `volume1`. `smbclient -L <nas> -U <user>` lists the real ones |
+| `mount error(13): Permission denied` on the share | Credentials. An empty `nas_username` mounts as **guest**, and most NAS boxes refuse that outright: put `nas_username`/`nas_password` in `host_vars/vivostick/vault.yml`. If they are set, check the vault is actually being loaded — see the two rows above about `group_vars` |
 | Films play but silently | `player_audio: false` is the shipped default. See the README on `hdmi-lpe-audio` before changing it |
 | `No test clips found in roles/probe/files/` | Run `./actl ./scripts/make-testclip.sh`, then re-run the play |
 

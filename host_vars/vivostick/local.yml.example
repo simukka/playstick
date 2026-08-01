@@ -1,0 +1,36 @@
+---
+# Copy to local.yml and fill in. local.yml is gitignored; this file is not.
+#
+#   cp host_vars/vivostick/local.yml.example host_vars/vivostick/local.yml
+#
+# What belongs here: the values that are true of your LAN and nobody else's --
+# addresses, the login, the share name. What belongs in group_vars/all.yml:
+# decisions about how the appliance behaves, which are the same for everyone.
+# What belongs in host_vars/vivostick/vault.yml, encrypted: anything secret.
+# A gitignored plaintext file is not a secret store; it is one `git add -f`
+# away from being published, and it is not backed up by the repo.
+#
+# vault.yml overrides this file for any variable defined in both -- host_vars
+# files load in lexical order and "vault" sorts after "local". Keep each
+# variable in one place.
+
+# --- connection ----------------------------------------------------------
+# Where the stick is and who to log in as. inventory.yml declares the host
+# and deliberately does not carry these.
+ansible_host: <host>            # IP or hostname of the TS10, e.g. 10.0.1.42
+ansible_user: <user>            # login user with sudo
+
+# --- movie library -------------------------------------------------------
+# Leave both empty, or delete them, to skip the NAS and player roles entirely.
+#
+# nas_share is the exported SHARE NAME, not the server-side path: a Synology
+# serving /volume1/movies exports //nas/movies, so the value is "movies".
+# `smbclient -L <nas> -U <user>` lists the real names. An address rather than
+# a hostname keeps the mount independent of mDNS at boot.
+nas_server: "10.0.1.5"
+nas_share: "movies"
+
+# Credentials go in the encrypted vault, NOT here:
+#   ./actl 'ansible-vault create host_vars/vivostick/vault.yml'
+# containing nas_username and nas_password. An empty nas_username mounts as
+# guest, which most NAS boxes refuse outright with mount error(13).

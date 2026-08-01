@@ -215,18 +215,35 @@ claim_tty1: true
 # --- NAS ----------------------------------------------------------------
 # The movie library: a read-only SMB/CIFS share, mounted on demand.
 #
-# Set nas_server and nas_share to switch the feature on; both empty is the
-# shipping default and skips the role entirely. Keep the password out of this
-# file -- it is in git:
+# Both empty is the shipping default and skips the role entirely. THE VALUES
+# GO IN host_vars/vivostick/local.yml, which is gitignored -- this file is in
+# git and an address here would be published with it. Left empty rather than
+# set to a plausible example on purpose: an example address is a live value,
+# and a clone missing local.yml should mount nothing rather than reach for
+# somebody else's NAS.
+#
+#   # host_vars/vivostick/local.yml   (see local.yml.example)
+#   nas_server: "10.0.1.5"     # address, not a name: the mount must not
+#                              # depend on mDNS being up at boot
+#   nas_share:  "movies"
+#
+# nas_share is the exported SHARE NAME, not the path the files sit at on the
+# NAS. A Synology shows the folder as /volume1/movies and exports it as
+# //nas/movies -- the last component alone. Both wrong forms fail underneath
+# Ansible, in the kernel, naming neither the variable nor the role, so the nas
+# role asserts on the value before it can get that far. See docs/install.md.
+#
+# Credentials are a separate question again: they are secrets, so they go in
+# the ENCRYPTED vault, which is committed, rather than in the gitignored file.
 #   ./actl 'ansible-vault create host_vars/vivostick/vault.yml'
 #   ./actl 'ansible-playbook site.yml --ask-vault-pass'
 #
-# host_vars, and the path is load-bearing. vivostick is a HOST in inventory.yml,
-# not a group: group_vars/vivostick/ is never read, and group_vars/all/ is worse
-# than useless -- a directory of that name SHADOWS this file, silently taking
-# every tunable in it out of play. See docs/install.md.
-nas_server: ""
-nas_share: ""
+# Both paths are host_vars, and that is load-bearing: vivostick is a HOST in
+# inventory.yml, not a group. group_vars/vivostick/ is never read, and
+# group_vars/all/ is worse than useless -- a directory of that name SHADOWS
+# this file, silently taking every tunable in it out of play.
+# nas_server: ""
+# nas_share: ""
 nas_mount_point: /srv/movies
 
 # --- movie player --------------------------------------------------------

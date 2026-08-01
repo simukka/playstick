@@ -13,8 +13,17 @@ nas_enabled: true
 # Server and share. Both empty means "not configured yet": the role then
 # installs nothing and the player role reports the library as unavailable
 # rather than failing the play.
+#
+# nas_share is the exported share NAME -- "video", not the server-side path
+# "/volume1/video" that a Synology shows in DSM. See the assert in tasks/main.yml.
 nas_server: ""
 nas_share: ""
+
+# The share as it goes into the UNC. Surrounding slashes are trimmed so that
+# "video", "/video" and "video/" all mount the same thing; a leading slash is
+# the easy half of the mistake above and is not worth failing a play over.
+# What is left is checked, not guessed at -- see the assert.
+nas_share_unc: "{{ nas_share | regex_replace('^/+', '') | regex_replace('/+$', '') }}"
 
 # Where the share appears. The systemd unit names are derived from this via
 # systemd-escape, so /srv/movies becomes srv-movies.mount / srv-movies.automount.

@@ -33,11 +33,28 @@ player_airplay_unit: >-
 # files/playstick-web.
 player_user: root
 player_bind: "0.0.0.0"
-player_port: 8080
+
+# 80, so the address is http://vivostick.local/ with nothing to remember after
+# the hostname -- which is the whole ergonomic point of a page a child opens
+# on a phone. Nothing else on this device listens on 80: no web server is
+# installed, and UxPlay is on 7000-7002.
+#
+# Binding below 1024 needs CAP_NET_BIND_SERVICE, which this service has for
+# free because player_user is root for reasons that have nothing to do with
+# the port (mpv needs DRM master; the arbiter needs systemctl). If you ever
+# move it off root, either put the port back above 1024 or add
+# AmbientCapabilities=CAP_NET_BIND_SERVICE to the unit -- the failure is
+# "Permission denied" on bind at startup, in the journal, with no other clue.
+#
+# The daemon's own fallback stays 8080, deliberately: that is the path a
+# developer takes running playstick-web.py by hand as themselves, where 80
+# would fail before printing anything useful.
+player_port: 80
 
 # Advertise the UI as _http._tcp so it is reachable at
 # http://<hostname>.local:<port>/ without anyone typing an IP address.
-# avahi-daemon is already required for AirPlay, so this is free.
+# avahi-daemon is already required for AirPlay, so this is free -- and at port
+# 80 the advertised record needs no port at all in a browser.
 player_advertise_mdns: true
 
 # Reject clients outside these networks at the handler. ufw is purged by the

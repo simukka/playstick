@@ -3,13 +3,13 @@
 # started directly and deliberately NOT enabled -- see roles/nas/tasks/main.yml.
 
 [Unit]
-Description=Movie library from //{{ nas_server }}/{{ nas_share }}
+Description=Movie library from //{{ nas_server }}/{{ nas_share_unc }}
 Documentation=man:mount.cifs(8)
 After=network-online.target
 Wants=network-online.target
 
 [Mount]
-What=//{{ nas_server }}/{{ nas_share }}
+What=//{{ nas_server }}/{{ nas_share_unc }}
 Where={{ nas_mount_point }}
 Type=cifs
 

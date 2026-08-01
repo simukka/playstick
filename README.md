@@ -71,7 +71,9 @@ source of failure. If audio is wanted later, a USB audio adapter sidesteps the S
 
 ```
 ansible.cfg              inventory path, pipelining, longer timeouts
-inventory.yml            single host: vivostick  <- fill in host + user
+inventory.yml            single host: vivostick, and nothing site-specific
+host_vars/vivostick/     local.yml  <- YOUR address, login, NAS. gitignored
+                         vault.yml  <- secrets. committed, encrypted
 group_vars/all.yml       every tunable lives here
 site.yml                 base -> trim -> graphics -> uxplay -> idle -> nas -> player -> probe
 fetch-results.yml        run the probes, pull output into results/
@@ -128,7 +130,7 @@ If key auth to the device is not set up yet, ansible fails with
 `Permission denied (publickey,password)`. Fix it on the **host**, once:
 
 ```bash
-ssh-copy-id simukka@10.0.1.228
+ssh-copy-id <user>@<host>              # the ansible_user and ansible_host from local.yml
 ```
 
 Or, if you would rather stay on passwords, `sshpass` is in the image and
@@ -156,8 +158,10 @@ The short version is below. Every command in order, including the vault, is in
 # 0. control machine: a test clip (skip if using ./actl for everything)
 ./scripts/make-testclip.sh             # needs ffmpeg; writes to roles/probe/files/
 
-# 1. point the inventory at the stick
-$EDITOR inventory.yml                  # ansible_host, ansible_user
+# 1. point the inventory at the stick. local.yml is gitignored: your address,
+#    login and NAS live there, not in the committed files.
+cp host_vars/vivostick/local.yml.example host_vars/vivostick/local.yml
+$EDITOR host_vars/vivostick/local.yml  # ansible_host, ansible_user, nas_*
 ansible -m ping vivostick
 
 # 2. provision. -K because sudo on the device wants a password.
@@ -335,22 +339,28 @@ large play/pause and a large stop. There is no seek bar; a control that can lose
 place is a control that produces tears.
 
 ```bash
-# group_vars/all.yml
+# host_vars/vivostick/local.yml -- gitignored, so your LAN stays yours
 nas_server: "10.0.1.5"
-nas_share: "movies"
+nas_share: "movies"      # the exported share NAME. A Synology's /volume1/movies
+                         # is exported as //nas/movies -- the last component alone.
 
 # host_vars/vivostick/vault.yml -- encrypted, and that path is load-bearing
 nas_username: "kyle"
 nas_password: "…"
 ```
 
-`vivostick` is a *host*, so `group_vars/vivostick/` is silently never read and
-`group_vars/all/` silently shadows `group_vars/all.yml`. The full command sequence is in
-[docs/install.md](docs/install.md#4-secrets-the-vault).
+Gitignored is not encrypted, so the password is in the vault rather than beside the
+address. Both are `host_vars`, and *that* path is the load-bearing part: `vivostick` is a
+*host*, so `group_vars/vivostick/` is silently never read, and `group_vars/all/` silently
+shadows `group_vars/all.yml`. `vault.yml` also overrides `local.yml` where both define
+the same variable — lexical load order — so keep each variable in one file. The full
+command sequence is in [docs/install.md](docs/install.md#4-secrets-the-vault).
 
-Then `http://vivostick.local:8080/` from any phone on the LAN — the `player` role
+Then `http://vivostick.local/` from any phone on the LAN — the `player` role
 advertises the UI over the avahi daemon that is already running for AirPlay, so nobody
-has to know the stick's IP address.
+has to know the stick's IP address, and `player_port: 80` means there is nothing to
+remember after the hostname either. The daemon runs as root for reasons that predate the
+port (mpv needs DRM master), so binding below 1024 costs nothing here.
 
 ### AirPlay is unavailable while a film plays
 
@@ -422,7 +432,7 @@ prints the decodable profiles.
 
 ### No authentication
 
-`ufw` is purged by explicit decision, so port 8080 is open to the LAN and anyone on it can
+`ufw` is purged by explicit decision, so port 80 is open to the LAN and anyone on it can
 start a film — consistent with UxPlay next door accepting unauthenticated mirroring.
 `player_allow_networks` rejects clients outside RFC1918 at the handler, which keeps a
 misconfigured router from publishing the UI to the internet and is not a defence against
@@ -443,10 +453,14 @@ the loop, so the page can be iterated on at a desk — and looked at on a phone,
 which is what it is for.
 
 ```bash
-docker compose up gui                            # http://localhost:8080/
+docker compose up gui                            # http://localhost:8080/ -> :80 inside
 PLAYSTICK_GUI_LIBRARY=~/Videos docker compose up gui   # your own films
 docker compose down -v                           # reset the library and posters
 ```
+
+The container serves on port 80 exactly as the device does; only the *published* port is
+8080, because a host port below 1024 is refused under rootless Docker. Override with
+`PLAYSTICK_GUI_PORT`.
 
 The daemon and the page are bind-mounted from `roles/player/files/`, and the
 daemon re-reads `ui.html` on every request: edit the HTML, reload the browser.
@@ -754,12 +768,12 @@ All in `group_vars/all.yml`.
 | `enable_zram` / `claim_tty1` | `true` / `true` | zram swap; mask `getty@tty1` for kmssink |
 | `trim_enabled` | `true` | The whole trim role |
 | `probe_iperf_server` | `""` | Control-machine address for the throughput test |
-| `nas_server` / `nas_share` | `""` / `""` | The CIFS movie library. Both empty skips the role entirely |
+| `nas_server` / `nas_share` | `""` / `""` | The CIFS movie library. Set these in `host_vars/vivostick/local.yml`, not here. Both empty skips the role entirely. `nas_share` is the share **name**, not the server-side path |
 | `nas_mount_point` | `/srv/movies` | Where the share appears; the unit names are derived from it |
 | `nas_username` / `nas_password` | `""` | Vault these. Empty username mounts as guest |
 | `player_vo` / `player_hwdec` | `drm` / `no` | Unproven pair — see [Movies from the NAS](#movies-from-the-nas) |
 | `player_audio` | `false` | `--ao=null`. **Films play silently** until HDMI audio is probed |
-| `player_enabled` / `player_port` | `true` / `8080` | The web UI |
+| `player_enabled` / `player_port` | `true` / `80` | The web UI. Below 1024 needs `player_user: root`, which is the default |
 | `player_airplay_unit` | *(derived)* | The unit the player stops to take DRM master. Follows `uxplay_output_path` |
 
 The rest live in `roles/nas/defaults/main.yml` and `roles/player/defaults/main.yml`, the way

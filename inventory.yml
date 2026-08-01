@@ -1,9 +1,20 @@
 ---
-# Fill in ansible_host and ansible_user for the VivoStick, then:
-#   ansible -m ping vivostick
+# The stick is declared here and located next door. ansible_host and
+# ansible_user deliberately do not appear: this file is committed, and an
+# address and a login are facts about one LAN rather than about the appliance.
+# They live in host_vars/vivostick/local.yml, which is gitignored -- copy the
+# template to it and fill it in:
+#
+#   cp host_vars/vivostick/local.yml.example host_vars/vivostick/local.yml
+#   ./actl 'ansible -m ping vivostick'
+#
+# Playbook host_vars outrank inventory host vars, so putting them back here
+# would not override that file anyway. site.yml checks it exists before trying
+# to connect: without it Ansible falls back to the inventory name and reports
+# "Could not resolve hostname vivostick", which does not point at the cause.
 all:
   hosts:
     vivostick:
-      ansible_host: 10.0.1.228       # IP or hostname of the TS10
-      ansible_user: simukka       # login user with sudo
+      # Not site-specific: Ubuntu 26.04 puts python3 exactly here, and letting
+      # Ansible discover it costs a round trip on every run.
       ansible_python_interpreter: /usr/bin/python3
