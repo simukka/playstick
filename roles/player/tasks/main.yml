@@ -73,6 +73,52 @@
         group: root
         mode: "0755"
 
+    # The package first, then the entry point that imports it: a half-installed
+    # daemon that restarts between the two would exec a script whose modules
+    # are the previous version.
+    #
+    # Not synchronize/rsync -- the device has no rsync and this is eight small
+    # files. The stale-module problem rsync's --delete would solve is handled
+    # below instead, because a module that was removed upstream but left behind
+    # here is dead weight that still shadows nothing and imports cleanly.
+    - name: Install the player package
+      ansible.builtin.copy:
+        src: playstick/
+        dest: /usr/local/lib/playstick/
+        owner: root
+        group: root
+        mode: "0644"
+        directory_mode: "0755"
+      register: player_package
+
+    - name: Find stale modules left by an older release
+      ansible.builtin.find:
+        paths: /usr/local/lib/playstick
+        patterns: "*.py"
+      register: player_installed
+
+    - name: Remove stale modules
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ player_installed.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      when: item.path | basename not in
+            (lookup('ansible.builtin.fileglob', role_path + '/files/playstick/*.py',
+                    wantlist=True) | map('basename') | list)
+      register: player_pruned
+
+    # Under the unit's ProtectSystem=full the daemon cannot write here, so in
+    # normal service this directory never appears. It shows up after somebody
+    # runs the script by hand as root to debug something, and then survives the
+    # next deploy -- which is the only way stale bytecode ever gets a chance.
+    - name: Drop the package bytecode cache
+      ansible.builtin.file:
+        path: /usr/local/lib/playstick/__pycache__
+        state: absent
+      when: player_package is changed or player_pruned is changed
+
     - name: Install the player daemon
       ansible.builtin.copy:
         src: playstick-web.py
@@ -136,6 +182,7 @@
         name: playstick-web.service
         state: restarted
       when: player_script is changed or player_ui is changed or player_unit is changed
+            or player_package is changed or player_pruned is changed
 
     # The port is omitted at 80 rather than printed as ":80" -- this line is
     # what somebody types into a phone, and it should be the shortest thing
@@ -148,10 +195,16 @@
           - "Movie player: http://{{ ansible_host | default(ansible_hostname) }}{{ player_url_port }}/"
           - "        also: http://{{ ansible_hostname }}.local{{ player_url_port }}/"
           - >-
-            Audio is
+            Projector audio is
             {{ 'on, via ' ~ (player_audio_device | default('mpv default', true))
                if player_audio | bool
-               else 'OFF -- films play silently. See player_audio.' }}
+               else 'OFF -- the screen is silent. See player_audio.' }}
+          - >-
+            Headphone audio is
+            {{ 'ON -- open the page on a phone, tap the speaker, pick a language.
+                Films need playstick-prep.py run over them first.'
+               if player_phone_audio | bool
+               else 'off. See player_phone_audio.' }}
 
 - name: Movie player is disabled
   when: not (player_enabled | bool)

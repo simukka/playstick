@@ -11,7 +11,7 @@
 
 [Unit]
 Description=Playstick movie player (web UI and display arbiter)
-Documentation=file:///usr/local/bin/playstick-web.py
+Documentation=file:///usr/local/lib/playstick/__init__.py
 After=network-online.target {{ player_airplay_unit }}
 Wants=network-online.target
 
@@ -30,6 +30,8 @@ Environment=PLAYSTICK_BIND={{ player_bind }}
 Environment=PLAYSTICK_PORT={{ player_port }}
 Environment=PLAYSTICK_UI=/usr/local/share/playstick/ui.html
 Environment=PLAYSTICK_LIBRARY={{ player_library_path }}
+Environment=PLAYSTICK_INDEX={{ player_index_file }}
+Environment=PLAYSTICK_SUBTITLES={{ 1 if player_subtitles | bool else 0 }}
 Environment="PLAYSTICK_EXTENSIONS={{ player_extensions | join(' ') }}"
 Environment=PLAYSTICK_MIN_SIZE_MB={{ player_min_size_mb }}
 Environment=PLAYSTICK_SCAN_DEPTH={{ player_scan_depth }}
@@ -48,6 +50,14 @@ Environment=PLAYSTICK_RESTORE_FILE=/run/playstick/restore-airplay
 Environment=PLAYSTICK_AIRPLAY_UNIT={{ player_airplay_unit }}
 Environment=PLAYSTICK_SETTLE_SECONDS={{ player_settle_seconds }}
 Environment=PLAYSTICK_AUDIO={{ 1 if player_audio | bool else 0 }}
+{# Per-language audio for headphones -- the only sound this appliance has, the
+   projector having no speakers. Policy here, mechanism in the daemon: the rate
+   limit is a property of this box's single Wi-Fi radio rather than of the code
+   that obeys it. #}
+Environment=PLAYSTICK_PHONE_AUDIO={{ 1 if player_phone_audio | bool else 0 }}
+Environment=PLAYSTICK_PHONE_AUDIO_KBPS={{ player_phone_audio_kbps }}
+Environment=PLAYSTICK_PHONE_AUDIO_BURST={{ player_phone_audio_burst_seconds }}
+Environment=PLAYSTICK_PHONE_AUDIO_STREAMS={{ player_phone_audio_max_streams }}
 {# The gate that refuses to start a film while somebody is mirroring. Same
    port, same question, as the idle clock's blank countdown. #}
 Environment=PLAYSTICK_AIRPLAY_PORT={{ uxplay_port }}
@@ -71,6 +81,24 @@ Environment=LIBVA_DRIVER_NAME={{ libva_driver }}
     against the display clock every frame, and this CPU has no headroom to
     spend on that. --profile=fast selects bilinear scaling and no dither, which
     is the right trade on 12 execution units.
+
+    --ao=null is load-bearing beyond "the projector has no speakers", and this
+    is the trap to know about before optimising it. mpv's null AO defaults to
+    untimed=no: it emulates a real device consuming samples in real time, and
+    --video-sync=audio paces the film against that. So time-pos advances at
+    exactly wall-clock rate, and time-pos is what every phone in the room syncs
+    its headphone audio to -- see player_phone_audio.
+
+    The obvious saving on a CPU with no headroom is --aid=no, on the reasonable
+    grounds that decoding an AC3 track nobody can hear is waste. Do not. It
+    moves the master clock out from under the one feature that trusts it. The
+    audio decode it saves is single-digit percent of one core; the failure it
+    causes is everybody's sound drifting away from the picture.
+
+    --framedrop=vo is the reassuring half of the same story: it drops the
+    DISPLAY of a late frame without stalling the clock, so ordinary frame drops
+    desync nobody. Only a demuxer stall does, and the daemon reports that as
+    paused-for-cache so the phones can wait it out.
 
     --input-terminal=no matters because the daemon hands mpv tty1 on stdin (its
     DRM backend wants a VT for console switching). Without this mpv would put

@@ -142,7 +142,7 @@ Three files, three jobs, and the split is worth holding onto:
 |---|---|---|
 | `group_vars/all.yml` | yes | decisions about how the appliance behaves — the same for everyone |
 | `host_vars/vivostick/local.yml` | **no** | addresses, logins, share names — true of your LAN only |
-| `host_vars/vivostick/vault.yml` | yes, **encrypted** | secrets, and nothing else |
+| `host_vars/vivostick/vault.yml` | **no**, and **encrypted** | secrets, and nothing else |
 
 Secrets do not go in `local.yml`. Gitignored is not encrypted: one `git add -f`, one
 tarball, one backup of your home directory and it is readable. That is what section 4 is
@@ -295,6 +295,61 @@ Three of those have consequences worth knowing before the run rather than after:
   `dmesg`, and `volume1/video` asks for a share called `volume1` and returns
   `mount error(2): No such file or directory`. `smbclient -L <nas> -U <user>` lists the
   real names.
+
+---
+
+## 5b. Prepare the movie library (optional, but do it)
+
+`scripts/playstick-prep.py` runs on the **developer machine** — the one with the NAS
+mounted and cores to spare — and leaves an index the daemon reads instead of walking the
+share. Without it everything still works; the stick just has to do the expensive parts
+itself, one at a time, over CIFS, on four 1.44 GHz cores.
+
+**dev machine** (needs `ffmpeg` and `ffprobe`; nothing to pip install):
+
+```bash
+./scripts/playstick-prep.py --library /mnt/nas/video --dry-run   # look first
+./scripts/playstick-prep.py --library /mnt/nas/video
+```
+
+What it writes, all of it under the library:
+
+```
+playstick-library.json      the index
+.playstick/media/           transcodes, only for files that needed one
+.playstick/posters/         one JPEG per film
+.playstick/subs/            extracted subtitles, UTF-8 SRT
+.playstick/prep-state.json  cache -- a second run is seconds, not hours
+```
+
+It never modifies or deletes a source film. Duplicates are dropped from the index and
+listed on stderr; `--duplicates-dir <path>` moves them somewhere else if you want that,
+and refuses a path inside the library.
+
+Worth knowing before the first run:
+
+- **It re-encodes anything that is not already 8-bit H.264 at 720p or below.** That is
+  HEVC, 10-bit, 4K, and any file over `--max-bitrate` (6 Mbps, which is a CIFS-over-Wi-Fi
+  limit rather than a decoder one). On a large library that is hours. `--dry-run` tells
+  you which files and why; `--transcode never` collects metadata and skips all of it.
+- **`--verify quick`** decodes the first and last seconds of every film, which is what
+  catches a download that stopped at 80%. `--verify full` decodes every frame and takes
+  as long as watching the library. `--verify probe` only reads headers.
+- **Films shorter than `--min-duration` (20 minutes) are rejected as extras**, and
+  anything matching `--skip-pattern` never gets looked at.
+- **`--tmdb-key` is off by default and sends your film titles to themoviedb.org.** It is
+  the only thing here that touches the network. Ratings and genres otherwise come from
+  `.nfo` sidecars and container tags, which is where most libraries already keep them.
+
+```bash
+./actl 'ansible-playbook site.yml -K --tags player'   # nothing to redeploy, but
+ssh <user>@<host> 'journalctl -u playstick-web -n 5'  # this line proves it took
+#   playstick: library: 92 films from /srv/movies/playstick-library.json
+```
+
+If that line says `films under /srv/movies` instead, the daemon is walking — the index is
+missing, unreadable, or written by a newer version of the script than the device has.
+That is a fallback, not a failure; the journal line above it says which.
 
 ---
 
@@ -506,6 +561,9 @@ sudo apt update && sudo apt full-upgrade
 | `Malformed UNC in devname` in `dmesg`, the mount unit failing with nothing useful in its own journal | `nas_share` holds a path, not a share name. `/volume1/video` renders `//nas//volume1/video`, which is not a UNC. Use `video`. The role now asserts before this reaches the kernel |
 | `mount error(2): No such file or directory` on the share | The share name does not exist on the server — `volume1/video` asks for a share called `volume1`. `smbclient -L <nas> -U <user>` lists the real ones |
 | `mount error(13): Permission denied` on the share | Credentials. An empty `nas_username` mounts as **guest**, and most NAS boxes refuse that outright: put `nas_username`/`nas_password` in `host_vars/vivostick/vault.yml`. If they are set, check the vault is actually being loaded — see the two rows above about `group_vars` |
+| The grid shows a film twice, or shows one that will not play | The daemon is walking the share, not reading an index. Run `scripts/playstick-prep.py` on the dev machine — de-duplication and verification happen there, not on the stick |
+| `index unusable (...); walking the share instead` in the journal | Exactly what it says, and the run continues. Re-run the prep script; if it mentions a schema number, the device's player daemon is older than the script that wrote the index |
+| A prepared film plays but has no subtitles | They are passed as `--sub-file` from `.playstick/subs/`. Check `player_subtitles` is true and that the file survived the share being remounted |
 | Films play but silently | `player_audio: false` is the shipped default. See the README on `hdmi-lpe-audio` before changing it |
 | `No test clips found in roles/probe/files/` | Run `./actl ./scripts/make-testclip.sh`, then re-run the play |
 

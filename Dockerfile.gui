@@ -39,6 +39,7 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+COPY roles/player/files/playstick/ /usr/local/lib/playstick/
 COPY roles/player/files/playstick-web.py /usr/local/bin/playstick-web.py
 COPY roles/player/files/playstick-ui.html /usr/local/share/playstick/ui.html
 COPY scripts/gui-entrypoint.sh /usr/local/bin/playstick-gui-entrypoint

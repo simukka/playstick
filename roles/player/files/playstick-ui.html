@@ -108,10 +108,145 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
   flex: 1; min-height: 72px; border-radius: 18px; background: var(--card);
   font-size: 32px; font-weight: 700;
 }
+
+/* --- headphone audio ---------------------------------------------------- */
+/* The icon lives outside both views, because .view { display: none } would
+   otherwise take it away on whichever one is not showing -- and it is meant to
+   be reachable at all times, including on the grid before a film starts. That
+   is not only for convenience: tapping it there is the user gesture iOS wants
+   before it will let a page play audio later. */
+#audioBtn {
+  position: fixed; z-index: 20;
+  top: calc(10px + env(safe-area-inset-top)); right: 12px;
+  width: 52px; height: 52px; border-radius: 50%;
+  background: var(--card); color: var(--ink);
+  display: none; align-items: center; justify-content: center;
+}
+#audioBtn.on { display: inline-flex; }
+#audioBtn.live { background: var(--accent); color: #06121f; }
+#audioBtn svg { width: 26px; height: 26px; display: block; }
+
+#sheetScrim {
+  position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.6);
+  display: none;
+}
+#sheetScrim.on { display: block; }
+
+#sheet {
+  position: fixed; z-index: 31; left: 0; right: 0; bottom: 0;
+  background: #1b1b21; border-radius: 22px 22px 0 0;
+  padding: 8px 12px calc(18px + env(safe-area-inset-bottom));
+  max-height: 82vh; overflow-y: auto;
+  display: none;
+}
+#sheet.on { display: block; }
+#sheetGrip {
+  width: 44px; height: 5px; border-radius: 3px; background: #3a3a45;
+  margin: 8px auto 4px;
+}
+#sheet h2 {
+  font-size: 14px; font-weight: 700; letter-spacing: .8px;
+  text-transform: uppercase; color: var(--dim); margin: 18px 6px 8px;
+}
+/* Rows are big for the same reason the poster tiles are: a child in a dark
+   room is the person using this. */
+.row {
+  display: flex; align-items: center; gap: 14px; width: 100%;
+  min-height: 62px; padding: 0 14px; border-radius: 14px;
+  font-size: 19px; text-align: left;
+}
+.row:active { background: #26262e; }
+.row.sel { background: #26262e; }
+.row .tick { margin-left: auto; color: var(--accent); font-size: 22px; }
+.row .sub { display: block; font-size: 14px; color: var(--dim); margin-top: 2px; }
+.row .grow { flex: 1; min-width: 0; }
+#sheetNote {
+  color: var(--dim); font-size: 16px; line-height: 1.45; padding: 6px 14px 2px;
+}
+
+#syncRow { display: none; align-items: center; gap: 12px; padding: 4px 8px; }
+#syncRow.on { display: flex; }
+#syncRow button {
+  width: 76px; min-height: 60px; border-radius: 16px; background: var(--card);
+  font-size: 28px; font-weight: 700;
+}
+#syncVal { flex: 1; text-align: center; font-size: 19px; font-variant-numeric: tabular-nums; }
+#syncHint { color: var(--dim); font-size: 14px; padding: 2px 14px 0; line-height: 1.4; }
+
+/* Shown when iOS refuses to start audio without a fresh tap -- after a reload,
+   or in Low Power Mode. Never a silent failure: somebody is sitting there
+   wearing headphones that are not playing. */
+#tapToListen {
+  position: fixed; z-index: 25; left: 12px; right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  min-height: 84px; border-radius: 20px; background: var(--accent);
+  color: #06121f; font-size: 22px; font-weight: 700; letter-spacing: .4px;
+  display: none;
+}
+#tapToListen.on { display: block; }
+
+#syncDebug {
+  color: var(--dim); font-size: 13px; padding: 10px 14px 0;
+  font-variant-numeric: tabular-nums; display: none;
+  /* Second line is the rolling counters, so the newline has to survive. */
+  white-space: pre-line; line-height: 1.5;
+}
+#syncDebug.on { display: block; }
+
+/* The controller's constants, editable on the phone that is hearing the
+   problem. Only ever rendered under ?debug -- see tuneLoad(). */
+#tuneHead, #tuneList, #tuneFoot { display: none; }
+#tuneHead.on, #tuneList.on { display: block; }
+#tuneFoot.on { display: flex; }
+.tune { display: flex; align-items: center; gap: 8px; padding: 8px 14px 0; }
+.tune .tname { flex: 1; font-size: 15px; min-width: 0; }
+.tune .tval {
+  min-width: 104px; text-align: right; font-size: 15px; color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.tune .tval.changed { color: var(--accent); font-weight: 700; }
+.tune button {
+  width: 54px; min-height: 46px; border-radius: 13px; background: var(--card);
+  font-size: 23px; font-weight: 700;
+}
+.thint { color: var(--dim); font-size: 12.5px; line-height: 1.4; padding: 3px 14px 6px; }
+#tuneFoot { gap: 10px; padding: 8px 14px 2px; }
+#tuneFoot button {
+  flex: 1; min-height: 50px; border-radius: 14px; background: var(--card);
+  font-size: 16px;
+}
+#tuneNote { color: var(--dim); font-size: 12.5px; line-height: 1.4; padding: 4px 14px 0; }
 </style>
 </head>
 <body>
 <div id="banner"></div>
+
+<button id="audioBtn" aria-label="Sound"></button>
+<button id="tapToListen">TAP TO LISTEN</button>
+
+<div id="sheetScrim"></div>
+<div id="sheet" role="dialog" aria-modal="true" aria-label="Sound">
+  <div id="sheetGrip"></div>
+  <h2>Sound</h2>
+  <div id="destList"></div>
+  <h2>Language</h2>
+  <div id="langList"></div>
+  <div id="sheetNote"></div>
+  <h2 id="syncHead">Sync</h2>
+  <div id="syncRow">
+    <button id="syncBack" aria-label="Sound earlier">&minus;</button>
+    <span id="syncVal">0 ms</span>
+    <button id="syncFwd" aria-label="Sound later">&plus;</button>
+  </div>
+  <div id="syncHint">Nudge this if the words land before or after the mouths.</div>
+  <div id="syncDebug"></div>
+  <h2 id="tuneHead">Playback parameters</h2>
+  <div id="tuneList"></div>
+  <div id="tuneFoot">
+    <button id="tuneReset" type="button">Reset to shipped</button>
+  </div>
+  <div id="tuneNote"></div>
+</div>
 
 <div id="library" class="view on">
   <h1>Playstick</h1>
@@ -224,6 +359,14 @@ function loadLibrary() {
     if (changed) { renderLibrary(d.items); }
     else { refreshThumbs(d.items); }
     library = d.items;
+    // Every language anything in the library has, so that somebody opening the
+    // sheet before a film starts has a real list to state a preference from.
+    var seen = {};
+    d.items.forEach(function (item) {
+      (item.audio_langs || []).forEach(function (code) { seen[code] = true; });
+    });
+    libraryLangs = Object.keys(seen).sort();
+    if (sheetOpen()) { paintSheet(); }
     if (!d.available) {
       el("empty").hidden = false;
       el("empty").textContent = "Can't reach the movies right now.";
@@ -290,9 +433,24 @@ function apply(s) {
   }
 }
 
+var pollTimer = null;
+
 function poll() {
-  fetch("/api/status").then(function (r) { return r.json(); }).then(function (s) {
+  // Cancelling any pending tick first, because visibilitychange calls this
+  // directly to resync a phone coming out of a pocket -- and two overlapping
+  // poll chains would double every request for the rest of the film.
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  var sent = performance.now();
+  // Same-origin, so a custom header costs no preflight. Built here rather than
+  // in the response handler because it has to describe the interval that is
+  // ENDING, and because a poll that never comes back should still have
+  // reported what the phone saw before it stopped hearing from the daemon.
+  var opts = debugSync ? { headers: { "X-Playstick-Sync": syncTelemetry() } } : undefined;
+  fetch("/api/status", opts).then(function (r) { return r.json(); }).then(function (s) {
+    var rtt = (performance.now() - sent) / 1000;
+    sndLastRtt = rtt;
     apply(s);
+    audioStatus(s, rtt);
     // The grid only needs the library occasionally; the now-playing view not
     // at all. Posters arriving is the only thing that changes it.
     var onGrid = state !== "playing" && state !== "paused";
@@ -302,7 +460,10 @@ function poll() {
     showBanner("Lost the projector. Trying again…");
   }).then(function () {
     var soon = (state === "playing" || state === "paused") ? 1000 : 3000;
-    setTimeout(poll, soon);
+    // In a pocket the correction loop is not running and these timers are
+    // throttled anyway, so polling harder only costs battery.
+    if (document.hidden) { soon = 5000; }
+    pollTimer = setTimeout(poll, soon);
   });
 }
 
@@ -327,6 +488,1041 @@ el("volDown").addEventListener("click", function () {
 el("volUp").addEventListener("click", function () {
   post("/api/volume", { delta: 10 });
 });
+
+/* --- headphone audio -----------------------------------------------------
+
+   The projector is silent -- it has no speakers and this box has no working
+   audio output -- so everybody who wants to hear the film listens on their own
+   phone, in their own language. The only job of the code below is to keep that
+   audio pinned to mpv's clock closely enough that lips match.
+
+   "Closely enough" is tighter than it sounds. Nobody hears room speakers, but
+   everybody is looking at the screen, and the eye starts noticing when sound
+   leads the picture by about 45 ms or lags it by about 125 ms. A once-a-second
+   poll over Wi-Fi cannot measure that directly, so this does not chase the
+   poll. It fits a LINE to mpv's clock -- where the film was, and how fast the
+   two clocks run relative to each other -- and evaluates that line against the
+   phone's own clock, continuously.
+
+   The rate half is what makes a pocketed phone work, and it is the part that
+   is easy to leave out. iOS keeps a playing <audio> element going when the
+   screen locks but suspends this page's timers, so for the twenty minutes
+   somebody has their phone in a pocket there is nobody home to correct
+   anything. Two consumer crystals differ by up to ~100 ppm, which is about
+   0.7 s over a feature film -- visible. A playbackRate baked into the element
+   before the screen locked keeps working after it locks; an offset correction
+   would not. So the integrator below IS the clock-ratio estimate: whatever
+   rate holds the error at zero is, by definition, the ratio between this
+   phone's audio clock and mpv's.
+
+   Two iOS rules shape the rest. Audio needs a user gesture to start, and the
+   element that gets it must be the same one that plays later -- hence a single
+   Audio() made once and never replaced, unlocked by the tap on "This device".
+   And the hardware ring/silent switch mutes Web Audio but does NOT mute media
+   elements, which is why every correction here goes through playbackRate and
+   there is no AudioContext anywhere in this file.
+*/
+
+var LANG_NAMES = {
+  eng: "English", en: "English", fin: "Suomi", fi: "Suomi",
+  swe: "Svenska", sv: "Svenska", nor: "Norsk", no: "Norsk",
+  dan: "Dansk", da: "Dansk", deu: "Deutsch", ger: "Deutsch", de: "Deutsch",
+  fra: "Français", fre: "Français", fr: "Français",
+  spa: "Español", es: "Español", ita: "Italiano", it: "Italiano",
+  nld: "Nederlands", dut: "Nederlands", nl: "Nederlands",
+  pol: "Polski", pl: "Polski", rus: "Русский", ru: "Русский",
+  jpn: "日本語", ja: "日本語", est: "Eesti", et: "Eesti"
+};
+
+var SEEK_LIMIT = 0.25;    // seconds of error that a nudge cannot fix in time.
+                          // The nudge is capped at RATE_LIMIT, so an error
+                          // takes err/RATE_LIMIT to walk out: this is 12.5
+                          // seconds, and the 1.0 it used to be was FIFTY --
+                          // fifty seconds saturated at the clamp, where the
+                          // command cannot move and the integrator is frozen.
+                          // Kept above the worst standing error ever measured
+                          // (216 ms) so that a loop which somehow re-saturates
+                          // degrades into nudging rather than into a cut every
+                          // few seconds.
+var SEEK_SAMPLES = 3;     // offset samples before the element may be placed
+var KP = 0.15;            // proportional: closes a 100 ms error in ~7 s
+var KI = 0.002;           // integral: converges on the clock ratio in ~a minute
+var RATE_LIMIT = 0.02;    // never bend playback by more than 2%
+var TICK = 250;           // ms between corrections
+var SLEW = 0.002;         // fastest the applied offset may chase the measured one
+var RATE_EPS = 0.0001;    // rate change too small to be worth an audible write
+var ERR_LP = 0.1;         // EMA weight on a fresh error sample. Lags ~2 s,
+                          // against a loop that closes in ~7 s, so it costs
+                          // phase margin the loop can afford and buys a 30x
+                          // cut in the size of the biggest rate write.
+var MOVED = 0.85;         // fraction of real time a film must cover to count
+                          // as still playing -- above poll jitter, below the
+                          // shortest stall worth reacting to
+var STALL = 0.03;         // shortfall in the element's own clock, over one
+                          // TICK, that counts as a stall rather than as
+                          // reporting jitter. iOS quantises currentTime to
+                          // decoded-frame boundaries -- 21.3 ms for AAC-LC --
+                          // so anything at or under that is the staircase and
+                          // not a dropout. 30 ms clears it without hiding
+                          // anything a listener could hear.
+
+/* Every constant above, editable from the phone -- under ?debug only.
+
+   The reason this exists: the fault is an iPhone's audio pipeline on somebody
+   else's Wi-Fi, and the loop between "change a number" and "hear whether it
+   helped" was an Ansible run, a service restart and a reload on the phone. It
+   is now a tap. Two of these constants have already been set wrong from the
+   armchair -- SEEK_LIMIT below the cost of the seek it triggers, RATE_EPS below
+   the noise it was meant to reject -- and neither was findable without a real
+   device making a real sound.
+
+   `get`/`set` closures rather than an object of values, so the declarations
+   above keep their comments and no line of the controller has to change to
+   make one of them adjustable. Display units match the telemetry's: ppm and
+   milliseconds, so a number read off the journal can be typed straight in. */
+var TUNABLES = [
+  { code: "sl", name: "SEEK_LIMIT", label: "Seek threshold", unit: "ms",
+    scale: 1000, min: 50, max: 3000, step: 50,
+    hint: "Error that gets a hard cut instead of a nudge. Must stay above what "
+        + "a seek costs on the device (~250 ms measured) or every seek "
+        + "recreates the error that triggered it.",
+    get: function () { return SEEK_LIMIT; },
+    set: function (v) { SEEK_LIMIT = v; } },
+
+  { code: "ss", name: "SEEK_SAMPLES", label: "Samples before placing", unit: "",
+    scale: 1, min: 1, max: 8, step: 1,
+    hint: "Offset samples the window must hold before the element is placed. "
+        + "One is a guess: the max filter has nothing to reject.",
+    get: function () { return SEEK_SAMPLES; },
+    set: function (v) { SEEK_SAMPLES = v; } },
+
+  { code: "kp", name: "KP", label: "Proportional gain", unit: "ppm/ms",
+    scale: 1000, min: 0, max: 400, step: 5,
+    hint: "Rate commanded per millisecond of error. At 150, one frame of "
+        + "currentTime quantisation (21 ms) asks for 3150 ppm.",
+    get: function () { return KP; },
+    set: function (v) { KP = v; } },
+
+  { code: "ki", name: "KI", label: "Integral gain", unit: "ppm/ms/s",
+    scale: 1000, min: 0, max: 20, step: 0.5,
+    hint: "How fast the clock-ratio estimate accumulates. This is the term "
+        + "that holds a pocketed phone in sync on its own.",
+    get: function () { return KI; },
+    set: function (v) { KI = v; } },
+
+  { code: "re", name: "RATE_EPS", label: "Write deadband", unit: "ppm",
+    scale: 1e6, min: 0, max: 5000, step: 50,
+    hint: "Rate change too small to be worth writing. Every write re-arms the "
+        + "iOS pipeline. Below the loop's own noise it does nothing; the error "
+        + "it leaves uncorrected is this over the proportional gain.",
+    get: function () { return RATE_EPS; },
+    set: function (v) { RATE_EPS = v; } },
+
+  { code: "rl", name: "RATE_LIMIT", label: "Rate clamp", unit: "ppm",
+    scale: 1e6, min: 2000, max: 50000, step: 1000,
+    hint: "Never bend playback further than this. An error takes error/clamp "
+        + "to walk out, and at the clamp the integrator is frozen.",
+    get: function () { return RATE_LIMIT; },
+    set: function (v) { RATE_LIMIT = v; } },
+
+  { code: "el", name: "ERR_LP", label: "Error smoothing", unit: "%",
+    scale: 100, min: 1, max: 100, step: 1,
+    hint: "Weight given to each fresh error sample. Lower is smoother and "
+        + "slower; 100% is no filter at all.",
+    get: function () { return ERR_LP; },
+    set: function (v) { ERR_LP = v; } },
+
+  { code: "sw", name: "SLEW", label: "Offset slew", unit: "ppm",
+    scale: 1e6, min: 100, max: 20000, step: 250,
+    hint: "Fastest the applied clock offset may chase a fresh measurement. "
+        + "Low keeps the rate smooth and makes a corrected model take minutes "
+        + "to reach the element.",
+    get: function () { return SLEW; },
+    set: function (v) { SLEW = v; } },
+
+  { code: "tk", name: "TICK", label: "Correction interval", unit: "ms",
+    scale: 1, min: 50, max: 1000, step: 50,
+    hint: "How often the loop runs. Also the window the stall detector "
+        + "measures over, so changing it changes what lag means.",
+    get: function () { return TICK; },
+    set: function (v) { TICK = v; armTick(); } },
+
+  { code: "st", name: "STALL", label: "Stall threshold", unit: "ms",
+    scale: 1000, min: 5, max: 500, step: 5,
+    hint: "Shortfall counted as a stall rather than as reporting jitter. "
+        + "Telemetry only -- it changes nothing a listener hears.",
+    get: function () { return STALL; },
+    set: function (v) { STALL = v; } }
+];
+
+var snd = new Audio();
+snd.preload = "auto";
+// Rate correction is a pitch shift rather than a time stretch. At the fraction
+// of a percent this normally runs at that is inaudible, and it avoids the
+// artefacts that stretching speech produces.
+snd.preservesPitch = false;
+snd.webkitPreservesPitch = false;
+snd.mozPreservesPitch = false;
+
+var sndDest = localStorage.getItem("ps.snd.dest") || "mute";
+var sndLang = localStorage.getItem("ps.snd.lang") || "";
+var sndTrim = parseInt(localStorage.getItem("ps.snd.trim") || "0", 10) || 0;
+var sndDrift = 0;         // the clock-ratio estimate, as a rate offset
+var sndOffsets = [];      // recent (film position - local clock) samples
+// Measured and applied are deliberately two variables. The measurement steps;
+// what the target is allowed to follow does not. See sndSlew().
+var sndClockOffRaw = null;
+var sndClockOff = null;
+var sndTracks = [];
+var sndFilmId = "";
+var sndTrackN = null;
+var sndTrackOffset = 0;
+var sndPhoneAudio = true;
+var sndNeedGesture = false;
+var sndSeekPending = false;
+var sndErr = 0;           // raw, for the seek test
+var sndErrF = null;       // smoothed, for the P and I terms
+var sndRateSet = 1;       // last value actually written to the element
+var sndLastPos = 0;       // previous poll's film position, and when it arrived
+var sndLastPosAt = null;
+var libraryLangs = [];
+// Counters behind ?debug, so the cause of a dropout can be read off the phone
+// rather than guessed at: a "wait" is the network starving the element, a
+// "write" is us re-arming its pipeline. They are not the same bug.
+//
+// Monotonic totals, never zeroed. Two consumers read them -- the on-screen
+// overlay over a rolling ten seconds and the telemetry header over one poll --
+// and each keeps its own baseline, because whichever one reset the counters
+// last would otherwise silently empty the other's window.
+var sndRateWrites = 0, sndSeeks = 0, sndWaits = 0, sndBufSeen = 0;
+var sndOffStep = 0;
+var sndLastRtt = 0;
+var sndStatAt = 0;
+var sndStatBase = { rate: 0, seeks: 0, waits: 0, buf: 0 };
+var sndStat = { rate: 0, seeks: 0, waits: 0, buf: 0 };
+var debugSync = location.search.indexOf("debug") >= 0;
+
+// Telemetry sent to the daemon on every status poll while ?debug is on, so a
+// film watched on a real phone over real Wi-Fi leaves a record in the journal.
+// The overlay can only be read by somebody holding the phone and only shows
+// now; this is the same numbers, timestamped, for a whole film.
+//
+// The correction loop runs at TICK and the poll runs at 1 s, so a poll that
+// merely sampled would miss three quarters of what happened. What is sent is
+// PEAKS and COUNTS since the previous poll -- one dropout in four ticks is the
+// thing being hunted, and an average would hide exactly that.
+var telBase = { rate: 0, seeks: 0, waits: 0, buf: 0 };
+var telErrPeak = 0;       // signed: which side of the picture the sound was on
+var telRateStep = 0;      // largest single write to playbackRate
+var telAheadMin = null;   // low-water mark of the element's own buffer
+var telLag = 0;           // worst shortfall in the element's clock
+var telStalls = 0;        // ...and how many exceeded STALL
+// Distinguishes phones in the journal when several people are listening, and
+// distinguishes reloads of the same phone. Not an identity: it lasts as long
+// as the page does.
+var debugId = Math.random().toString(16).slice(2, 8);
+// Baseline for the stall detector. Null whenever the element's clock is not
+// supposed to be advancing, so a pause is never counted as a dropout.
+var sndPrevCT = 0;
+var sndPrevAt = null;
+
+function nowSec() { return performance.now() / 1000; }
+function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+function langName(code, title) {
+  if (title) { return title; }
+  return LANG_NAMES[code] || (code && code !== "und" ? code.toUpperCase() : "Sound");
+}
+
+function listening() { return sndDest === "device"; }
+
+/* -- the clock model -- */
+
+function sndResetClock() {
+  sndOffsets = [];
+  sndClockOffRaw = null;
+  sndClockOff = null;
+  sndErrF = null;
+  sndLastPosAt = null;
+  // The element is about to stop, seek, or start somewhere new, and none of
+  // those is a dropout. Dropping the baseline rather than counting the jump.
+  sndPrevAt = null;
+  sndSeekPending = true;
+}
+
+function sndSample(position, rtt) {
+  // The server extrapolates its cached position forward, so this number
+  // describes the moment it was sent -- about rtt/2 ago by this phone's clock.
+  // That is why rtt/2 is ADDED: the sample is older than the reading of the
+  // clock it is being compared against, so it has to be carried forward to
+  // meet it. Subtracting instead leaves every listener a full round trip late.
+  var off = (position + rtt / 2) - nowSec();
+  sndOffsets.push(off);
+  if (sndOffsets.length > 8) { sndOffsets.shift(); }
+  // The MAXIMUM, not the average. Network delay can only ever make a sample
+  // look older than it is, never newer, so the least-delayed sample in the
+  // window is the truthful one and the rest are noise in one direction. This
+  // is the trick NTP uses, for the same reason.
+  var was = sndClockOffRaw;
+  sndClockOffRaw = Math.max.apply(null, sndOffsets);
+  sndOffStep = was === null ? 0 : sndClockOffRaw - was;
+}
+
+function sndClockReady() {
+  // Enough samples for the max filter to have rejected something. Three is not
+  // arbitrary: the second sample is what first exposes a stale first one -- on
+  // the capture that prompted this it moved the estimate 142 ms -- and the
+  // third is what stops a single unlucky pair from being the whole model.
+  return sndOffsets.length >= SEEK_SAMPLES;
+}
+
+function sndSlew() {
+  // A max over a sliding window is a STEP function -- it jumps when a new
+  // sample wins and falls off a cliff when the reigning one ages out -- and
+  // feeding that to sndTarget() put a step in the error once a second, which
+  // KP turned into a step in playbackRate. On iOS that write lands on
+  // AVPlayer.rate, which re-arms the render pipeline instead of gliding, and
+  // it is audible as a click. So the measurement is allowed to step and the
+  // applied offset is not: it walks toward the measurement at SLEW at most,
+  // which reaches the element as a small steady rate offset rather than a
+  // spike. Nothing here chases the poll any more, which was always the intent.
+  if (sndClockOffRaw === null) { return false; }
+  if (sndClockOff === null) { sndClockOff = sndClockOffRaw; return false; }
+  var gap = sndClockOffRaw - sndClockOff;
+  var step = SLEW * (TICK / 1000);
+  sndClockOff += clamp(gap, -step, step);
+  return Math.abs(gap) > step;      // still catching up
+}
+
+function sndTarget() {
+  if (sndClockOff === null) { return null; }
+  // Where in the film this phone should be right now, plus whatever the
+  // extracted track's own origin turned out to be, plus this listener's own
+  // headphone latency. The last one is why the trim is per device: wired
+  // headphones are ~30 ms behind, AirPods ~200 ms, and both people are
+  // watching the same screen.
+  return sndClockOff + nowSec() + sndTrackOffset + sndTrim / 1000;
+}
+
+/* -- the element -- */
+
+function sndStop() {
+  // Cleared before the element is touched, not after: dropping a src makes
+  // some browsers fire an error event, and the handler below uses this to tell
+  // "the NAS lost the file" from "we let go of it on purpose".
+  sndTrackN = null;
+  if (!snd.paused) { snd.pause(); }
+  if (snd.getAttribute("src")) {
+    // Drop the connection rather than leaving it parked: the daemon holds a
+    // thread for every listener and only has so many.
+    snd.removeAttribute("src");
+    snd.load();
+  }
+  sndResetClock();
+  paintAudioBtn();
+}
+
+function sndLoad(n) {
+  var track = null;
+  for (var i = 0; i < sndTracks.length; i++) {
+    if (sndTracks[i].n === n) { track = sndTracks[i]; }
+  }
+  if (!track || !sndFilmId) { return; }
+  sndTrackN = n;
+  sndTrackOffset = track.offset || 0;
+  sndDrift = 0;
+  sndErrF = null;
+  sndSeekPending = true;
+  // A fresh track starts from a known rate, so that the deadband in setRate()
+  // is comparing against what the element is actually doing.
+  sndRateSet = 1;
+  snd.playbackRate = 1;
+  snd.src = "/api/audio/" + sndFilmId + "/" + n;
+  snd.load();
+  mediaSession();
+}
+
+function sndPlay() {
+  var playing = snd.play();
+  if (playing && playing.catch) {
+    playing.then(function () {
+      sndNeedGesture = false;
+      el("tapToListen").classList.remove("on");
+      paintAudioBtn();
+    }).catch(function () {
+      // iOS refused: the page was reloaded, or Low Power Mode is on, or the
+      // per-site autoplay setting says no. Ask for a tap rather than leaving
+      // somebody sitting in silence wondering.
+      sndNeedGesture = true;
+      el("tapToListen").classList.add("on");
+    });
+  }
+}
+
+function setRate(r) {
+  r = clamp(r, 1 - RATE_LIMIT, 1 + RATE_LIMIT);
+  // Writing playbackRate is not free on iOS -- see the note in sndSlew() -- so
+  // it is only written when the command has actually moved. The error this
+  // leaves uncorrected is RATE_EPS/KP, under a millisecond, against a
+  // perception threshold of forty-five.
+  var moved = Math.abs(r - sndRateSet);
+  if (moved < RATE_EPS) { return; }
+  if (moved > telRateStep) { telRateStep = moved; }
+  sndRateSet = r;
+  snd.playbackRate = r;
+  sndRateWrites++;
+}
+
+/* -- what the element is actually doing -- */
+
+function sndAhead() {
+  // Seconds of decoded audio past the play head. The number that separates the
+  // two candidate causes: if this collapses toward zero at each dropout the
+  // network or the daemon's pacing is starving the element, and if it sits at
+  // tens of seconds while the sound still breaks up, nothing is being starved
+  // and the fault is on this side of the socket.
+  var n = snd.buffered.length;
+  if (!n) { return null; }
+  var ct = snd.currentTime;
+  for (var i = 0; i < n; i++) {
+    if (snd.buffered.start(i) <= ct + 0.25 && ct <= snd.buffered.end(i) + 0.25) {
+      return snd.buffered.end(i) - ct;
+    }
+  }
+  return 0;              // buffered somewhere, but not where we are playing
+}
+
+function sndWatchClock() {
+  // Did the element's own clock cover the ground it should have? This is the
+  // only thing here that measures the SYMPTOM rather than a suspected cause,
+  // and it is deliberately independent of every other counter: an interruption
+  // that fires no media event and moves no rate still shows up as time the
+  // element did not play. Compared against sndRateSet rather than 1, because a
+  // deliberate 0.3% slowdown is not a stall.
+  var now = nowSec();
+  var ct = snd.currentTime;
+  if (sndPrevAt !== null) {
+    var missing = (now - sndPrevAt) * sndRateSet - (ct - sndPrevCT);
+    if (missing > telLag) { telLag = missing; }
+    if (missing > STALL) { telStalls++; }
+  }
+  sndPrevAt = now;
+  sndPrevCT = ct;
+}
+
+function sndCorrect() {
+  if (!listening() || snd.paused) { sndPrevAt = null; return; }
+  if (debugSync) {
+    // At TICK rather than at the poll, because four ticks fit inside one poll
+    // and the dropout being chased is shorter than either.
+    sndWatchClock();
+    var ahead = sndAhead();
+    if (ahead !== null && (telAheadMin === null || ahead < telAheadMin)) {
+      telAheadMin = ahead;
+    }
+  }
+  if (!sndClockReady()) {
+    // Nothing is placed off a thin model -- not a seek, and not a nudge. Two
+    // ways to arrive here, and they want opposite handling:
+    //
+    // Never placed at all (sndSeekPending): a film starting, a resume, or a
+    // tap. The taps have to call play() inside the gesture or iOS withholds
+    // the permission for good, so the element is allowed to start and is
+    // parked here a tick later; the poll restarts it once the window fills.
+    //
+    // Placed, then the window was emptied under it: a phone coming out of a
+    // pocket, where visibilitychange drops the stale offsets but deliberately
+    // keeps the clock ratio. That element is already running and close, on the
+    // one estimate that survives a locked screen. Pausing it would put a
+    // three-second silence into the film every time somebody glanced at the
+    // time, so it free-runs on the ratio for another few polls instead --
+    // which is what it has been doing for the whole twenty minutes anyway.
+    if (sndSeekPending && !snd.paused) {
+      snd.pause();
+      sndPrevAt = null;
+    }
+    return;
+  }
+  var slewing = sndSlew();
+  if (sndClockOff === null) { return; }
+  if (!snd.duration) { return; }        // metadata has not arrived yet
+  var want = sndTarget();
+  if (want === null) { return; }
+  want = clamp(want, 0, snd.duration);
+  sndErr = snd.currentTime - want;
+  if (Math.abs(sndErr) > Math.abs(telErrPeak)) { telErrPeak = sndErr; }
+
+  if (sndSeekPending || Math.abs(sndErr) > SEEK_LIMIT) {
+    // Rare by design: the start of a track, a resume, and the far side of a
+    // stall. Every hard seek is an audible cut and a fresh random read across
+    // CIFS, so the nudge below is what does the routine work.
+    snd.currentTime = want;
+    sndSeekPending = false;
+    sndErrF = null;
+    sndSeeks++;
+    // A seek moves the clock on purpose. Counting the jump as a stall would
+    // report the loudest artefact this code produces as if it were the fault
+    // being looked for.
+    sndPrevAt = null;
+    return;
+  }
+  // iOS reports currentTime on decoded-frame boundaries rather than
+  // continuously, so read at 4 Hz it is a staircase. KP would put that
+  // quantisation straight into the rate; the raw value above is kept for the
+  // seek test, where a real desync must not be smoothed away.
+  sndErrF = sndErrF === null ? sndErr : sndErrF + ERR_LP * (sndErr - sndErrF);
+
+  // While the offset is still walking toward a fresh measurement the loop is
+  // carrying a deliberate lag, and that lag is not clock drift. Integrating it
+  // would poison the one estimate that has to survive a locked screen.
+  if (!slewing) {
+    sndDrift = clamp(sndDrift + sndErrF * KI * (TICK / 1000),
+                     -RATE_LIMIT, RATE_LIMIT);
+  }
+  setRate(1 - sndDrift - sndErrF * KP);
+}
+
+/* -- following the film -- */
+
+function audioStatus(s, rtt) {
+  sndPhoneAudio = s.phone_audio !== false;
+  var wasFilm = sndFilmId;
+  sndFilmId = s.id || "";
+  sndTracks = s.tracks || [];
+  if (sndFilmId !== wasFilm) {
+    sndStop();
+    sndResetClock();
+    if (sheetOpen()) { paintSheet(); }
+  }
+  paintAudioBtn();
+
+  var playable = listening() && sndPhoneAudio && sndFilmId && sndTracks.length &&
+                 (s.state === "playing" || s.state === "paused");
+  if (!playable) {
+    if (sndTrackN !== null) { sndStop(); }
+    return;
+  }
+
+  if (sndTrackN === null) { sndLoad(pickTrack()); }
+
+  // A film that is paused, or one whose demuxer is waiting on the NAS, is a
+  // film whose clock has stopped. Keeping the audio running through either is
+  // how a listener ends up permanently ahead of the picture.
+  // Did the film's own clock actually move across this poll? Asked before the
+  // baseline is replaced, and the answer is what the buffering test below
+  // turns on.
+  var advanced = false;
+  if (s.position_valid && sndLastPosAt !== null) {
+    var dt = nowSec() - sndLastPosAt;
+    advanced = dt > 0 && (s.position - sndLastPos) > MOVED * dt;
+  }
+  if (s.position_valid) { sndLastPos = s.position; sndLastPosAt = nowSec(); }
+
+  if (s.state === "paused" || s.buffering) {
+    if (s.buffering) { sndBufSeen++; }
+    // mpv raises paused-for-cache for a demuxer that blinks as readily as for
+    // one that has genuinely stopped, and the two want opposite handling. The
+    // flag cannot tell them apart -- but the clock can, which is what
+    // `advanced` is. Tearing the model down empties the offset window, and the
+    // eight polls spent refilling it are eight polls of the max filter
+    // stepping on every sample, which is the very thing that is audible. So
+    // only a clock that really stopped gets the element parked; a blink that
+    // the film played straight through falls to the normal path below.
+    if (s.state === "paused" || !advanced) {
+      if (!snd.paused) { snd.pause(); }
+      sndResetClock();
+      return;
+    }
+  }
+  if (!s.position_valid) { return; }    // mpv has not said where it is yet
+
+  sndSample(s.position, rtt);
+  // Not started until there is something to place it with. The max filter in
+  // sndSample() is what rejects a sample that arrived late, and with one
+  // sample there is nothing to reject: a position the daemon extrapolated
+  // from a stale reading goes straight into the target and plants the element
+  // a second wrong. That second then has to come out through the nudge, at
+  // RATE_LIMIT, against an applied offset that is itself limited to SLEW --
+  // measured at 18 ms per second, so a minute of audible lateness. Two
+  // seconds of silence at the top of a film is the cheaper mistake.
+  if (snd.paused && !sndNeedGesture && sndClockReady()) { sndPlay(); }
+}
+
+function pickTrack() {
+  var i;
+  for (i = 0; i < sndTracks.length; i++) {
+    if (sndLang && sndTracks[i].lang === sndLang) { return sndTracks[i].n; }
+  }
+  for (i = 0; i < sndTracks.length; i++) {
+    if (sndTracks[i].default) { return sndTracks[i].n; }
+  }
+  return sndTracks.length ? sndTracks[0].n : 0;
+}
+
+function mediaSession() {
+  if (!navigator.mediaSession) { return; }
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: el("nowTitle").textContent || "Playstick",
+      artist: "Playstick",
+      artwork: sndFilmId
+        ? [{ src: "/api/thumb/" + sndFilmId, sizes: "400x600", type: "image/jpeg" }]
+        : []
+    });
+    // These control THIS PHONE and nothing else. Somebody idly tapping pause
+    // on a lock screen must not stop the film for everybody in the room.
+    navigator.mediaSession.setActionHandler("pause", function () { snd.pause(); });
+    navigator.mediaSession.setActionHandler("play", function () {
+      sndSeekPending = true;
+      sndPlay();
+    });
+    ["seekbackward", "seekforward", "seekto", "previoustrack", "nexttrack"]
+      .forEach(function (action) {
+        try { navigator.mediaSession.setActionHandler(action, null); } catch (e) {}
+      });
+  } catch (e) { /* older iOS: metadata is a nicety, not a requirement */ }
+}
+
+/* -- the icon and the sheet -- */
+
+var ICON_ON = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+  '<path d="M4 9v6h4l5 4V5L8 9H4z"/>' +
+  '<path d="M16.5 8.5a5 5 0 0 1 0 7" stroke="currentColor" stroke-width="2" ' +
+  'fill="none" stroke-linecap="round"/></svg>';
+var ICON_OFF = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+  '<path d="M4 9v6h4l5 4V5L8 9H4z"/>' +
+  '<path d="M16 9.5l5 5M21 9.5l-5 5" stroke="currentColor" stroke-width="2" ' +
+  'fill="none" stroke-linecap="round"/></svg>';
+
+function paintAudioBtn() {
+  var btn = el("audioBtn");
+  btn.classList.toggle("on", sndPhoneAudio);
+  var live = listening() && sndTrackN !== null && !snd.paused;
+  btn.classList.toggle("live", live);
+  btn.innerHTML = listening() ? ICON_ON : ICON_OFF;
+}
+
+function sheetOpen() { return el("sheet").classList.contains("on"); }
+
+function showSheet(on) {
+  el("sheet").classList.toggle("on", on);
+  el("sheetScrim").classList.toggle("on", on);
+  if (on) { paintSheet(); }
+}
+
+function row(label, sub, selected, onTap) {
+  var button = document.createElement("button");
+  button.className = "row" + (selected ? " sel" : "");
+  button.type = "button";
+  var text = document.createElement("span");
+  text.className = "grow";
+  text.textContent = label;
+  if (sub) {
+    var small = document.createElement("span");
+    small.className = "sub";
+    small.textContent = sub;
+    text.appendChild(small);
+  }
+  button.appendChild(text);
+  if (selected) {
+    var tick = document.createElement("span");
+    tick.className = "tick";
+    tick.innerHTML = "&#10003;";
+    button.appendChild(tick);
+  }
+  button.addEventListener("click", onTap);
+  return button;
+}
+
+function paintSheet() {
+  var dest = el("destList");
+  dest.textContent = "";
+  dest.appendChild(row("Mute", "", !listening(), function () {
+    setDest("mute");
+  }));
+  dest.appendChild(row("This device", "Headphones on this phone", listening(),
+    function () { setDest("device"); }));
+
+  var langs = el("langList");
+  var note = el("sheetNote");
+  langs.textContent = "";
+  note.textContent = "";
+
+  if (!sndPhoneAudio) {
+    note.textContent = "Headphone sound is switched off on the player.";
+  } else if (sndFilmId && sndTracks.length) {
+    sndTracks.forEach(function (track) {
+      var sub = track.channels > 2 ? track.channels + " channels" : "";
+      langs.appendChild(row(langName(track.lang, track.title), sub,
+        track.n === sndTrackN, function () { setTrack(track); }));
+    });
+  } else if (sndFilmId) {
+    note.textContent = "This film hasn't been prepared for headphones yet. " +
+                       "Run playstick-prep.py over the library.";
+  } else if (libraryLangs.length) {
+    // No film yet, so there are no tracks to pick -- only a preference to
+    // remember for when one starts.
+    libraryLangs.forEach(function (code) {
+      langs.appendChild(row(langName(code, ""), "", code === sndLang,
+        function () {
+          sndLang = code;
+          localStorage.setItem("ps.snd.lang", code);
+          paintSheet();
+        }));
+    });
+    note.textContent = "Pick one now and it will be used when a film starts.";
+  } else {
+    note.textContent = "Start a film and its languages will appear here.";
+  }
+
+  var showSync = listening();
+  el("syncRow").classList.toggle("on", showSync);
+  el("syncHead").style.display = showSync ? "" : "none";
+  el("syncHint").style.display = showSync ? "" : "none";
+  el("syncVal").textContent = (sndTrim > 0 ? "+" : "") + sndTrim + " ms";
+  el("syncDebug").classList.toggle("on", debugSync);
+  paintTune();
+}
+
+function telNum(v, places) {
+  // Anything that is not a finite number becomes an empty field rather than
+  // the string "NaN": this ends up in a header, and a reader parsing the
+  // journal should get "not measured" instead of a value-shaped token.
+  return (typeof v === "number" && isFinite(v)) ? v.toFixed(places) : "";
+}
+
+function syncTelemetry() {
+  // One header, "k=v;k=v", rather than twenty. It is one line in the journal,
+  // it splits in one step, and it keeps the poll that carries it small enough
+  // not to change what is being measured. Times are milliseconds and rates are
+  // ppm, both as integers, because that is the resolution any of this is good
+  // to and it keeps the line readable at a glance.
+  //
+  // Counts and peaks are cleared here, so what each line describes is the
+  // interval since the previous one -- not since the film started.
+  var out = "v=1;id=" + debugId + ";t=" + nowSec().toFixed(1);
+  if (!listening()) { return out + ";st=off"; }
+  if (!snd.getAttribute("src")) { return out + ";st=idle"; }
+
+  var ahead = sndAhead();
+  out += ";st=" + (snd.paused ? "pause" : "play") +
+         ";hid=" + (document.hidden ? 1 : 0) +
+         ";ct=" + telNum(snd.currentTime, 2) +
+         ";rs=" + snd.readyState +
+         ";nb=" + snd.buffered.length +
+         ";ahead=" + telNum(ahead, 1) +
+         ";amin=" + telNum(telAheadMin === null ? ahead : telAheadMin, 1) +
+         ";err=" + telNum(sndErr * 1000, 0) +
+         ";errp=" + telNum(telErrPeak * 1000, 0) +
+         ";rate=" + telNum((sndRateSet - 1) * 1e6, 0) +
+         ";drift=" + telNum(sndDrift * 1e6, 0) +
+         ";step=" + telNum(sndOffStep * 1000, 1) +
+         ";ns=" + sndOffsets.length +
+         ";rtt=" + telNum(sndLastRtt * 1000, 0) +
+         ";trim=" + sndTrim +
+         ";w=" + (sndRateWrites - telBase.rate) +
+         ";dw=" + telNum(telRateStep * 1e6, 0) +
+         ";sk=" + (sndSeeks - telBase.seeks) +
+         ";wt=" + (sndWaits - telBase.waits) +
+         ";bf=" + (sndBufSeen - telBase.buf) +
+         ";lag=" + telNum(telLag * 1000, 0) +
+         ";ls=" + telStalls +
+         // Which constants were not the shipped ones. Empty on a stock build,
+         // and the difference between a capture that can be interpreted six
+         // weeks later and one that cannot.
+         ";tun=" + tuneDigest();
+
+  telBase = { rate: sndRateWrites, seeks: sndSeeks,
+              waits: sndWaits, buf: sndBufSeen };
+  telErrPeak = 0;
+  telRateStep = 0;
+  telAheadMin = null;
+  telLag = 0;
+  telStalls = 0;
+  return out;
+}
+
+function paintDebug() {
+  // Rolling ten-second window rather than a running total: what matters is the
+  // rate these things are happening at right now, and a total that has been
+  // climbing since the film started cannot show that.
+  var t = nowSec();
+  if (sndStatAt === 0) { sndStatAt = t; }
+  if (t - sndStatAt >= 10) {
+    sndStat = { rate: sndRateWrites - sndStatBase.rate,
+                seeks: sndSeeks - sndStatBase.seeks,
+                waits: sndWaits - sndStatBase.waits,
+                buf: sndBufSeen - sndStatBase.buf };
+    sndStatBase = { rate: sndRateWrites, seeks: sndSeeks,
+                    waits: sndWaits, buf: sndBufSeen };
+    sndStatAt = t;
+  }
+  el("syncDebug").textContent =
+    "err:" + (sndErr * 1000).toFixed(0) +
+    "\nrate " + snd.playbackRate.toFixed(4) +
+    "\ndrift:" + (sndDrift * 1e6).toFixed(0) +
+    "\nppm_samples:" + sndOffsets.length +
+    "\nstep:" + (sndOffStep * 1000).toFixed(1) + "(ms)" +
+    "\nahead:" + telNum(sndAhead(), 1) + "s" +
+    "\nwrites:" + sndStat.rate +
+    "\nwaits:" + sndStat.waits +
+    "\nseeks:" + sndStat.seeks +
+    "\nbuffering:" + sndStat.buf;
+}
+
+/* -- adjusting the controller from the phone (?debug only) -------------- */
+
+function tuneDecimals(t) {
+  // Enough to show the step and no more, so a value never reads as 0.30000004.
+  return t.step >= 1 ? 0 : Math.min(3, Math.ceil(-Math.log(t.step) / Math.LN10));
+}
+
+function tuneValue(t) { return t.get() * t.scale; }
+
+function tuneText(t) {
+  var s = tuneValue(t).toFixed(tuneDecimals(t));
+  return t.unit ? s + " " + t.unit : s;
+}
+
+function tuneApply(t, shown) {
+  // Rounded onto the step grid before it is stored, so repeated taps cannot
+  // accumulate float dust into a value the display no longer matches.
+  shown = Math.round(clamp(shown, t.min, t.max) / t.step) * t.step;
+  shown = parseFloat(shown.toFixed(tuneDecimals(t) + 3));
+  t.set(shown / t.scale);
+}
+
+function tuneSave() {
+  var saved = {};
+  TUNABLES.forEach(function (t) {
+    if (t.get() !== t.def) { saved[t.name] = tuneValue(t); }
+  });
+  try {
+    if (Object.keys(saved).length) {
+      localStorage.setItem("ps.snd.tune", JSON.stringify(saved));
+    } else {
+      localStorage.removeItem("ps.snd.tune");
+    }
+  } catch (e) { /* private browsing: the tuning just will not survive a reload */ }
+}
+
+function tuneLoad() {
+  // Defaults are whatever the page shipped with, captured before anything is
+  // overridden -- so "reset" means the deployed value and not a second copy of
+  // it that could drift out of step with the declarations above.
+  TUNABLES.forEach(function (t) { t.def = t.get(); });
+  // Deliberately NOT applied without ?debug. A number tuned on somebody's
+  // phone during one film would otherwise stay in that phone's localStorage
+  // for good, invisibly, and the next listener would be debugging a build that
+  // does not exist anywhere.
+  if (!debugSync) { return; }
+  var saved = {};
+  try { saved = JSON.parse(localStorage.getItem("ps.snd.tune") || "{}"); }
+  catch (e) { saved = {}; }
+  TUNABLES.forEach(function (t) {
+    var v = saved[t.name];
+    if (typeof v === "number" && isFinite(v)) { tuneApply(t, v); }
+  });
+}
+
+function tuneDigest() {
+  // What the journal needs to be readable later: which numbers were NOT the
+  // shipped ones. Empty almost always, and a capture taken mid-experiment is
+  // otherwise indistinguishable from one taken on a stock build.
+  var parts = [];
+  TUNABLES.forEach(function (t) {
+    if (t.get() !== t.def) {
+      parts.push(t.code + ":" + tuneValue(t).toFixed(tuneDecimals(t)));
+    }
+  });
+  return parts.join(",");
+}
+
+function tuneStep(t, direction) {
+  tuneApply(t, tuneValue(t) + direction * t.step);
+  tuneSave();
+  paintTune();
+}
+
+function tuneButton(label, aria, onTap) {
+  var b = document.createElement("button");
+  b.type = "button";
+  b.textContent = label;
+  b.setAttribute("aria-label", aria);
+  b.addEventListener("click", onTap);
+  return b;
+}
+
+function paintTune() {
+  var list = el("tuneList");
+  var on = debugSync;
+  el("tuneHead").classList.toggle("on", on);
+  list.classList.toggle("on", on);
+  el("tuneFoot").classList.toggle("on", on);
+  if (!on) { return; }
+  list.textContent = "";
+  var changed = 0;
+  TUNABLES.forEach(function (t) {
+    var line = document.createElement("div");
+    line.className = "tune";
+    var name = document.createElement("span");
+    name.className = "tname";
+    name.textContent = t.label;
+    var val = document.createElement("span");
+    val.className = "tval" + (t.get() === t.def ? "" : " changed");
+    val.textContent = tuneText(t);
+    line.appendChild(tuneButton("−", "Decrease " + t.label,
+      function () { tuneStep(t, -1); }));
+    line.appendChild(name);
+    line.appendChild(val);
+    line.appendChild(tuneButton("+", "Increase " + t.label,
+      function () { tuneStep(t, 1); }));
+    list.appendChild(line);
+
+    var hint = document.createElement("div");
+    hint.className = "thint";
+    hint.textContent = t.name + " · shipped " +
+      (t.def * t.scale).toFixed(tuneDecimals(t)) + (t.unit ? " " + t.unit : "") +
+      " · " + t.hint;
+    list.appendChild(hint);
+    if (t.get() !== t.def) { changed++; }
+  });
+  el("tuneNote").textContent = changed
+    ? changed + " changed. These apply to this phone only, while ?debug is in "
+      + "the URL, and every telemetry line records them as `tun`."
+    : "Everything is at the shipped value. Changes apply immediately, to this "
+      + "phone only, and survive a reload while ?debug is in the URL.";
+}
+
+function setDest(dest) {
+  sndDest = dest;
+  localStorage.setItem("ps.snd.dest", dest);
+  if (dest === "device") {
+    // THIS TAP IS THE GESTURE. iOS grants the permission to the element, not
+    // to the page, and it survives later src changes -- which is the whole
+    // reason the icon is reachable from the grid before a film has started.
+    sndSeekPending = true;
+    if (sndFilmId && sndTracks.length) {
+      if (sndTrackN === null) { sndLoad(pickTrack()); }
+      sndPlay();
+    } else {
+      // Nothing to play yet, so unlock the element with a silent play/pause
+      // pair while we still have the gesture in hand.
+      snd.play().then(function () { snd.pause(); }).catch(function () {});
+    }
+  } else {
+    sndStop();
+  }
+  paintAudioBtn();
+  paintSheet();
+}
+
+function setTrack(track) {
+  sndLang = track.lang;
+  localStorage.setItem("ps.snd.lang", track.lang);
+  if (!listening()) { setDest("device"); }
+  if (track.n !== sndTrackN) {
+    sndLoad(track.n);
+    sndPlay();
+  }
+  paintSheet();
+}
+
+function nudgeTrim(delta) {
+  sndTrim = clamp(sndTrim + delta, -1000, 1000);
+  localStorage.setItem("ps.snd.trim", String(sndTrim));
+  sndSeekPending = true;
+  paintSheet();
+}
+
+el("audioBtn").addEventListener("click", function () { showSheet(!sheetOpen()); });
+el("sheetScrim").addEventListener("click", function () { showSheet(false); });
+el("syncBack").addEventListener("click", function () { nudgeTrim(-25); });
+el("syncFwd").addEventListener("click", function () { nudgeTrim(25); });
+el("tapToListen").addEventListener("click", function () {
+  sndNeedGesture = false;
+  el("tapToListen").classList.remove("on");
+  sndSeekPending = true;
+  if (sndTrackN === null && sndTracks.length) { sndLoad(pickTrack()); }
+  sndPlay();
+});
+
+snd.addEventListener("loadedmetadata", function () {
+  sndSeekPending = true;
+  sndCorrect();
+});
+snd.addEventListener("error", function () {
+  if (!listening() || sndTrackN === null) { return; }
+  showBanner("That language isn't on the NAS any more — re-run playstick-prep.py.");
+  setTimeout(function () { showBanner(""); }, 6000);
+  sndStop();
+});
+snd.addEventListener("pause", function () {
+  paintAudioBtn();
+});
+snd.addEventListener("playing", function () {
+  paintAudioBtn();
+});
+// The measurement that tells the two dropout causes apart. If these fire on
+// each glitch the element is starving and the fault is upstream -- the pacing
+// in the daemon, or the radio. If they stay at zero while the write counter
+// climbs, the glitch is this page re-arming the pipeline.
+snd.addEventListener("waiting", function () { sndWaits++; });
+snd.addEventListener("stalled", function () { sndWaits++; });
+
+document.addEventListener("visibilitychange", function () {
+  if (document.hidden) {
+    // Going into a pocket. Drop the proportional term and leave the element
+    // running at the estimated clock ratio alone, because that estimate is the
+    // only thing that will still be working in twenty minutes.
+    if (listening() && !snd.paused) {
+      setRate(1 - sndDrift);
+    }
+  } else {
+    // Coming back out. The offset window is stale -- the phone may have been
+    // asleep for half a film -- but the ratio is not, so keep it.
+    sndOffsets = [];
+    sndClockOffRaw = null;
+    sndClockOff = null;
+    sndErrF = null;
+    // The stall detector measures one TICK at a time and must not be handed a
+    // twenty-minute one: page timers are suspended in a pocket while the
+    // element keeps playing, so the first tick back would report the whole
+    // sleep as a single enormous shortfall. What happened while the screen was
+    // locked is legible from `hid` and from where the error lands next.
+    sndPrevAt = null;
+    poll();
+  }
+});
+
+var tickTimer = null;
+
+function armTick() {
+  // Re-armable because TICK is one of the tunables: setInterval captures its
+  // period at the call, so changing the number without this would do nothing
+  // until the next reload -- the most confusing possible outcome for somebody
+  // standing there with headphones on.
+  if (tickTimer !== null) { clearInterval(tickTimer); }
+  tickTimer = setInterval(function () {
+    sndCorrect();
+    // Painted from the tick rather than from the tail of sndCorrect(), which
+    // returns early in every state worth watching -- paused, buffering,
+    // waiting on the first lock -- and so left the readout blank exactly when
+    // it was being read.
+    if (debugSync) { paintDebug(); }
+  }, TICK);
+}
+
+el("tuneReset").addEventListener("click", function () {
+  TUNABLES.forEach(function (t) { t.set(t.def); });
+  armTick();
+  tuneSave();
+  paintTune();
+});
+
+tuneLoad();
+armTick();
+paintAudioBtn();
 
 loadLibrary();
 poll();

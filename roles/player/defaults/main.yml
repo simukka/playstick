@@ -71,6 +71,26 @@ player_allow_networks:
 player_library_path: "{{ nas_mount_point }}"
 player_extensions: [".mkv", ".mp4", ".m4v", ".avi", ".mov", ".m2ts", ".ts"]
 
+# The index scripts/playstick-prep.py writes on the developer machine. When
+# this file exists the daemon takes the library from it -- deduplicated,
+# verified, with posters, ratings, genres and subtitles already prepared --
+# instead of walking the share and stat-ing every file over CIFS.
+#
+# It is a preference, not a requirement: a missing, unparseable or
+# newer-than-understood index logs one line and falls back to the walk, so a
+# library nobody has prepped still works exactly as it did before. Every
+# setting below applies to that fallback and is ignored while an index is in
+# use, because the answers are already in it.
+#
+# Set to "" to ignore an index that is present.
+player_index_file: "{{ player_library_path }}/playstick-library.json"
+
+# Whether to hand mpv the subtitles the prep tool extracted. They live under
+# .playstick/subs/ rather than beside each film, because the share is mounted
+# read-only, so --sub-auto cannot find them and the daemon passes --sub-file
+# explicitly. Off means the film plays with no subtitles at all.
+player_subtitles: false
+
 # Two filters, in the order they cost. The size test is free -- the scan has
 # already stat'ed the file -- and removes samples, trailers and stray extras
 # without needing the regex to be right. The regex is the backstop.
@@ -120,6 +140,43 @@ player_audio_device: ""            # e.g. "alsa/hw:0,3"; empty means mpv's defau
 player_audio_channels: stereo
 
 player_mpv_extra_args: ""
+
+# --- audio on the phones -------------------------------------------------
+# Which is where the sound actually comes from. player_audio above is false and
+# the projector has no speakers, so a film plays silently on the screen and
+# everybody who wants to hear it opens this page on their own phone, picks a
+# language and listens on their own headphones. Two people can pick differently
+# -- that is the point of it rather than a side effect.
+#
+# Nothing is encoded here. scripts/playstick-prep.py extracts one AAC-LC track
+# per language on the developer machine and leaves it under .playstick/audio/;
+# this device only ever serves those bytes. ffmpeg is not installed on it and
+# does not need to be.
+#
+# Independent of player_audio in both directions: turning HDMI audio on later
+# does not turn this off, and this working does not mean that one does.
+player_phone_audio: true
+
+# Kilobits per second per listener, after the burst below. This is the tunable
+# to reach for first if a film starts stuttering when somebody picks a
+# language, and the reason is worth knowing: every byte crosses this box's one
+# SDIO-attached Wi-Fi radio TWICE -- once reading the track off the NAS, once
+# writing it to the phone -- while the film's own ~4 Mbps CIFS read is on the
+# same radio. Safari will pull a progressive media file as fast as the socket
+# allows unless something paces it.
+#
+# 384 is four times a 96 kbps track: fast enough to refill after a stall,
+# slow enough to leave the film its bandwidth. 0 disables the pacing.
+player_phone_audio_kbps: 384
+
+# Seconds of audio handed over at full speed before the pacing starts, so that
+# playback begins the moment somebody taps rather than after a wait.
+player_phone_audio_burst_seconds: 30
+
+# Concurrent listeners. Each one holds a thread in the daemon for as long as
+# they are listening, so this is a floor under the page staying responsive for
+# everybody else, not a licence limit.
+player_phone_audio_max_streams: 6
 
 # Seconds to wait after the AirPlay unit reports inactive before mpv reaches
 # for the card. The fd is closed by the kernel when the process exits, so this
