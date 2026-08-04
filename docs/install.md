@@ -316,11 +316,19 @@ What it writes, all of it under the library:
 
 ```
 playstick-library.json      the index
-.playstick/media/           transcodes, only for files that needed one
+.playstick/media/<id>.mp4   the transcode, only for files that needed one
 .playstick/posters/         one JPEG per film
 .playstick/subs/            extracted subtitles, UTF-8 SRT
 .playstick/prep-state.json  cache -- a second run is seconds, not hours
 ```
+
+Every one of those is named for the film's id, which is a sha1 of the source's path.
+Nothing derived is named after the *title*: the title is worked out afresh on each run,
+so an `.nfo` turning up or a TMDb match landing would rename the encode, and the next run
+would not recognise its own work. A run that finds more than one encode for a film — a
+library prepared before that was true — keeps the newest, deletes the rest and renames the
+survivor. That is the only thing under `.playstick/` it will remove, and all of it can be
+made again from the source.
 
 It never modifies or deletes a source film. Duplicates are dropped from the index and
 listed on stderr; `--duplicates-dir <path>` moves them somewhere else if you want that,

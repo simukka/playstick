@@ -23,7 +23,12 @@ Wi-Fi, and a poster grid that has to wait for it is a grid a child gives up on.
 WHAT IT LEAVES BEHIND
 
     <library>/playstick-library.json     the index the daemon reads
-    <library>/.playstick/media/          transcodes, when one was needed
+    <library>/.playstick/media/<id>.mp4  the transcode, when one was needed.
+                                         Named for the id -- a sha1 of the
+                                         source's path -- and never for the
+                                         title, which is re-derived every run
+                                         and so would rename the file out from
+                                         under the "already encoded?" check
     <library>/.playstick/posters/        one JPEG per film
     <library>/.playstick/subs/           extracted subtitles, as UTF-8 SRT
     <library>/.playstick/audio/<id>/     one AAC-LC m4a per language, so that
@@ -887,11 +892,6 @@ def normalize_title(title):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def slugify(title):
-    text = normalize_title(title).replace(" ", "-")
-    return re.sub(r"-{2,}", "-", text).strip("-")[:60] or "film"
-
-
 # Editions. Deliberately NOT in TAG_RE: that regex truncates everything from
 # the tag onwards and is shared byte-for-byte with the daemon, so teaching it
 # "director's cut" would rename the film on the shelf as well. The shelf should
@@ -1677,14 +1677,122 @@ def build_transcode_argv(movie, dest, args):
     return argv
 
 
+def encode_name(ident):
+    """The one name an encode of this film is allowed to have.
+
+    Not the title. The name used to carry a slug of it, and the title is
+    derived afresh every run -- from the filename, then container tags, then an
+    .nfo, then TMDb -- so an .nfo appearing, a match arriving, or an edit to
+    normalize_title() in this file renamed the encode. The isfile() check in
+    do_transcode() then looked for a name that no longer existed and encoded the
+    whole film again, next to the copy it already had. The id is a sha1 of the
+    source's path and does not move.
+    """
+    return "%s.mp4" % ident
+
+
+def existing_encodes(media_dir, ident):
+    """Every finished encode belonging to this film, newest first.
+
+    Claims "<id>.mp4" and "<id>-<anything>.mp4" -- the hyphen is required, so a
+    name that merely starts with the same 16 characters is somebody else's file.
+    A ".part" is a staging file, not an encode; reconcile_encodes() deals with
+    those separately.
+    """
+    try:
+        names = os.listdir(media_dir)
+    except OSError:
+        return []                      # no media directory yet, which is fine
+    found = []
+    for name in names:
+        if not name.endswith(".mp4"):
+            continue
+        stem = name[:-len(".mp4")]
+        if stem != ident and not stem.startswith(ident + "-"):
+            continue
+        path = os.path.join(media_dir, name)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue                   # vanished between listdir and stat
+        found.append((mtime, name, path))
+    # Newest first, and then two tie-breaks so that a directory whose files
+    # share an mtime -- which a copy onto a NAS produces easily -- resolves the
+    # same way on every run rather than by whatever order the filesystem
+    # happened to hand back.
+    found.sort(key=lambda e: (-e[0], e[1] != encode_name(ident), e[1]))
+    return [(path, name) for _, name, path in found]
+
+
+def staging_files(media_dir, ident):
+    """Half-written encodes of this film, under any name it has ever had."""
+    try:
+        names = os.listdir(media_dir)
+    except OSError:
+        return []
+    return [(os.path.join(media_dir, name), name) for name in names
+            if name.endswith(".part")
+            and (name.startswith(ident + ".") or name.startswith(ident + "-"))]
+
+
+def reconcile_encodes(movie, paths):
+    """Collapse every encode of this film onto one file, newest wins.
+
+    Returns the surviving basename, or None if there was nothing there.
+
+    This is the only unlink in the script that removes something somebody might
+    want, and move_duplicates() makes a point of not having one. The difference
+    is that everything under .playstick/ is DERIVED: the worst a wrong answer
+    here costs is one re-encode, and the film it was made from has not been
+    touched. A duplicate encode costs a few gigabytes of the share and hours of
+    a machine, silently, because every step of producing it succeeded.
+    """
+    ident = movie["id"]
+    media_dir = os.path.join(paths["output"], WORK_DIR, "media")
+    canonical = encode_name(ident)
+
+    # Leftovers from a run that was killed rather than interrupted -- an
+    # interrupted one discards its own. Nothing ever reads these, and this runs
+    # before the new staging file is created, so it cannot race one.
+    for path, name in staging_files(media_dir, ident):
+        discard(path)
+        log("  - leftover staging file: %s", name, level="verbose")
+
+    found = existing_encodes(media_dir, ident)
+    for path, name in found[1:]:
+        try:
+            os.unlink(path)
+            log("  - superseded encode: %s", name)
+        except OSError as exc:
+            warn("could not remove the superseded encode %s: %s", name, exc)
+
+    if not found:
+        return None
+    keep_path, keep_name = found[0]
+    if keep_name == canonical:
+        return keep_name
+    try:
+        # Same directory, so this is atomic, and a descriptor the daemon
+        # already has open on it stays valid across the rename.
+        os.replace(keep_path, os.path.join(media_dir, canonical))
+    except OSError as exc:
+        # A read-only mount, or a share that will not rename a file in use.
+        # Carrying on under the old name is strictly better than encoding it
+        # again, which is the whole bug this function exists for.
+        warn("could not rename %s to %s: %s", keep_name, canonical, exc)
+        return keep_name
+    log("  ~ %s -> %s", keep_name, canonical)
+    return canonical
+
+
 def do_transcode(movie, args, paths):
-    dest_rel = os.path.join(WORK_DIR, "media",
-                            "%s-%s.mp4" % (movie["id"], slugify(movie["title"])))
+    dest_rel = os.path.join(WORK_DIR, "media", encode_name(movie["id"]))
     dest = os.path.join(paths["output"], dest_rel)
-    if os.path.isfile(dest) and not args.force:
-        movie["media_rel"] = dest_rel
+    survivor = reconcile_encodes(movie, paths)
+    if survivor and not args.force:
+        movie["media_rel"] = os.path.join(WORK_DIR, "media", survivor)
         movie["prepared"] = True
-        log("  = transcode already present: %s", os.path.basename(dest), level="verbose")
+        log("  = transcode already present: %s", survivor, level="verbose")
         return True
 
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -1704,6 +1812,13 @@ def do_transcode(movie, args, paths):
         discard(staging)
         return False
     os.replace(staging, dest)
+    # --force, on a film whose old encode could not be renamed above. The new
+    # one has landed, so the old name is now genuinely spare -- and the reason
+    # it is removed here rather than before the encode is that a --force run
+    # which fails, or is stopped, must leave the library exactly as it found it.
+    if survivor and survivor != os.path.basename(dest):
+        discard(os.path.join(paths["output"], WORK_DIR, "media", survivor))
+        log("  - superseded encode: %s", survivor)
     movie["media_rel"] = dest_rel
     movie["prepared"] = True
     movie["transcoded_in"] = round(time.time() - started, 1)

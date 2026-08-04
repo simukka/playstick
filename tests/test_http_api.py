@@ -158,6 +158,14 @@ class Library(ApiTest):
         self.assertIsNone(item["year"])
         self.assertIsNone(item["rating"])
         self.assertEqual(item["genres"], [])
+        self.assertEqual(item["sort_title"], "")
+
+    def test_the_shelf_key_is_passed_through_for_the_name_sort(self):
+        """prep files "The Fifth Element" under F, and the page's A-to-Z has to
+        agree with the order the index already arrives in."""
+        self.library.add(FILM, "The Fifth Element", sort_title="fifth element")
+        item = self.assertJson(self.fetch("/api/library"))["items"][0]
+        self.assertEqual(item["sort_title"], "fifth element")
 
     def test_has_thumb_is_true_for_a_poster_from_the_index(self):
         self.library.add(FILM, "Ponyo", poster="/srv/movies/Ponyo/poster.jpg")

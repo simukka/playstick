@@ -223,6 +223,9 @@ class Handler(BaseHTTPRequestHandler):
                     "year": items[ident].get("year"),
                     "rating": items[ident].get("rating"),
                     "genres": items[ident].get("genres") or [],
+                    # Empty for a walked share, where the page falls back to
+                    # the title -- which is what it would have sorted on anyway.
+                    "sort_title": items[ident].get("sort_title") or "",
                     # Languages only, not the tracks themselves. The sheet on
                     # the grid offers a PREFERRED language before a film has
                     # started, and to do that it needs to know what the library

@@ -76,6 +76,41 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
 }
 #grid.blocked { opacity: .35; pointer-events: none; }
 #empty { color: var(--dim); font-size: 18px; padding: 40px 8px; line-height: 1.5; }
+/* The grid is empty because of a filter, not because the library is. Big,
+   because it is the whole way back: a child who has hidden every film must not
+   have to find the funnel again to undo it. */
+#emptyClear {
+  display: none; margin: 8px auto 0; min-height: 68px; width: 100%;
+  max-width: 420px; border-radius: 18px; background: var(--card);
+  font-size: 19px; font-weight: 650;
+}
+#emptyClear.on { display: block; }
+
+/* --- filters ------------------------------------------------------------ */
+#filterChip {
+  display: none; align-items: center; gap: 10px;
+  margin: 0 4px 12px; padding: 12px 16px; border-radius: 14px;
+  background: var(--card); font-size: 17px; width: 100%; text-align: left;
+}
+#filterChip.on { display: flex; }
+#filterChip .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+#filterChip .x { color: var(--dim); font-size: 20px; }
+#filterBtn {
+  position: fixed; z-index: 20;
+  top: calc(10px + env(safe-area-inset-top)); right: 72px;
+  width: 52px; height: 52px; border-radius: 50%;
+  background: var(--card); color: var(--ink);
+  display: none; align-items: center; justify-content: center;
+}
+#filterBtn.on { display: inline-flex; }
+#filterBtn.live { background: var(--accent); color: #06121f; }
+#filterBtn svg { width: 24px; height: 24px; display: block; }
+#fsheetNote { color: var(--dim); font-size: 16px; line-height: 1.45; padding: 6px 14px 2px; }
+#filterClear {
+  display: block; width: 100%; margin: 14px 0 2px; min-height: 56px;
+  border-radius: 14px; background: var(--card); font-size: 17px;
+}
 
 /* --- now playing ------------------------------------------------------- */
 #playing { text-align: center; }
@@ -132,19 +167,21 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
 }
 #sheetScrim.on { display: block; }
 
-#sheet {
+/* Two sheets now -- Sound and Filters -- sharing one scrim and one set of
+   rules. Only ever one of them open at a time. */
+.sheet {
   position: fixed; z-index: 31; left: 0; right: 0; bottom: 0;
   background: #1b1b21; border-radius: 22px 22px 0 0;
   padding: 8px 12px calc(18px + env(safe-area-inset-bottom));
   max-height: 82vh; overflow-y: auto;
   display: none;
 }
-#sheet.on { display: block; }
-#sheetGrip {
+.sheet.on { display: block; }
+.grip {
   width: 44px; height: 5px; border-radius: 3px; background: #3a3a45;
   margin: 8px auto 4px;
 }
-#sheet h2 {
+.sheet h2 {
   font-size: 14px; font-weight: 700; letter-spacing: .8px;
   text-transform: uppercase; color: var(--dim); margin: 18px 6px 8px;
 }
@@ -222,11 +259,12 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
 <div id="banner"></div>
 
 <button id="audioBtn" aria-label="Sound"></button>
+<button id="filterBtn" aria-label="Filter and sort"></button>
 <button id="tapToListen">TAP TO LISTEN</button>
 
 <div id="sheetScrim"></div>
-<div id="sheet" role="dialog" aria-modal="true" aria-label="Sound">
-  <div id="sheetGrip"></div>
+<div id="sheet" class="sheet" role="dialog" aria-modal="true" aria-label="Sound">
+  <div class="grip"></div>
   <h2>Sound</h2>
   <div id="destList"></div>
   <h2>Language</h2>
@@ -248,10 +286,26 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
   <div id="tuneNote"></div>
 </div>
 
+<div id="fsheet" class="sheet" role="dialog" aria-modal="true" aria-label="Filter and sort">
+  <div class="grip"></div>
+  <h2>Order</h2>
+  <div id="sortList"></div>
+  <h2 id="genreHead">Kind</h2>
+  <div id="genreList"></div>
+  <h2 id="scoreHead">Score</h2>
+  <div id="scoreList"></div>
+  <h2 id="readyHead">Headphones</h2>
+  <div id="readyList"></div>
+  <div id="fsheetNote"></div>
+  <button id="filterClear" type="button">Show everything</button>
+</div>
+
 <div id="library" class="view on">
   <h1>Playstick</h1>
+  <button id="filterChip" type="button"></button>
   <div id="grid"></div>
   <div id="empty" hidden></div>
+  <button id="emptyClear" type="button">Show everything</button>
 </div>
 
 <div id="playing" class="view">
@@ -271,10 +325,42 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
 
 var el = function (id) { return document.getElementById(id); };
 var state = "idle";
-var library = [];
+var library = [];         // every film the server sent, in the order it sent them
 var thumbState = {};      // id -> whether the server said it has a real poster
+var tileImgs = {};        // id -> the <img> on that film's tile, for refreshThumbs
 var libraryFetchedAt = 0;
 var busyUntil = 0;        // debounce: a double tap must not fire twice
+
+/* --- what the grid is showing -------------------------------------------
+   Held in the page rather than asked of the server. /api/library is one small
+   payload the page already has in full, so a filter is an array operation --
+   and the alternative, query parameters, would mean this daemon parsing
+   attacker-shaped strings when its whole design is that clients send opaque
+   ids and small integers. Persisted, so the grid a child left is the grid they
+   come back to; a filter that is on is always visible as a chip, and every
+   dead end offers a way out of it. */
+var filtGenre = localStorage.getItem("ps.lib.genre") || "";       // "" = all
+var filtScore = parseFloat(localStorage.getItem("ps.lib.score") || "0") || 0;
+var filtReady = localStorage.getItem("ps.lib.ready") === "1";
+var filtSort = localStorage.getItem("ps.lib.sort") || "name";
+var libraryGenres = [];   // every genre the library has, derived on each load
+
+var SORTS = [
+  // "name" is first and is the default because it reproduces the order the
+  // server already sends -- prep files by a normalised title, and the daemon
+  // keeps that order verbatim. Picking it changes nothing, which is what a
+  // default should do.
+  { code: "name", label: "A to Z" },
+  { code: "year-desc", label: "Newest first" },
+  { code: "year-asc", label: "Oldest first" }
+];
+
+var SCORES = [
+  { value: 0, label: "Any" },
+  { value: 6, label: "6 and up" },
+  { value: 7, label: "7 and up" },
+  { value: 8, label: "8 and up" }
+];
 
 function post(path, body) {
   return fetch(path, {
@@ -303,13 +389,69 @@ function showBanner(text) {
 function showView(name) {
   el("library").classList.toggle("on", name === "library");
   el("playing").classList.toggle("on", name === "playing");
+  // The sound icon is deliberately reachable at all times; the funnel is not.
+  // Nothing on the now-playing view is a list, so a control for narrowing one
+  // there would only be a thing to press by mistake mid-film.
+  el("filterBtn").classList.toggle("on", name === "library");
 }
 
 /* --- library ----------------------------------------------------------- */
 
-function renderLibrary(items) {
+function filtersOn() {
+  return !!filtGenre || filtScore > 0 || filtReady;
+}
+
+function scoreOf(item) {
+  // parseFloat rather than Number: the field is whatever the index carried, and
+  // a library whose .nfo files hold a certification rather than a score should
+  // read as "unrated" instead of as zero. NaN fails every >= below, so an
+  // unrated film drops out only once a threshold is actually asked for.
+  return parseFloat(item.rating);
+}
+
+function matches(item) {
+  if (filtGenre && (item.genres || []).indexOf(filtGenre) < 0) { return false; }
+  if (filtScore > 0 && !(scoreOf(item) >= filtScore)) { return false; }
+  if (filtReady && !(item.audio_langs || []).length) { return false; }
+  return true;
+}
+
+function shelfKey(item) {
+  // sort_title is what prep filed the film under, so "The Fifth Element" sorts
+  // at F. Absent for a library nobody has prepped, where the plain title is
+  // what the daemon sorted on anyway.
+  return String(item.sort_title || item.title || "").toLowerCase();
+}
+
+function byName(a, b) {
+  var ka = shelfKey(a), kb = shelfKey(b);
+  return ka < kb ? -1 : ka > kb ? 1 : 0;
+}
+
+function visibleItems() {
+  var items = library.filter(matches);
+  if (filtSort === "name") {
+    // Not sorted at all: the server's order IS this order, and re-sorting it
+    // here would only introduce a way for the two to disagree.
+    return items;
+  }
+  var dir = filtSort === "year-asc" ? 1 : -1;
+  return items.sort(function (a, b) {
+    var ya = parseInt(a.year, 10), yb = parseInt(b.year, 10);
+    var na = isNaN(ya), nb = isNaN(yb);
+    // A film with no year sits at the end of BOTH year sorts. It is not the
+    // oldest and it is not the newest -- it is unknown, and burying it under
+    // "oldest first" would be a lie the grid tells silently.
+    if (na || nb) { return na && nb ? byName(a, b) : (na ? 1 : -1); }
+    return ya === yb ? byName(a, b) : (ya - yb) * dir;
+  });
+}
+
+function renderLibrary() {
+  var items = visibleItems();
   var grid = el("grid");
   grid.textContent = "";
+  tileImgs = {};
   items.forEach(function (item) {
     var tile = document.createElement("button");
     tile.className = "tile";
@@ -328,50 +470,123 @@ function renderLibrary(items) {
     tile.addEventListener("click", function () { play(item); });
     grid.appendChild(tile);
 
+    tileImgs[item.id] = img;
     thumbState[item.id] = item.has_thumb;
   });
 
   var empty = el("empty");
+  var hidden = filtersOn() && library.length > 0;
   empty.hidden = items.length > 0;
   if (!items.length) {
-    empty.textContent = "No movies found yet.";
+    empty.textContent = hidden ? "Nothing matches what you picked."
+                               : "No movies found yet.";
   }
+  // Only ever offered when clearing would actually bring films back.
+  el("emptyClear").classList.toggle("on", !items.length && hidden);
+  paintChip();
 }
 
 function refreshThumbs(items) {
   // Posters are extracted in the background, one at a time. When the server
   // starts saying it has one, swap that single tile -- the placeholder is
   // served no-store, so a plain re-request gets the real frame.
-  var imgs = el("grid").getElementsByTagName("img");
-  items.forEach(function (item, i) {
-    if (item.has_thumb && !thumbState[item.id] && imgs[i]) {
-      imgs[i].src = "/api/thumb/" + item.id + "?t=" + Date.now();
+  //
+  // Looked up by id rather than by position. It used to index the grid's <img>
+  // list against the server's item list, which held only while the grid was the
+  // whole library in the order it arrived; with a filter on, the two lists are
+  // different lengths and every swap would land on the wrong film.
+  items.forEach(function (item) {
+    var img = tileImgs[item.id];
+    if (item.has_thumb && !thumbState[item.id] && img) {
+      img.src = "/api/thumb/" + item.id + "?t=" + Date.now();
     }
     thumbState[item.id] = item.has_thumb;
   });
 }
 
+function libraryFacets() {
+  // Every language anything in the library has, so that somebody opening the
+  // sound sheet before a film starts has a real list to state a preference
+  // from -- and every genre, for the same reason on the filter sheet.
+  var langs = {}, genres = {};
+  library.forEach(function (item) {
+    (item.audio_langs || []).forEach(function (code) { langs[code] = true; });
+    (item.genres || []).forEach(function (name) { genres[name] = true; });
+  });
+  libraryLangs = Object.keys(langs).sort();
+  libraryGenres = Object.keys(genres).sort();
+  // A filter must not outlive the films it named. Re-prep the library, drop the
+  // last western, and the grid would otherwise stay empty with a chip naming a
+  // genre no row on the sheet can un-pick.
+  if (filtGenre && libraryGenres.indexOf(filtGenre) < 0) {
+    filtGenre = "";
+    localStorage.removeItem("ps.lib.genre");
+  }
+}
+
 function loadLibrary() {
   return fetch("/api/library").then(function (r) { return r.json(); }).then(function (d) {
     libraryFetchedAt = Date.now();
-    var changed = d.items.length !== library.length ||
-      d.items.some(function (it, i) { return !library[i] || library[i].id !== it.id; });
-    if (changed) { renderLibrary(d.items); }
-    else { refreshThumbs(d.items); }
+    var before = visibleItems().map(function (it) { return it.id; }).join(",");
     library = d.items;
-    // Every language anything in the library has, so that somebody opening the
-    // sheet before a film starts has a real list to state a preference from.
-    var seen = {};
-    d.items.forEach(function (item) {
-      (item.audio_langs || []).forEach(function (code) { seen[code] = true; });
-    });
-    libraryLangs = Object.keys(seen).sort();
+    libraryFacets();
+    // Compared on what the grid is SHOWING, not on what arrived: a film whose
+    // metadata changed can enter or leave the current filter without the
+    // server's own list having changed length or order.
+    var after = visibleItems().map(function (it) { return it.id; }).join(",");
+    if (before !== after) { renderLibrary(); }
+    else { refreshThumbs(d.items); }
     if (sheetOpen()) { paintSheet(); }
+    if (filtersShown()) { paintFilters(); }
     if (!d.available) {
       el("empty").hidden = false;
       el("empty").textContent = "Can't reach the movies right now.";
+      el("emptyClear").classList.remove("on");
     }
   }).catch(function () { /* the status poll reports the outage */ });
+}
+
+function applyFilters() {
+  localStorage.setItem("ps.lib.sort", filtSort);
+  localStorage.setItem("ps.lib.score", String(filtScore));
+  if (filtGenre) { localStorage.setItem("ps.lib.genre", filtGenre); }
+  else { localStorage.removeItem("ps.lib.genre"); }
+  if (filtReady) { localStorage.setItem("ps.lib.ready", "1"); }
+  else { localStorage.removeItem("ps.lib.ready"); }
+  renderLibrary();
+  if (filtersShown()) { paintFilters(); }
+}
+
+function clearFilters() {
+  filtGenre = "";
+  filtScore = 0;
+  filtReady = false;
+  applyFilters();
+}
+
+function chipText() {
+  var parts = [];
+  if (filtGenre) { parts.push(filtGenre); }
+  if (filtScore > 0) { parts.push(filtScore + "+"); }
+  if (filtReady) { parts.push("headphones"); }
+  return parts.join(" · ");
+}
+
+function paintChip() {
+  var chip = el("filterChip");
+  var on = filtersOn();
+  chip.classList.toggle("on", on);
+  el("filterBtn").classList.toggle("live", on);
+  chip.textContent = "";
+  if (!on) { return; }
+  var text = document.createElement("span");
+  text.className = "grow";
+  text.textContent = chipText();
+  var x = document.createElement("span");
+  x.className = "x";
+  x.innerHTML = "&#10005;";
+  chip.appendChild(text);
+  chip.appendChild(x);
 }
 
 /* --- playback ---------------------------------------------------------- */
@@ -1103,11 +1318,23 @@ function paintAudioBtn() {
 }
 
 function sheetOpen() { return el("sheet").classList.contains("on"); }
+function filtersShown() { return el("fsheet").classList.contains("on"); }
 
+/* One scrim, two sheets, and never both. Each opener closes the other rather
+   than stacking, because a sheet is 82vh and a second one over it would leave
+   the first reachable only by dismissing something that looks identical. */
 function showSheet(on) {
   el("sheet").classList.toggle("on", on);
-  el("sheetScrim").classList.toggle("on", on);
+  if (on) { el("fsheet").classList.remove("on"); }
+  el("sheetScrim").classList.toggle("on", on || filtersShown());
   if (on) { paintSheet(); }
+}
+
+function showFilters(on) {
+  el("fsheet").classList.toggle("on", on);
+  if (on) { el("sheet").classList.remove("on"); }
+  el("sheetScrim").classList.toggle("on", on || sheetOpen());
+  if (on) { paintFilters(); }
 }
 
 function row(label, sub, selected, onTap) {
@@ -1182,6 +1409,111 @@ function paintSheet() {
   el("syncVal").textContent = (sndTrim > 0 ? "+" : "") + sndTrim + " ms";
   el("syncDebug").classList.toggle("on", debugSync);
   paintTune();
+}
+
+/* -- the filter sheet -- */
+
+var ICON_FILTER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" aria-hidden="true">' +
+  '<path d="M4 6h16M7 12h10M10 18h4"/></svg>';
+
+function countMatching(fn) {
+  var n = 0;
+  library.forEach(function (item) { if (fn(item)) { n += 1; } });
+  return n;
+}
+
+function section(head, list, show) {
+  // A heading with nothing under it reads as a list that failed to load. An
+  // unprepped library has no genres, no years and no scores, so those three
+  // sections are taken away entirely and #fsheetNote says why.
+  el(head).style.display = show ? "" : "none";
+  el(list).style.display = show ? "" : "none";
+}
+
+function paintFilters() {
+  var sorts = el("sortList");
+  sorts.textContent = "";
+  // Nothing in the library carries a year, so the two year orders would each be
+  // "A to Z" under a different name.
+  var haveYears = countMatching(function (it) { return !isNaN(parseInt(it.year, 10)); }) > 0;
+  SORTS.forEach(function (s) {
+    if (s.code !== "name" && !haveYears) { return; }
+    sorts.appendChild(row(s.label, "", filtSort === s.code, function () {
+      filtSort = s.code;
+      applyFilters();
+    }));
+  });
+
+  var genres = el("genreList");
+  genres.textContent = "";
+  section("genreHead", "genreList", libraryGenres.length > 0);
+  if (libraryGenres.length) {
+    genres.appendChild(row("Everything", "", !filtGenre, function () {
+      filtGenre = "";
+      applyFilters();
+    }));
+    libraryGenres.forEach(function (name) {
+      // The count is against the OTHER filters, so a row reads as what tapping
+      // it would actually leave on the grid rather than as a library total.
+      var n = countMatching(function (item) {
+        return (item.genres || []).indexOf(name) >= 0 &&
+          (!(filtScore > 0) || scoreOf(item) >= filtScore) &&
+          (!filtReady || (item.audio_langs || []).length > 0);
+      });
+      genres.appendChild(row(name, n === 1 ? "1 movie" : n + " movies",
+        filtGenre === name, function () {
+          // Tapping the row that is already on clears it: the tick is the only
+          // affordance here, and it has to work in both directions.
+          filtGenre = (filtGenre === name) ? "" : name;
+          applyFilters();
+        }));
+    });
+  }
+
+  var scores = el("scoreList");
+  scores.textContent = "";
+  var haveScores = countMatching(function (it) { return !isNaN(scoreOf(it)); }) > 0;
+  section("scoreHead", "scoreList", haveScores);
+  if (haveScores) {
+    SCORES.forEach(function (s) {
+      scores.appendChild(row(s.label, "", filtScore === s.value, function () {
+        filtScore = s.value;
+        applyFilters();
+      }));
+    });
+  }
+
+  var ready = el("readyList");
+  ready.textContent = "";
+  var haveAudio = countMatching(function (it) {
+    return (it.audio_langs || []).length > 0;
+  }) > 0;
+  section("readyHead", "readyList", haveAudio);
+  if (haveAudio) {
+    ready.appendChild(row("All movies", "", !filtReady, function () {
+      filtReady = false;
+      applyFilters();
+    }));
+    // "Ready for headphones" is extracted audio tracks, not the index's
+    // `prepared` flag -- that one is set only when prep had to transcode, so a
+    // film it judged already fine reads false while playing perfectly well on
+    // every phone in the room.
+    ready.appendChild(row("Ready for headphones", "", filtReady, function () {
+      filtReady = true;
+      applyFilters();
+    }));
+  }
+
+  var note = el("fsheetNote");
+  if (!libraryGenres.length && !haveScores && !haveAudio) {
+    note.textContent = "This library hasn't been prepared yet, so there is " +
+                       "nothing to sort or filter by. Run playstick-prep.py " +
+                       "over it.";
+  } else {
+    note.textContent = "";
+  }
+  el("filterClear").style.display = filtersOn() ? "" : "none";
 }
 
 function telNum(v, places) {
@@ -1436,7 +1768,17 @@ function nudgeTrim(delta) {
 }
 
 el("audioBtn").addEventListener("click", function () { showSheet(!sheetOpen()); });
-el("sheetScrim").addEventListener("click", function () { showSheet(false); });
+el("filterBtn").addEventListener("click", function () { showFilters(!filtersShown()); });
+el("sheetScrim").addEventListener("click", function () {
+  showSheet(false);
+  showFilters(false);
+});
+el("filterChip").addEventListener("click", clearFilters);
+el("emptyClear").addEventListener("click", clearFilters);
+el("filterClear").addEventListener("click", function () {
+  clearFilters();
+  showFilters(false);
+});
 el("syncBack").addEventListener("click", function () { nudgeTrim(-25); });
 el("syncFwd").addEventListener("click", function () { nudgeTrim(25); });
 el("tapToListen").addEventListener("click", function () {
@@ -1523,6 +1865,12 @@ el("tuneReset").addEventListener("click", function () {
 tuneLoad();
 armTick();
 paintAudioBtn();
+el("filterBtn").innerHTML = ICON_FILTER;
+el("filterBtn").classList.add("on");
+// Painted before the first fetch lands, so a filter restored from localStorage
+// is visible in the same frame as the empty grid rather than one round trip
+// later.
+paintChip();
 
 loadLibrary();
 poll();

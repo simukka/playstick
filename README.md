@@ -8,7 +8,10 @@ that plugs directly into a projector's HDMI port.
 It provisions and measures a minimal Ubuntu Server installation running [`UxPlay`](https://github.com/simukka/UxPlay), 
 with video rendered directly through the Intel integrated graphics stack **without an X server or desktop environment**.
 
-The device is managed entirely over SSH from a separate control machine, currently a ThinkPad X1.
+* The device is managed entirely over SSH from a separate control machine.
+* Plays movies from a NAS (simple enough for a child to use).
+* Web based movie library.
+* 
 
 ## Motivation
 
@@ -442,6 +445,54 @@ has to know the stick's IP address, and `player_port: 80` means there is nothing
 remember after the hostname either. The daemon runs as root for reasons that predate the
 port (mpv needs DRM master), so binding below 1024 costs nothing here.
 
+### Narrowing the shelf
+
+Prep collects a year, a score and a genre list for every film, and until now the page threw
+all three away — the grid was every film the share held, in one order, and at a couple of
+hundred posters that is a wall to scroll past rather than a shelf to pick from. A funnel
+button next to the sound icon opens a second sheet:
+
+| | |
+|---|---|
+| **Order** | A to Z, newest first, oldest first |
+| **Kind** | one row per genre the library actually has, each carrying the count that choosing it would leave |
+| **Score** | any, 6+, 7+, 8+ — the 0–10 number from the `.nfo`, the container tag or TMDb |
+| **Headphones** | only the films a phone can hear |
+
+**A to Z is the order the server already sends, and the page does not re-sort it.** Prep
+files by a normalised title so *The Fifth Element* sits under F the way it would on a shelf,
+and the daemon keeps that order verbatim; a page that sorted on `title` instead would file
+every *The* together and quietly disagree with its own default. `sort_title` is on the wire
+for exactly this, and falls back to the title for a library nobody has prepped.
+
+A film with **no year is last in both year orders**, not oldest. It is unknown, and burying
+it under "oldest first" is a lie the grid would tell silently. Same reasoning for a missing
+score: it drops out only once a threshold is actually asked for.
+
+"Ready for headphones" is keyed on **extracted audio tracks, not the index's `prepared`
+flag**. That flag is set only where prep had to transcode, so a film it judged already
+stick-friendly reads false while playing perfectly on every phone in the room — the property
+somebody in the room can notice is whether there is a soundtrack to send them, and that is
+`audio_langs`.
+
+The filtering is in the page, not in the daemon. `/api/library` is one small payload the page
+already holds in full, so a filter is an array operation over it; the alternative — query
+parameters — would have this process parsing attacker-shaped strings, when its whole design
+is that clients send opaque ids and small integers.
+
+Two consequences of a child being the user. A choice is remembered across reloads
+(`ps.lib.*` in `localStorage`), so the grid they left is the grid they come back to — which
+means a filter that hides everything must never be a dead end: the active filters show as a
+chip above the grid that clears on tap, an empty grid says *"Nothing matches what you
+picked"* with a full-width way out, and a genre that has left the library since it was
+chosen un-picks itself on the next scan. And a library nobody has prepped has no genres, no
+years and no scores, so those sections are taken away rather than rendered empty, and the
+sheet says why.
+
+One latent bug fell out of this. `refreshThumbs()` used to swap posters by matching the
+grid's `<img>` list against the server's item list *by position*, which held only while the
+grid was the whole library in the order it arrived. Tiles are now looked up by id.
+
 ### AirPlay is unavailable while a film plays
 
 This is a property of the hardware, not a shortcut, and it is the same fact that forced
@@ -804,7 +855,7 @@ they would never be looked at. Set it to `0` to see the layout as it ships.
 ### Tests
 
 ```bash
-python3 -m unittest discover -s tests            # ~190 tests, about 10 seconds
+python3 -m unittest discover -s tests            # ~210 tests, about 10 seconds
 ./actl 'python3 -m unittest discover -s tests'   # the same, in the control node
 ```
 
@@ -841,6 +892,18 @@ response for *Hook*, the lookup returns nothing rather than Red Hook Summer. It
 also diffs `clean_title()` against the daemon's copy, because the comment saying
 those two are kept byte-for-byte in step was, until now, only a comment.
 
+`tests/test_prep_media.py` is the same argument again, one level down: what prep
+*names* the encode it made. That one also really happened —
+`033fa22cc64e9f97-f1-the-movie.mp4` and `033fa22cc64e9f97-f1.mp4` side by side,
+the same film twice, because the name used to carry a slug of the title and the
+title is re-derived on every run. It is the quietest class of bug this tool has.
+Nothing returns an error, nothing looks wrong on the projector, and the only
+symptom is a share filling up at twice the rate it should. So the file holds the
+naming contract from both ends: one encode per film, named for the id alone, and
+everything else that shares that id — another film's encode, a poster, a
+subtitle, a half-written `.part`, a `--force` run that failed — left exactly
+where it was.
+
 The page has its own, kept separate because they need node:
 
 ```bash
@@ -857,6 +920,11 @@ that counts a seek, a deliberate slowdown or iOS's frame quantisation as a
 dropout does not report a fault, it manufactures one, in the log the next fix
 gets argued from. `tune.js` covers the debug sheet's parameter controls,
 including the taps going through the handlers the page really attached.
+`library.js` is the grid's filters, and holds the things that decide what a
+child can see: A to Z is byte-identical to the unfiltered order the server sent,
+a film with no year is last in *both* year orders, no combination can leave the
+grid empty without a way back out, and a poster arriving mid-scan lands on its
+own tile rather than on whichever one shares its index.
 
 ## Results so far
 

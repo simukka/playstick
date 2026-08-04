@@ -165,6 +165,11 @@ class Library:
                 "year": entry.get("year"),
                 "rating": entry.get("rating"),
                 "genres": entry.get("genres") or [],
+                # Prep's shelf key: "The Fifth Element" sorts under F. Carried
+                # so the page can offer a name sort that agrees with the order
+                # the index already arrives in, rather than one that files every
+                # "The" together.
+                "sort_title": entry.get("sort_title") or "",
             }
             order.append(ident)
         if not items:
