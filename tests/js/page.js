@@ -56,6 +56,10 @@ class FakeEl {
 // could not say where to put it.
 const acts = [];
 
+// Every location.reload() the page asked for, stamped with the clock it asked
+// at. Cleared by install().
+const reloads = [];
+
 class FakeAudio {
   constructor() {
     this._src = null; this.paused = true; this.currentTime = 0;
@@ -91,7 +95,14 @@ function install(search) {
     querySelector: () => new FakeEl("q"), querySelectorAll: () => [],
     addEventListener: () => {}, body: new FakeEl("body"),
   };
-  global.location = { search: search, href: "http://stick/" + search };
+  // Counted rather than obeyed. A reload is the one thing the page can do
+  // that ends the page, so a test that could only observe it by ceasing to
+  // exist could not observe it at all.
+  reloads.length = 0;
+  global.location = {
+    search: search, href: "http://stick/" + search,
+    reload: () => { reloads.push(state.clock); },
+  };
   global.localStorage = {
     _d: {}, getItem(k) { return k in this._d ? this._d[k] : null; },
     setItem(k, v) { this._d[k] = String(v); }, removeItem(k) { delete this._d[k]; },
@@ -137,4 +148,5 @@ function done() {
   process.exit(fail.length ? 1 : 0);
 }
 
-module.exports = { install, load, check, done, acts, state, FakeEl, FakeAudio };
+module.exports = { install, load, check, done, acts, reloads, state,
+  FakeEl, FakeAudio };

@@ -124,6 +124,111 @@ class Routing(ApiTest):
         self.assertEqual(self.assertJson(after)["state"], "idle")
 
 
+class Build(ApiTest):
+    """Which build the page is, and how a phone finds out it is not that one.
+
+    A deploy replaces ui.html and restarts the daemon. Nothing in that reaches
+    a browser that already has the page: it polls /api/status and never
+    navigates again. So the page is stamped on the way out, the stamp comes
+    back on every poll, and a page whose stamp no longer matches reloads.
+
+    The property everything below is really testing is that the stamp tracks
+    the FILE. A build that changed on restart would order every phone in the
+    house to reload after a power cut; one that did not change on a deploy
+    would leave them on last week's JavaScript forever.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # A copy, because these tests rewrite it. The shipped page is what
+        # everything else in the suite serves.
+        with open(api.UI_FILE, "rb") as fh:
+            self.page = fh.read()
+        self.stamp = 1700000000
+        self.path = write_file("ui.html", self.page)
+        os.utime(self.path, (self.stamp, self.stamp))
+        self.ctx = patched(UI_FILE=self.path)
+        self.ctx.start()
+        self.addCleanup(self.ctx.stop)
+
+    def rewrite(self, data):
+        """A deploy, near enough: the file is replaced and its mtime moves.
+
+        Moved by hand rather than left to the clock. A rewrite milliseconds
+        after the last one is not what a deploy looks like, and a filesystem
+        with coarse timestamps would decide these tests by luck.
+        """
+        write_file("ui.html", data)
+        self.stamp += 60
+        os.utime(self.path, (self.stamp, self.stamp))
+
+    def served(self):
+        return self.fetch("/").body
+
+    def reported(self):
+        return self.assertJson(self.fetch("/api/status"))["build"]
+
+    def test_the_page_is_stamped_on_the_way_out(self):
+        self.assertIn(b'var BUILD = "__PLAYSTICK_BUILD__";', self.page)
+        self.assertNotIn(b"__PLAYSTICK_BUILD__", self.served())
+
+    def test_the_stamp_is_what_the_status_route_reports(self):
+        build = self.reported()
+        self.assertTrue(build)
+        self.assertIn(('var BUILD = "%s";' % build).encode(), self.served())
+
+    def test_the_same_page_is_the_same_build(self):
+        """Not merely stable within a request: the daemon is restarted by
+        things that have nothing to do with the page -- a config change, a
+        reboot, a re-provision that touched one Python module -- and a build
+        that moved on any of those would reload every phone for nothing."""
+        first = self.reported()
+        for _ in range(3):
+            self.assertEqual(self.reported(), first)
+        self.assertEqual(self.fetch("/").body, self.served())
+
+    def test_a_changed_page_is_a_changed_build(self):
+        before = self.reported()
+        self.rewrite(self.page + b"<!-- a deploy -->")
+        self.assertNotEqual(self.reported(), before)
+
+    def test_the_build_follows_the_bytes_and_not_the_timestamp(self):
+        """A re-provision that changed nothing still rewrites this file, and
+        `copy` gives it a new mtime every time. If that were the identity,
+        every phone in the house would reload after every playbook run -- most
+        of which have nothing to do with the page."""
+        before = self.reported()
+        self.rewrite(self.page)
+        self.assertEqual(self.reported(), before)
+
+    def test_a_changed_page_is_served_changed(self):
+        """The cache is keyed on a stat, and a cache that answered from the
+        wrong generation would report a new build alongside the old bytes --
+        every phone reloading into exactly the page it already had."""
+        self.rewrite(self.page.replace(b"<title>Playstick</title>",
+                                       b"<title>Second</title>"))
+        self.assertIn(b"<title>Second</title>", self.served())
+        self.assertIn(('var BUILD = "%s";' % self.reported()).encode(),
+                      self.served())
+
+    def test_a_page_with_no_stamp_still_has_a_build(self):
+        """Nothing enforces that the placeholder is in the file, and an older
+        ui.html predates it entirely. Serving that unchanged is right; refusing
+        to serve it, or serving it with no build at all, is not."""
+        self.rewrite(b"<!DOCTYPE html><title>bare</title>")
+        self.assertTrue(self.reported())
+        self.assertEqual(self.served(), b"<!DOCTYPE html><title>bare</title>")
+
+    def test_a_missing_page_does_not_take_the_status_route_with_it(self):
+        """/api/status is what the phones poll and what a health check reads.
+        A UI file that vanished between two polls is a broken deploy, and a 500
+        on every poll would hide the rest of what the daemon still knows."""
+        good = self.reported()
+        os.remove(self.path)
+        self.assertEqual(self.fetch("/").status, 500)
+        self.assertEqual(self.reported(), good)
+
+
 class Library(ApiTest):
     def test_an_empty_library_still_answers(self):
         self.library.available = False
@@ -785,6 +890,30 @@ class Thumbs(ApiTest):
         self.assertIn(b"<svg", resp.body)
         self.assertIn(b">P<", resp.body)
         self.assertEqual(self.thumbs.requested, [FILM])
+
+    def test_the_build_stamp_is_a_cache_key_and_nothing_more(self):
+        """The page appends ?v=<build> so that a deploy re-pulls posters a
+        phone would otherwise hold for a year. The route matches against the
+        parsed path, so nothing here reads it -- which is the property that
+        makes putting it in the query safe. The id is still the only thing the
+        client sends that this route acts on.
+        """
+        poster = write_file("posters/ponyo.jpg", b"\xff\xd8\xff\xe0 poster")
+        self.library.add(FILM, "Ponyo", poster=poster)
+        plain = self.fetch("/api/thumb/" + FILM)
+        for query in ["?v=c20e48476c19", "?v=c20e48476c19&t=1700000000",
+                      "?v=", "?v=../../etc/passwd"]:
+            with self.subTest(query=query):
+                resp = self.fetch("/api/thumb/" + FILM + query)
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.body, plain.body)
+                self.assertEqual(resp.header("Cache-Control"),
+                                 plain.header("Cache-Control"))
+
+    def test_a_stamped_url_for_an_unknown_film_is_still_a_404(self):
+        """The query is not a way in. Whatever is after the '?', the id in the
+        path is what has to name a film."""
+        self.assertNotFound(self.fetch("/api/thumb/" + OTHER + "?v=abc"))
 
     def test_a_poster_the_share_lost_falls_back_rather_than_failing(self):
         """The index said there was one and the NAS says otherwise. That is a

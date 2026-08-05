@@ -484,6 +484,34 @@ var libraryFetchedAt = 0;
 var busyUntil = 0;        // debounce: a double tap must not fire twice
 var prepArtId = "";       // which poster the preparing view is showing
 
+/* --- which build of the page this is -------------------------------------
+   Rewritten by the daemon on the way out, so this literal only survives in a
+   copy that reached a browser some other way. The same value comes back in
+   every status poll, and the two disagree in exactly one situation: a deploy
+   has replaced the page underneath a browser that is still running the old
+   copy. That is not an edge case, it is what happens to every phone in the
+   house on every deploy -- they have this page open, they poll forever, and
+   they never navigate again. See ui_page() in http.py. */
+var BUILD = "__PLAYSTICK_BUILD__";
+var reloading = false;    // asked for once; the polls in flight must not re-ask
+
+/* Every URL for something a browser is allowed to KEEP carries the build.
+   There are exactly two: a poster, held for a day or -- once it is an
+   extracted frame, which is addressed by content -- for a year, and a
+   soundtrack, held for an hour. Reloading the page does not dislodge either of
+   them, so without this a deploy that changed how posters are cut or how audio
+   is prepared would reach a phone only once its own cache gave up, which for
+   the posters is next year.
+
+   In the QUERY rather than the path, and that is the whole reason this is
+   safe: every route on the daemon matches against the parsed path, so nothing
+   there reads this. It is a cache key and nothing else -- no new value crosses
+   the boundary, and the ids and small integers those routes accept are exactly
+   what they were. */
+function stamped(path) {
+  return path + "?v=" + BUILD;
+}
+
 /* --- what the grid is showing -------------------------------------------
    Held in the page rather than asked of the server. /api/library is one small
    payload the page already has in full, so a filter is an array operation --
@@ -654,7 +682,7 @@ function renderLibrary() {
     tile.type = "button";
 
     var img = document.createElement("img");
-    img.src = "/api/thumb/" + item.id;
+    img.src = stamped("/api/thumb/" + item.id);
     img.alt = "";
     img.loading = "lazy";
 
@@ -722,7 +750,11 @@ function refreshThumbs(items) {
   items.forEach(function (item) {
     var img = tileImgs[item.id];
     if (item.has_thumb && !thumbState[item.id] && img) {
-      img.src = "/api/thumb/" + item.id + "?t=" + Date.now();
+      // The build says which release cut the poster; `t` says which second
+      // this particular tile gave up on the placeholder. Both are needed, and
+      // they are answering different questions -- a frame extracted a moment
+      // ago belongs to the build that is already loaded.
+      img.src = stamped("/api/thumb/" + item.id) + "&t=" + Date.now();
     }
     thumbState[item.id] = item.has_thumb;
   });
@@ -823,7 +855,7 @@ function play(item) {
   // running -- a lamp takes longer to light than a browser will wait -- so
   // everything after this arrives on the status poll.
   el("prepTitle").textContent = item.title;
-  el("prepArt").src = "/api/thumb/" + item.id;
+  el("prepArt").src = stamped("/api/thumb/" + item.id);
   el("prepStep").textContent = "Getting ready…";
   el("barFill").style.width = "0";
   showView("preparing");
@@ -847,8 +879,37 @@ function clock(seconds) {
   return m + " min left";
 }
 
+function checkBuild(s) {
+  // Nothing to do on a page the daemon never stamped, or on the build it is
+  // still serving. An older DAEMON sends no build at all, and a page that
+  // reloaded on that would reload forever.
+  if (!s.build || s.build === BUILD) { return; }
+  // A reload throws away everything this page has learned: which film it is
+  // following, the clock offset the headphone sync spent a minute measuring,
+  // and the audio element somebody may have in their ears. So it waits for a
+  // moment when there is nothing to throw away. There is always one shortly
+  // after a deploy -- restarting the daemon stops the film -- so waiting costs
+  // nothing in the case this exists for, and saves the case where somebody
+  // deployed while a film was up and did not think about who was watching it.
+  if (state === "playing" || state === "paused" || state === "preparing") {
+    return;
+  }
+  // reload() asks for a navigation, it does not end this turn -- the polls
+  // already in flight still land, and more follow while the new document is
+  // fetched. Every one of them sees the same mismatch, and asking again for a
+  // navigation already under way is at best pointless and at worst a page that
+  // keeps restarting its own load.
+  if (reloading) { return; }
+  reloading = true;
+  location.reload();
+}
+
 function apply(s) {
   state = s.state;
+  // Before the branches, and reading `state` rather than the DOM: whether this
+  // is a good moment to disappear is a question about what is on the screen,
+  // not about which of the three views is drawn.
+  checkBuild(s);
 
   if (state === "preparing") {
     showView("preparing");
@@ -857,7 +918,7 @@ function apply(s) {
     if (s.title) { el("prepTitle").textContent = s.title; }
     if (s.id && prepArtId !== s.id) {
       prepArtId = s.id;
-      el("prepArt").src = "/api/thumb/" + s.id;
+      el("prepArt").src = stamped("/api/thumb/" + s.id);
     }
     // The server's wording, verbatim. The step and the sentence describing it
     // belong in one place; two copies drift, and the one on the phone is the
@@ -1326,7 +1387,12 @@ function sndLoad(n) {
   // is comparing against what the element is actually doing.
   sndRateSet = 1;
   snd.playbackRate = 1;
-  snd.src = "/api/audio/" + sndFilmId + "/" + n;
+  // Stamped, so a deploy that changed how prep cuts these tracks reaches a
+  // phone that already has the old one in its cache. The cost is real and
+  // deliberate: a listener who reconnects after a deploy pulls the track down
+  // again rather than resuming from the hour-long cache entry. It happens
+  // once per deploy, and the alternative is somebody hearing the old file.
+  snd.src = stamped("/api/audio/" + sndFilmId + "/" + n);
   snd.load();
   mediaSession();
 }
@@ -1555,7 +1621,8 @@ function mediaSession() {
       title: el("nowTitle").textContent || "Playstick",
       artist: "Playstick",
       artwork: sndFilmId
-        ? [{ src: "/api/thumb/" + sndFilmId, sizes: "400x600", type: "image/jpeg" }]
+        ? [{ src: stamped("/api/thumb/" + sndFilmId),
+             sizes: "400x600", type: "image/jpeg" }]
         : []
     });
     // These control THIS PHONE and nothing else. Somebody idly tapping pause

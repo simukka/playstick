@@ -14,7 +14,7 @@ const PAGE = process.argv[2] ||
   __dirname + "/../../roles/player/files/playstick-ui.html";
 const VARS = ["library", "libraryGenres", "libraryLangs", "filtGenre",
   "filtScore", "filtReady", "filtSort", "thumbState", "tileImgs",
-  "SORTS", "SCORES"];
+  "SORTS", "SCORES", "BUILD"];
 const FNS = ["filtersOn", "matches", "visibleItems", "renderLibrary",
   "refreshThumbs", "libraryFacets", "applyFilters", "clearFilters",
   "chipText", "paintChip", "paintFilters", "showFilters", "filtersShown",
@@ -181,9 +181,9 @@ const fresh = P.library.map((f) => Object.assign({}, f,
   f.id === "c" ? { has_thumb: true } : {}));
 P.refreshThumbs(fresh);
 check("a new poster lands on its own tile, not on the one at its index",
-  /^\/api\/thumb\/c\?t=/.test(P.tileImgs.c.src), P.tileImgs.c.src);
+  /^\/api\/thumb\/c\?v=[^&]+&t=/.test(P.tileImgs.c.src), P.tileImgs.c.src);
 check("...and no other tile was touched",
-  P.tileImgs.a.src === "/api/thumb/a", P.tileImgs.a.src);
+  P.tileImgs.a.src === "/api/thumb/a?v=" + P.BUILD, P.tileImgs.a.src);
 check("a film filtered off the grid is still tracked without throwing",
   P.thumbState.b === false);
 reset();

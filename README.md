@@ -893,6 +893,78 @@ straight into the target. Two changes, both in `playstick-ui.html`:
 Replaying the capture's opening against the page's real clock model: the old
 constants plant the element 1180 ms late, the new ones land it within 10 ms.
 
+### The page notices when it has been replaced
+
+Deploying used to change nothing on any phone in the house. `/` is served
+`no-store`, so a browser that *asks* for the page always gets the current one —
+but after the first visit none of them ask again. The page polls `/api/status`
+forever and never navigates, so a tab opened last month keeps running last
+month's JavaScript until somebody thinks to pull down and refresh. Children do
+not refresh, and the adults do not think to.
+
+So the daemon stamps each copy on the way out and reports the same value on
+every poll:
+
+```console
+$ curl -s stick.local/ | grep 'var BUILD'
+var BUILD = "c20e48476c19";
+$ curl -s stick.local/api/status | python3 -m json.tool | grep build
+    "build": "c20e48476c19",
+```
+
+A page whose own stamp no longer matches reloads itself, normally within three
+seconds of the deploy finishing.
+
+**The stamp is a hash of `ui.html`, and every alternative was worse.** A version
+number is something somebody has to remember to raise. The daemon's start time
+would order every phone in the house to reload after a power cut, for a page
+that had not changed by a byte — and `copy` gives the file a new mtime on every
+playbook run, most of which have nothing to do with the page, so a timestamp is
+the same mistake with extra steps. Hashing the daemon as well would be wrong in
+the other direction: this payload is additive by house rule, an older page
+against a newer daemon is a supported combination, and reloading for it would
+be interrupting people to deliver nothing.
+
+**It waits for a moment when there is nothing to lose.** A reload is a page that
+forgets which film it is following, throws away the clock offset the headphone
+sync spent a minute measuring, and drops the audio element out of somebody's
+ears. So a mismatch found while a film is playing, paused, or a lamp is warming
+is held until the state goes idle. In practice the wait never happens — the
+deploy restarts the daemon, which stops the film — but a deploy run while
+somebody was watching should not be the thing that ends it.
+
+The hash is computed from the file on disk and cached against its mtime and
+size, which costs one `stat` per poll and gets the dev container the same
+behaviour for free: edit `roles/player/files/playstick-ui.html`, and every
+browser pointed at `docker compose up gui` reloads itself. That is the shipped
+mechanism, exercised every time anybody touches the page.
+
+**The same stamp busts the posters and the soundtracks.** There is no third
+asset to worry about — no CDN, no web fonts, no external images, one file — but
+reloading the page does not empty a browser's image or media cache, and those
+two are the only things this page fetches that a browser is allowed to keep. A
+prepared poster is held for a day, an extracted frame for a year under
+`immutable`, and a soundtrack for an hour. So every URL for one carries the
+build:
+
+```
+/api/thumb/0123456789abcdef?v=c20e48476c19
+/api/audio/0123456789abcdef/0?v=c20e48476c19
+```
+
+It goes in the **query**, and that is the whole reason it is safe. Every route
+matches against the parsed path, so nothing on the daemon reads this — no new
+value crosses the boundary, and those routes still accept exactly what they
+accepted before: an opaque sixteen-hex id and a small integer. The
+[no-authentication](#no-authentication) argument is untouched.
+
+The cost is one deploy's worth of re-downloading: after a playbook run every
+phone pulls the posters in its grid again, and a listener who reconnects pulls
+their soundtrack again rather than resuming from the hour-long cache entry.
+That is the trade being made deliberately — a poster or a track cached for a
+year that the current release no longer produces is a fault nobody can see and
+nobody can clear, and `Ctrl-Shift-R` is not a thing you can ask a child for.
+
 ### No authentication
 
 `ufw` is purged by explicit decision, so port 80 is open to the LAN and anyone on it can
@@ -985,7 +1057,7 @@ they would never be looked at. Set it to `0` to see the layout as it ships.
 ### Tests
 
 ```bash
-python3 -m unittest discover -s tests            # ~210 tests, about 10 seconds
+python3 -m unittest discover -s tests            # ~310 tests, about 11 seconds
 ./actl 'python3 -m unittest discover -s tests'   # the same, in the control node
 ```
 
@@ -1054,7 +1126,10 @@ including the taps going through the handlers the page really attached.
 child can see: A to Z is byte-identical to the unfiltered order the server sent,
 a film with no year is last in *both* year orders, no combination can leave the
 grid empty without a way back out, and a poster arriving mid-scan lands on its
-own tile rather than on whichever one shares its index.
+own tile rather than on whichever one shares its index. `preparing.js` is the
+view a child watches while a lamp warms up, `admin.js` the curator's editor, and
+`build.js` the reload after a deploy — mostly the moments it must *not* pick,
+since a reload drops the audio element out of somebody's ears.
 
 ## Results so far
 

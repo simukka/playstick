@@ -6,6 +6,7 @@ process that streams file bytes. The package docstring explains how far that
 reaches.
 """
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -46,6 +47,74 @@ def sync_allowed():
             return False
         _sync_window[1] += 1
         return True
+
+
+# The page announces which build it is by carrying this string, which the
+# daemon rewrites on the way out. A copy that reaches a browser some other way
+# -- opened off the disk, saved out of the inspector -- still parses, and says
+# so plainly rather than claiming to be a build it is not.
+_BUILD_TOKEN = b"__PLAYSTICK_BUILD__"
+
+_ui_lock = threading.Lock()
+_ui_cache = [None, "", b""]     # what it was built from, the id, the page
+
+
+def ui_page():
+    """The page as it is served, and the identity of the build it is.
+
+    THE PROBLEM. Serving the page no-store means a browser that asks for it
+    always gets the current one. Nothing in that reaches a browser that is not
+    asking -- and after a deploy, none of them are. The phones in the house
+    have the page open already; they poll /api/status forever and never
+    navigate again. Left alone they run last week's JavaScript against this
+    week's daemon until somebody thinks to pull down and refresh, which is
+    exactly the thing nobody thinks to do, least of all a child.
+
+    THE IDENTITY. A hash of the file on disk, so it changes when and only when
+    the page changes. Not a version number, which somebody has to remember to
+    raise. Not the start time of the process, which would order every phone in
+    the house to reload after a power cut, for a page that had not changed by a
+    byte. Not a hash of the daemon as well: the API is additive by house rule,
+    so an older page against a newer daemon is a supported combination, and
+    reloading for it would be interrupting people to deliver nothing.
+
+    CACHED against the file's mtime and size, because /api/status asks for the
+    identity on every poll and there are several phones polling. Keyed on a
+    stat rather than read once at import, because the dev container bind-mounts
+    this file straight out of the repository: edit it, and every browser
+    pointed at that container reloads itself. That is the same mechanism the
+    appliance uses, exercised every time anybody touches the page.
+    """
+    stat = os.stat(UI_FILE)
+    key = (UI_FILE, stat.st_mtime_ns, stat.st_size)
+    with _ui_lock:
+        if _ui_cache[0] == key:
+            return _ui_cache[1], _ui_cache[2]
+    with open(UI_FILE, "rb") as fh:
+        raw = fh.read()
+    # Truncated: this is compared for equality by a browser, never used to
+    # prove anything, and twelve hex digits is already far more than the number
+    # of builds a household appliance will ever see.
+    build = hashlib.sha256(raw).hexdigest()[:12]
+    page = raw.replace(_BUILD_TOKEN, build.encode())
+    with _ui_lock:
+        _ui_cache[:] = [key, build, page]
+    return build, page
+
+
+def build_id():
+    """Which build the page currently on disk is, for /api/status to report.
+
+    A page that cannot be read at all answers with the last one that could be.
+    The alternative -- an empty build, which the page reads as "no opinion" --
+    is right too, and this is only better by a little: a UI file that vanished
+    between two polls is a broken deploy, and telling every phone to reload
+    into a 500 helps nobody.
+    """
+    try:
+        return ui_page()[0]
+    except OSError:
+        return _ui_cache[1]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -210,10 +279,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _serve_ui(self):
         try:
-            with open(UI_FILE, "rb") as fh:
-                body = fh.read()
+            _build, body = ui_page()
         except OSError as exc:
             return self._send(500, ("UI missing: %s" % exc).encode(), "text/plain")
+        # no-store rather than a validator: the page is 90 KB fetched once per
+        # visit over a LAN, and a conditional request that saves that is not
+        # worth one browser somewhere deciding a 304 means it may keep the copy
+        # it has. Everything expensive here -- the posters, the soundtracks --
+        # caches properly and is addressed separately.
         self._send(200, body, "text/html; charset=utf-8", {"Cache-Control": "no-store"})
 
     def _api_library(self):
@@ -442,6 +515,11 @@ class Handler(BaseHTTPRequestHandler):
             ]
         self._json({
             "state": state,
+            # Which build of the page this daemon is serving. A page whose own
+            # stamp no longer matches reloads itself -- see ui_page(). Additive
+            # like everything else here, so a page from before this existed
+            # carries on ignoring it and carries on needing a manual refresh.
+            "build": build_id(),
             # The page cannot build an audio URL without this.
             "id": item["id"] if item else "",
             "title": self.projectionist.current_title(),

@@ -477,6 +477,12 @@ systemctl status srv-movies.automount
 ls /srv/movies                                     # triggers the automount
 curl -s localhost/healthz                          # the web UI, on port 80
 ss -ltnp | grep ':80 '                             # who owns it: python3, as root
+
+# the page and the daemon must name the same build, or the phones will not
+# know a deploy happened. The value is a hash of ui.html; it changes when and
+# only when that file does.
+curl -s localhost/ | grep -o 'var BUILD = "[^"]*"'
+curl -s localhost/api/status | grep -o '"build": "[^"]*"'
 ```
 
 ```bash
@@ -602,6 +608,9 @@ sudo apt update && sudo apt full-upgrade
 | The film plays but the projector stays off, and the page says `I couldn't reach the projector.` | Working as designed — a serial fault never stops a film. The journal names the failing command: `journalctl -u playstick-web \| grep projector:`. Settle it with `projector-probe.py` |
 | The projector switches itself on when nobody is mirroring | An AirPlay picker glance got through. Raise `player_projector_airplay_wake_ticks`, or set `player_projector_wake_on_airplay: false` |
 | The lamp will not go out | Something is holding the clock: a film playing or being prepared, or an established connection to UxPlay's port. `ss -tn state established sport = :7000` names it. A phone with the page open is deliberately **not** enough |
+| A phone is still showing the old page after a deploy | It should reload itself within about three seconds; a page still open across a film reloads when that film ends. Check the two ends agree on what "old" means: `curl -s <stick>/api/status \| grep -o '"build": "[^"]*"'` against `curl -s <stick>/ \| grep 'var BUILD'`. Matching values mean the phone has the current page and the difference is elsewhere. Empty or absent `build` means the deploy did not land — `systemctl status playstick-web` |
+| Every phone reloads itself on every playbook run | The build is a hash of `ui.html`, so this means the file really is changing. A local edit to `roles/player/files/playstick-ui.html` is the usual reason; `git status` says |
+| The grid is slow to fill in, but only right after a deploy | Expected, once. Posters and soundtracks carry the build in their URL (`?v=…`), so a deploy re-pulls them rather than leaving a phone on a poster cached for a year. Every load after that is served from the cache again |
 | The preparing view sits on `Waiting for the lamp…` and then plays anyway | The lamp did not report `001` within `player_projector_ready_seconds`. If the projector had just been switched off, this is its cool-down refusing `PON`; `projector-probe.py cycle` measures the real window |
 
 More detail on any of the measured decisions is in the [README](../README.md), and the

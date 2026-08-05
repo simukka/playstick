@@ -120,10 +120,30 @@ class Route(AudioTest):
                 self.assertNotFound(self.fetch(path))
 
     def test_a_query_string_does_not_defeat_the_match(self):
-        """The page appends one to force a reload when a listener switches
-        language. urlparse strips it before the regex sees the path."""
-        resp = self.fetch(self.url() + "?t=1712345678")
-        self.assertEqual(resp.status, 200)
+        """The page appends `?v=<build>` so that a deploy re-pulls a track a
+        phone is holding for an hour. urlparse strips it before the anchored
+        regex sees the path, which is what makes the query a safe place to put
+        a cache key: nothing on this side reads it."""
+        for query in ["?v=c20e48476c19", "?v=", "?t=1712345678",
+                      "?v=c20e48476c19&t=1712345678"]:
+            with self.subTest(query=query):
+                resp = self.fetch(self.url() + query)
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.body, DATA)
+
+    def test_a_stamped_url_still_ranges_and_still_carries_its_own_etag(self):
+        """The stamp is not a version of the FILE -- the ETag and If-Range
+        still describe the bytes on disk. A listener who reconnects mid-track
+        after a deploy must not be handed one file's offsets from another."""
+        resp = self.fetch(self.url() + "?v=c20e48476c19",
+                          headers={"Range": "bytes=0-1"})
+        self.assertEqual(resp.status, 206)
+        self.assertEqual(resp.body, DATA[:2])
+        self.assertEqual(resp.header("ETag"), self.etag(self.jpn))
+
+    def test_a_stamped_url_for_a_track_that_is_not_there_is_still_a_404(self):
+        self.assertNotFound(self.fetch(self.url(ident=OTHER) + "?v=abc"))
+        self.assertNotFound(self.fetch(self.url(track=9) + "?v=abc"))
 
 
 class Ranges(AudioTest):

@@ -15,7 +15,7 @@ const { install, load, check, done } = require("./page.js");
 const PAGE = process.argv[2] ||
   __dirname + "/../../roles/player/files/playstick-ui.html";
 const VARS = ["state", "library", "prepArtId", "busyUntil", "bannerHold",
-  "thumbState", "tileImgs"];
+  "thumbState", "tileImgs", "BUILD"];
 const FNS = ["apply", "showView", "play", "showBanner", "renderLibrary",
   "guard"];
 
@@ -58,7 +58,7 @@ check("a tap goes straight to the preparing view", shown() === "preparing",
 check("...showing the film that was tapped",
   el("prepTitle").textContent === "Ponyo", el("prepTitle").textContent);
 check("...with its poster, from the grid the page already has",
-  el("prepArt").src === "/api/thumb/abc", el("prepArt").src);
+  el("prepArt").src === "/api/thumb/abc?v=" + P.BUILD, el("prepArt").src);
 check("...and something to read before the first poll arrives",
   el("prepStep").textContent.length > 0, el("prepStep").textContent);
 
@@ -92,8 +92,8 @@ P.apply(status({ id: "zzz", title: "Totoro",
   prepare: { step: "warming", label: "Waiting for the lamp…", since: 1 } }));
 check("a film started elsewhere names itself here too",
   el("prepTitle").textContent === "Totoro", el("prepTitle").textContent);
-check("...and brings its own poster", el("prepArt").src === "/api/thumb/zzz",
-  el("prepArt").src);
+check("...and brings its own poster",
+  el("prepArt").src === "/api/thumb/zzz?v=" + P.BUILD, el("prepArt").src);
 
 const before = el("prepArt").src;
 el("prepArt").src = "SENTINEL";
