@@ -167,6 +167,18 @@ class Library(ApiTest):
         item = self.assertJson(self.fetch("/api/library"))["items"][0]
         self.assertEqual(item["sort_title"], "fifth element")
 
+    def test_hidden_is_false_by_default_and_carried_when_set(self):
+        """Every client is told whether a film is hidden -- the phones so they
+        can leave it out, the curator so it can be un-hidden. Present and false
+        for a film nobody has touched, so the page never has to tell 'not in
+        the payload' from 'not hidden'."""
+        self.library.add(FILM, "Ponyo")
+        self.library.add(OTHER, "Grave of the Fireflies", hidden=True)
+        items = self.assertJson(self.fetch("/api/library"))["items"]
+        by_id = {i["id"]: i for i in items}
+        self.assertFalse(by_id[FILM]["hidden"])
+        self.assertTrue(by_id[OTHER]["hidden"])
+
     def test_has_thumb_is_true_for_a_poster_from_the_index(self):
         self.library.add(FILM, "Ponyo", poster="/srv/movies/Ponyo/poster.jpg")
         item = self.assertJson(self.fetch("/api/library"))["items"][0]
@@ -203,6 +215,74 @@ class Library(ApiTest):
     def test_the_payload_is_not_cached(self):
         self.assertEqual(self.fetch("/api/library").header("Cache-Control"),
                          "no-store")
+
+
+class Admin(ApiTest):
+    """The desktop curator route. Shaped like /api/play -- an id that has to
+    name a real film, a body coerced at the boundary, a status JSON back -- and
+    as careful: nothing it accepts can reach the filesystem."""
+
+    def edit(self, ident, **fields):
+        return self.fetch("/api/admin/item", method="POST",
+                          body={"id": ident, "fields": fields})
+
+    def test_an_edit_lands_on_the_film_and_comes_back(self):
+        self.library.add(FILM, "ponyo.2008.1080p")
+        body = self.assertJson(self.edit(FILM, title="Ponyo", year=2008,
+                                         genres=["Animation", "Family"]))
+        self.assertEqual(body["title"], "Ponyo")
+        self.assertEqual(body["year"], 2008)
+        self.assertEqual(body["genres"], ["Animation", "Family"])
+        self.assertEqual(self.library.items[FILM]["title"], "Ponyo")
+
+    def test_hiding_a_film_is_an_edit_like_any_other(self):
+        self.library.add(FILM, "Grave of the Fireflies")
+        body = self.assertJson(self.edit(FILM, hidden=True))
+        self.assertTrue(body["hidden"])
+        self.assertTrue(self.library.items[FILM]["hidden"])
+        # ...and un-hiding it again.
+        body = self.assertJson(self.edit(FILM, hidden=False))
+        self.assertFalse(body["hidden"])
+
+    def test_an_unknown_film_is_a_404(self):
+        body = self.assertJson(self.edit("deadbeefdeadbeef", title="Nope"), 404)
+        self.assertIn("not in the library", body["error"])
+
+    def test_a_year_that_is_not_a_number_resets_rather_than_throws(self):
+        """An untrusted value arrives here, so it is coerced where /api/volume
+        coerces its own -- a year of "loud" is a cleared field, not a 500."""
+        self.library.add(FILM, "Ponyo", year=2008)
+        self.assertJson(self.edit(FILM, year="loud"))
+        self.assertEqual(self.library.overrides[-1][1]["year"], None)
+
+    def test_an_emptied_title_is_a_reset_not_an_empty_title(self):
+        """A blank box means 'go back to what the index said', which the daemon
+        expresses as None on the field rather than as the literal empty string
+        a naive save would send."""
+        self.library.add(FILM, "Ponyo")
+        self.assertJson(self.edit(FILM, title="   "))
+        self.assertEqual(self.library.overrides[-1][1]["title"], None)
+
+    def test_a_path_bearing_field_is_never_editable(self):
+        """The one invariant the package rests on: no path the client sent
+        reaches the filesystem. The editor may set metadata and nothing else,
+        so an attempt to substitute a poster or a media path is dropped before
+        it is ever passed to the library."""
+        self.library.add(FILM, "Ponyo")
+        self.fetch("/api/admin/item", method="POST", body={
+            "id": FILM,
+            "fields": {"title": "Ponyo", "path": "/etc/passwd",
+                       "poster": "/etc/shadow"},
+        })
+        sent = self.library.overrides[-1][1]
+        self.assertNotIn("path", sent)
+        self.assertNotIn("poster", sent)
+        self.assertEqual(sent["title"], "Ponyo")
+
+    def test_a_body_that_is_not_an_object_does_not_throw(self):
+        self.library.add(FILM, "Ponyo")
+        # No fields at all: nothing to change, and certainly not a crash.
+        self.assertJson(self.edit(FILM))
 
 
 class State(ApiTest):

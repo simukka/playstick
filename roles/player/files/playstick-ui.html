@@ -298,6 +298,66 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
   font-size: 16px;
 }
 #tuneNote { color: var(--dim); font-size: 12.5px; line-height: 1.4; padding: 4px 14px 0; }
+
+/* --- admin (desktop only) ----------------------------------------------- */
+/* Everything below is dark on a phone: it is reached only when the page is
+   opened on a machine with a real pointer, where somebody is curating the
+   library rather than watching it. See detectAdmin(). The child-facing views
+   are untouched -- an admin build is the same page with one extra button per
+   tile and one extra sheet. */
+.cell { position: relative; }
+/* A curated-away film still shows in the admin grid, dimmed and badged, so the
+   person hiding it can see what they have hidden and put it back. The children
+   never receive it (matches() drops it) -- this is the editor's own view. */
+.cell.hidden .tile { opacity: .38; }
+.cell .badge {
+  position: absolute; top: 8px; left: 8px; z-index: 2;
+  padding: 3px 8px; border-radius: 8px; background: rgba(0,0,0,.72);
+  color: #ffd79a; font-size: 12px; font-weight: 700; letter-spacing: .3px;
+  display: none;
+}
+.cell.hidden .badge { display: block; }
+.editBtn {
+  position: absolute; top: 8px; right: 8px; z-index: 2;
+  width: 40px; height: 40px; border-radius: 50%;
+  background: rgba(0,0,0,.72); color: var(--ink);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 18px;
+}
+.editBtn:active { transform: scale(.92); }
+#adminBadge {
+  display: none; margin: 0 4px 12px; padding: 8px 14px; border-radius: 12px;
+  background: var(--card); color: var(--dim); font-size: 14px; line-height: 1.4;
+}
+#adminBadge.on { display: block; }
+/* The editor's fields. Plain inputs -- this is a keyboard-and-mouse view, so
+   the giant tap targets the rest of the page is built from would only be in
+   the way. */
+.afield { padding: 4px 14px 0; }
+.afield label {
+  display: block; font-size: 13px; font-weight: 700; letter-spacing: .4px;
+  text-transform: uppercase; color: var(--dim); margin: 12px 0 5px;
+}
+.afield input {
+  width: 100%; box-sizing: border-box; min-height: 46px; padding: 0 12px;
+  border-radius: 12px; background: #101014; color: var(--ink);
+  border: 1px solid #33333c; font-size: 17px;
+}
+.afield input:focus { outline: none; border-color: var(--accent); }
+.afield .hint { color: var(--dim); font-size: 12.5px; line-height: 1.4; margin: 5px 0 0; }
+#aHiddenRow {
+  display: flex; align-items: center; gap: 14px; width: 100%;
+  min-height: 62px; margin-top: 10px; padding: 0 14px; border-radius: 14px;
+  background: var(--card); font-size: 19px; text-align: left;
+}
+#aHiddenRow .grow { flex: 1; }
+#aHiddenRow .tick { color: var(--accent); font-size: 22px; visibility: hidden; }
+#aHiddenRow.on .tick { visibility: visible; }
+#aFoot { display: flex; gap: 10px; padding: 16px 14px 2px; }
+#aFoot button { flex: 1; min-height: 54px; border-radius: 14px; font-size: 17px; font-weight: 650; }
+#aSave { background: var(--accent); color: #06121f; }
+#aClose { background: var(--card); }
+#aNote { color: var(--dim); font-size: 12.5px; line-height: 1.4; padding: 8px 14px 0; }
 </style>
 </head>
 <body>
@@ -345,8 +405,47 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
   <button id="filterClear" type="button">Show everything</button>
 </div>
 
+<div id="asheet" class="sheet" role="dialog" aria-modal="true" aria-label="Edit film">
+  <div class="grip"></div>
+  <h2 id="aHead">Edit</h2>
+  <div class="afield">
+    <label for="aTitle">Title</label>
+    <input id="aTitle" type="text" autocomplete="off" spellcheck="false">
+    <p class="hint">What the children see under the poster. Clear it to fall back to the filename.</p>
+  </div>
+  <div class="afield">
+    <label for="aSort">Sort as</label>
+    <input id="aSort" type="text" autocomplete="off" spellcheck="false">
+    <p class="hint">Where it files in A&ndash;Z. "The Iron Giant" sorts under I as "iron giant".</p>
+  </div>
+  <div class="afield">
+    <label for="aYear">Year</label>
+    <input id="aYear" type="number" inputmode="numeric" autocomplete="off">
+  </div>
+  <div class="afield">
+    <label for="aRating">Score or certificate</label>
+    <input id="aRating" type="text" autocomplete="off" spellcheck="false">
+    <p class="hint">A number like 7.8, or a rating like U or PG.</p>
+  </div>
+  <div class="afield">
+    <label for="aGenres">Kinds</label>
+    <input id="aGenres" type="text" autocomplete="off" spellcheck="false">
+    <p class="hint">Comma-separated, e.g. Animation, Family.</p>
+  </div>
+  <button id="aHiddenRow" type="button">
+    <span class="grow">Hidden from the children<span class="sub" style="display:block;font-size:14px;color:var(--dim);margin-top:2px">Kept off their grid, still here for you</span></span>
+    <span class="tick">&#10003;</span>
+  </button>
+  <div id="aFoot">
+    <button id="aClose" type="button">Close</button>
+    <button id="aSave" type="button">Save</button>
+  </div>
+  <div id="aNote"></div>
+</div>
+
 <div id="library" class="view on">
   <h1>Playstick</h1>
+  <div id="adminBadge">Curator view &mdash; every film is editable, and hidden films are shown here dimmed.</div>
   <button id="filterChip" type="button"></button>
   <div id="grid"></div>
   <div id="empty" hidden></div>
@@ -397,6 +496,32 @@ var filtGenre = localStorage.getItem("ps.lib.genre") || "";       // "" = all
 var filtScore = parseFloat(localStorage.getItem("ps.lib.score") || "0") || 0;
 var filtReady = localStorage.getItem("ps.lib.ready") === "1";
 var filtSort = localStorage.getItem("ps.lib.sort") || "name";
+
+/* --- curator view -------------------------------------------------------
+   The page is built for a child holding a phone in a dark room, and stays that
+   way. This one flag is the exception: when it is on -- because the page was
+   opened on something with a real pointer, or asked for with ?admin -- the grid
+   grows an edit button per tile and shows the films that are otherwise hidden,
+   so a library can be tidied from the desktop it is managed on. Everything the
+   phones do is unchanged; a hidden film is simply one matches() drops for them
+   and keeps for the curator. */
+var adminMode = detectAdmin();
+var editingId = "";       // which film the editor sheet is open on
+
+function detectAdmin() {
+  // ?admin (or ?admin=0 to force it off) wins, so a phone can be made to show
+  // the curator view for testing and a desktop can be made to hide it. Absent
+  // that, a fine pointer that can hover is the desktop tell: a touchscreen
+  // answers false to both and gets the child's page it was designed for.
+  var q = /[?&]admin(?:=([^&]*))?/.exec(location.search);
+  if (q) { return q[1] !== "0" && q[1] !== "false"; }
+  try {
+    if (typeof matchMedia === "function") {
+      return matchMedia("(hover: hover) and (pointer: fine)").matches;
+    }
+  } catch (e) { /* an ancient browser without matchMedia is not a desktop */ }
+  return false;
+}
 var libraryGenres = [];   // every genre the library has, derived on each load
 
 var SORTS = [
@@ -477,6 +602,10 @@ function scoreOf(item) {
 }
 
 function matches(item) {
+  // Hidden films leave the children's grid entirely, but stay in the curator's
+  // so they can be found and un-hidden. This is the only line that reads the
+  // flag; every filter below is the same for both.
+  if (!adminMode && item.hidden) { return false; }
   if (filtGenre && (item.genres || []).indexOf(filtGenre) < 0) { return false; }
   if (filtScore > 0 && !(scoreOf(item) >= filtScore)) { return false; }
   if (filtReady && !(item.audio_langs || []).length) { return false; }
@@ -535,11 +664,39 @@ function renderLibrary() {
     tile.appendChild(img);
     tile.appendChild(label);
     tile.addEventListener("click", function () { play(item); });
-    grid.appendChild(tile);
+
+    if (adminMode) {
+      // A button cannot live inside a button, so the play tile and the edit
+      // control are siblings in a positioned cell rather than nested. The cell
+      // is what carries the "hidden" state so both the dimming and the badge
+      // land on the same box.
+      var cell = document.createElement("div");
+      cell.className = "cell" + (item.hidden ? " hidden" : "");
+
+      var badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = "Hidden";
+
+      var edit = document.createElement("button");
+      edit.className = "editBtn";
+      edit.type = "button";
+      edit.setAttribute("aria-label", "Edit " + item.title);
+      edit.innerHTML = "&#9998;";
+      edit.addEventListener("click", function () { openEditor(item); });
+
+      cell.appendChild(tile);
+      cell.appendChild(badge);
+      cell.appendChild(edit);
+      grid.appendChild(cell);
+    } else {
+      grid.appendChild(tile);
+    }
 
     tileImgs[item.id] = img;
     thumbState[item.id] = item.has_thumb;
   });
+
+  el("adminBadge").classList.toggle("on", adminMode);
 
   var empty = el("empty");
   var hidden = filtersOn() && library.length > 0;
@@ -1436,22 +1593,94 @@ function paintAudioBtn() {
 
 function sheetOpen() { return el("sheet").classList.contains("on"); }
 function filtersShown() { return el("fsheet").classList.contains("on"); }
+function editorShown() { return el("asheet").classList.contains("on"); }
 
-/* One scrim, two sheets, and never both. Each opener closes the other rather
-   than stacking, because a sheet is 82vh and a second one over it would leave
-   the first reachable only by dismissing something that looks identical. */
+/* One scrim, now three sheets, and never more than one. Each opener closes the
+   others rather than stacking, because a sheet is 82vh and a second one over it
+   would leave the first reachable only by dismissing something that looks
+   identical. */
+function anySheet() { return sheetOpen() || filtersShown() || editorShown(); }
+
 function showSheet(on) {
   el("sheet").classList.toggle("on", on);
-  if (on) { el("fsheet").classList.remove("on"); }
-  el("sheetScrim").classList.toggle("on", on || filtersShown());
+  if (on) { el("fsheet").classList.remove("on"); el("asheet").classList.remove("on"); }
+  el("sheetScrim").classList.toggle("on", anySheet());
   if (on) { paintSheet(); }
 }
 
 function showFilters(on) {
   el("fsheet").classList.toggle("on", on);
-  if (on) { el("sheet").classList.remove("on"); }
-  el("sheetScrim").classList.toggle("on", on || sheetOpen());
+  if (on) { el("sheet").classList.remove("on"); el("asheet").classList.remove("on"); }
+  el("sheetScrim").classList.toggle("on", anySheet());
   if (on) { paintFilters(); }
+}
+
+function showEditor(on) {
+  el("asheet").classList.toggle("on", on);
+  if (on) { el("sheet").classList.remove("on"); el("fsheet").classList.remove("on"); }
+  el("sheetScrim").classList.toggle("on", anySheet());
+}
+
+function findItem(id) {
+  for (var i = 0; i < library.length; i++) {
+    if (library[i].id === id) { return library[i]; }
+  }
+  return null;
+}
+
+function openEditor(item) {
+  editingId = item.id;
+  el("aHead").textContent = item.title || "Edit";
+  el("aTitle").value = item.title || "";
+  el("aSort").value = item.sort_title || "";
+  el("aYear").value = (item.year === null || item.year === undefined) ? "" : item.year;
+  el("aRating").value = (item.rating === null || item.rating === undefined) ? "" : item.rating;
+  el("aGenres").value = (item.genres || []).join(", ");
+  el("aHiddenRow").classList.toggle("on", !!item.hidden);
+  el("aNote").textContent = "";
+  showEditor(true);
+}
+
+function saveEditor() {
+  if (!editingId) { return; }
+  // Every field is sent every save, so an emptied box reaches the daemon as
+  // "" -- which it reads as a reset back to whatever the index said, rather
+  // than as a silent no-change. The genres box is split here; the rest are
+  // coerced on the daemon side where the untrusted value lands.
+  var fields = {
+    title: el("aTitle").value,
+    sort_title: el("aSort").value,
+    year: el("aYear").value,
+    rating: el("aRating").value,
+    genres: el("aGenres").value.split(",").map(function (s) { return s.trim(); })
+                               .filter(function (s) { return s; }),
+    hidden: el("aHiddenRow").classList.contains("on")
+  };
+  el("aNote").textContent = "Saving\u2026";
+  post("/api/admin/item", { id: editingId, fields: fields }).then(function (r) {
+    if (!r.ok) {
+      el("aNote").textContent = (r.data && r.data.error) || "That did not save.";
+      return;
+    }
+    // The daemon answers with the film as it now reads -- title fallen back to
+    // the filename, rating parsed, the lot -- so the grid is repainted from
+    // its answer rather than from what was typed.
+    var item = findItem(r.data.id);
+    if (item) {
+      item.title = r.data.title;
+      item.sort_title = r.data.sort_title;
+      item.year = r.data.year;
+      item.rating = r.data.rating;
+      item.genres = r.data.genres || [];
+      item.hidden = !!r.data.hidden;
+    }
+    libraryFacets();
+    renderLibrary();
+    showEditor(false);
+    editingId = "";
+  }).catch(function () {
+    el("aNote").textContent = "Could not reach the player.";
+  });
 }
 
 function row(label, sub, selected, onTap) {
@@ -1889,6 +2118,12 @@ el("filterBtn").addEventListener("click", function () { showFilters(!filtersShow
 el("sheetScrim").addEventListener("click", function () {
   showSheet(false);
   showFilters(false);
+  showEditor(false);
+});
+el("aClose").addEventListener("click", function () { showEditor(false); editingId = ""; });
+el("aSave").addEventListener("click", saveEditor);
+el("aHiddenRow").addEventListener("click", function () {
+  el("aHiddenRow").classList.toggle("on");
 });
 el("filterChip").addEventListener("click", clearFilters);
 el("emptyClear").addEventListener("click", clearFilters);

@@ -14,10 +14,24 @@ import threading
 import time
 
 from .config import (
-    EXTENSIONS, INDEX_FILE, INDEX_SCHEMA, LIBRARY, MIN_SIZE,
+    EXTENSIONS, INDEX_FILE, INDEX_SCHEMA, LIBRARY, MIN_SIZE, OVERLAY_FILE,
     SCAN_DEPTH, SCAN_INTERVAL, SIDECAR_NAMES, SKIP_DIRS, SKIP_RE,
     TAG_RE, YEAR_RE, log
 )
+
+
+# What the desktop admin editor is allowed to set. Everything a film carries
+# that is NOT in here is a filesystem path this process resolved and proved
+# sits under the library root -- path, poster, sidecar, subs, and the per-track
+# paths inside audio. Letting one of those back in over HTTP would undo the one
+# invariant the whole package rests on (no path the client sent ever reaches
+# the filesystem), so an edit naming them is dropped rather than obeyed. The
+# rest -- what the film is called, when it is from, how it scores, what kinds it
+# is, and whether the children see it at all -- is metadata, and metadata is
+# exactly what the person at the desktop is there to fix.
+EDITABLE = frozenset((
+    "title", "sort_title", "year", "rating", "genres", "hidden",
+))
 
 
 def clean_title(filename):
@@ -61,6 +75,15 @@ class Library:
         self._scanned_at = 0.0
         self._error = ""
         self._wake = threading.Event()
+        # Films exactly as the index or the walk produced them, before any
+        # desktop edit is laid over the top. Kept apart from _items so that
+        # clearing an edited field can drop back to what the library actually
+        # says rather than to the last value somebody typed.
+        self._base = {}
+        # id -> {field: value} the admin view has changed. Read from disk once
+        # here and thereafter authoritative in memory; the file is only ever
+        # written, never re-read, so an edit is not at the mercy of a scan.
+        self._overlay = self._read_overlay()
 
     def snapshot(self):
         with self._lock:
@@ -70,6 +93,100 @@ class Library:
     def get(self, ident):
         with self._lock:
             return self._items.get(ident)
+
+    @staticmethod
+    def _merged(base, over):
+        """One film, with its overlay laid on top. A plain dict.update, which
+        is why EDITABLE keeps paths out of the overlay: this is the join, and it
+        cannot tell a corrected title from a substituted path."""
+        item = dict(base)
+        if over:
+            item.update(over)
+        return item
+
+    def apply_override(self, ident, fields):
+        """Record one desktop edit and return the film as it now reads.
+
+        `fields` is already coerced by the HTTP layer to the shape each key
+        wants; a value of None means "forget this edit and go back to what the
+        index says", which is how the editor's per-field reset works. Anything
+        outside EDITABLE is ignored here as a second line after the handler's
+        filtering -- the persisted file must never carry a path.
+
+        Returns the merged film dict, or None when the id is not one we have.
+        The overlay is still recorded either way, because a film can be off the
+        share (the NAS briefly gone) at the moment somebody edits it and the
+        edit must still be there when it comes back.
+        """
+        clean = {}
+        for key, value in fields.items():
+            if key in EDITABLE:
+                clean[key] = value
+        with self._lock:
+            current = dict(self._overlay.get(ident) or {})
+            for key, value in clean.items():
+                if value is None:
+                    current.pop(key, None)
+                else:
+                    current[key] = value
+            if current:
+                self._overlay[ident] = current
+            else:
+                # Every field reset: the film has no overlay at all again, and
+                # the file should not grow an empty entry per film ever touched.
+                self._overlay.pop(ident, None)
+            self._write_overlay()
+            base = self._base.get(ident)
+            if base is None:
+                return None
+            item = self._merged(base, self._overlay.get(ident))
+            self._items[ident] = item
+            return dict(item)
+
+    def _read_overlay(self):
+        if not OVERLAY_FILE:
+            return {}
+        try:
+            with open(OVERLAY_FILE, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            # A corrupt overlay must not take the library down with it: the
+            # films still play, they just read as the index left them.
+            log("overlay unreadable (%s); ignoring edits", exc)
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        overlay = {}
+        for ident, fields in data.items():
+            if isinstance(fields, dict):
+                overlay[str(ident)] = {k: v for k, v in fields.items()
+                                       if k in EDITABLE}
+        return overlay
+
+    def _write_overlay(self):
+        """The overlay to disk, atomically. Called under the lock.
+
+        Same tmp-then-replace prep uses for the index it writes, so a reader --
+        or a power cut mid-write on a device whose whole store is one eMMC --
+        sees the old file or the new one, never half of either.
+        """
+        if not OVERLAY_FILE:
+            return
+        tmp = OVERLAY_FILE + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(self._overlay, handle, indent=1, ensure_ascii=False,
+                          sort_keys=True)
+                handle.write("\n")
+            os.replace(tmp, OVERLAY_FILE)
+        except OSError as exc:
+            log("overlay not saved (%s); the edit is in memory only", exc)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
     def request_rescan(self):
         self._wake.set()
@@ -102,7 +219,9 @@ class Library:
 
         if items is not None:
             with self._lock:
-                self._items = items
+                self._base = items
+                self._items = {i: self._merged(items[i], self._overlay.get(i))
+                               for i in order}
                 self._order = order
                 self._available = True
                 self._scanned_at = time.time()
@@ -258,7 +377,9 @@ class Library:
             # grid: the NAS being briefly unreachable should not make a child's
             # films appear to have been deleted.
             if available:
-                self._items = items
+                self._base = items
+                self._items = {i: self._merged(items[i], self._overlay.get(i))
+                               for i in order}
                 self._order = order
             self._available = available
             self._scanned_at = time.time()

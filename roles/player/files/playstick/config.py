@@ -43,6 +43,19 @@ _index_env = os.environ.get("PLAYSTICK_INDEX")
 INDEX_FILE = (os.path.join(LIBRARY, "playstick-library.json")
               if _index_env is None else _index_env)
 INDEX_SCHEMA = 1
+# Runtime edits made from the desktop admin view -- a title corrected, a genre
+# fixed, a film hidden from the children's grid -- kept in a small JSON sidecar
+# keyed by the same opaque id the index uses. Deliberately a SEPARATE file from
+# the index above, and that separation is the whole feature: the index is
+# regenerated wholesale on a developer machine by playstick-prep.py, so an edit
+# stored inside it would be erased on the next prep run. Stored beside it here,
+# an edit is an overlay merged on top of whatever the index says and survives
+# any number of regenerations. Unset means "the usual place"; set-but-empty
+# means "no overlay", the same load-bearing distinction INDEX_FILE draws and
+# for the same reason -- the unit always writes an Environment= line.
+_overlay_env = os.environ.get("PLAYSTICK_OVERLAY")
+OVERLAY_FILE = (os.path.join(LIBRARY, "playstick-overlay.json")
+                if _overlay_env is None else _overlay_env)
 # Subtitles the prep tool extracted. Off means they are not passed to mpv at
 # all, which is not the same as mpv having none to choose.
 SUBTITLES = (os.environ.get("PLAYSTICK_SUBTITLES", "1") or "1").lower() in ("1", "true", "yes")

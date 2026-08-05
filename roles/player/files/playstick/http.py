@@ -204,6 +204,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/rescan":
             self.library.request_rescan()
             return self._json({"ok": True})
+        if path == "/api/admin/item":
+            return self._api_admin_item()
         return self._json({"error": "not found"}, 404)
 
     def _serve_ui(self):
@@ -237,6 +239,12 @@ class Handler(BaseHTTPRequestHandler):
                     # Empty for a walked share, where the page falls back to
                     # the title -- which is what it would have sorted on anyway.
                     "sort_title": items[ident].get("sort_title") or "",
+                    # Whether this film is held back from the children's grid.
+                    # Sent for every client, not just the desktop editor: the
+                    # phones need it to leave a hidden film out, and the editor
+                    # needs it to draw the toggle. Additive, so an older ui.html
+                    # ignores it and shows everything as it always did.
+                    "hidden": bool(items[ident].get("hidden")),
                     # Languages only, not the tracks themselves. The sheet on
                     # the grid offers a PREFERRED language before a film has
                     # started, and to do that it needs to know what the library
@@ -249,6 +257,68 @@ class Handler(BaseHTTPRequestHandler):
             ],
         }
         self._json(payload)
+
+    def _api_admin_item(self):
+        """One film's metadata, edited from the desktop admin view.
+
+        The mirror of /api/play in shape -- an id that has to name a real film,
+        a body coerced at this boundary, a status JSON back -- and the mirror of
+        it in caution too. Nothing here can reach the filesystem: apply_override
+        drops any key that is not editable metadata, so the poster path and the
+        soundtrack paths this same film carries are not addressable through it.
+        """
+        body = self._body()
+        ident = str(body.get("id", ""))
+        raw = body.get("fields")
+        if not isinstance(raw, dict):
+            raw = {}
+        item = self.library.apply_override(ident, self._admin_fields(raw))
+        if item is None:
+            return self._json({"error": "That film is not in the library."}, 404)
+        return self._json({
+            "id": item["id"],
+            "title": item.get("title", ""),
+            "sort_title": item.get("sort_title") or "",
+            "year": item.get("year"),
+            "rating": item.get("rating"),
+            "genres": item.get("genres") or [],
+            "hidden": bool(item.get("hidden")),
+        })
+
+    @staticmethod
+    def _admin_fields(raw):
+        """The editor's form, coerced where the untrusted value lands -- the
+        same boundary /api/volume turns "loud" into 0 at. Only keys the form
+        actually sent are touched, so changing one field leaves the rest of a
+        film's overlay alone. An emptied box is a reset rather than a value: a
+        blank title means "go back to what the index said", not "call this
+        film ''" -- the library reads None on any field as exactly that."""
+        fields = {}
+        if "hidden" in raw:
+            fields["hidden"] = bool(raw.get("hidden"))
+        for key in ("title", "sort_title"):
+            if key in raw:
+                fields[key] = str(raw.get(key) or "").strip() or None
+        if "year" in raw:
+            try:
+                fields["year"] = int(raw.get("year"))
+            except (TypeError, ValueError):
+                fields["year"] = None
+        if "rating" in raw:
+            # Whatever the .nfo held: a score like 7.8 or a certificate like
+            # "PG". Numbers pass through; everything else is text, blank resets.
+            value = raw.get("rating")
+            if isinstance(value, bool) or value is None:
+                value = None
+            elif not isinstance(value, (int, float)):
+                value = str(value).strip() or None
+            fields["rating"] = value
+        if "genres" in raw:
+            value = raw.get("genres")
+            picked = ([str(g).strip() for g in value if str(g).strip()]
+                      if isinstance(value, list) else [])
+            fields["genres"] = picked or None
+        return fields
 
     def _api_thumb(self, ident):
         item = self.library.get(ident)

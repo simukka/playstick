@@ -103,6 +103,7 @@ class FakeLibrary:
         self.scanned_at = 1700000000.0
         self.error = ""
         self.rescans = 0
+        self.overrides = []
 
     def add(self, ident, title, **extra):
         item = {"id": ident, "title": title}
@@ -120,6 +121,22 @@ class FakeLibrary:
 
     def request_rescan(self):
         self.rescans += 1
+
+    def apply_override(self, ident, fields):
+        """The real Library keeps a base and an overlay and re-merges; the
+        handler only cares that an edit lands on the item and that an unknown
+        id answers None, so the fake just mutates in place. A field set to None
+        is a reset, dropped from the item the way the overlay would drop it."""
+        self.overrides.append((ident, dict(fields)))
+        item = self.items.get(ident)
+        if item is None:
+            return None
+        for key, value in fields.items():
+            if value is None:
+                item.pop(key, None)
+            else:
+                item[key] = value
+        return dict(item)
 
 
 class FakePlayer:
