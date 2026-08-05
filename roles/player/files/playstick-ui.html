@@ -112,6 +112,51 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
   border-radius: 14px; background: var(--card); font-size: 17px;
 }
 
+/* --- getting ready ------------------------------------------------------ */
+/* A cold lamp takes the better part of a minute to strike, and for that minute
+   this view is the only thing standing between a child and the conclusion that
+   the appliance is broken -- which is the conclusion they act on. So it shows
+   the film they picked, so they can see the right one is coming, says what is
+   happening in words rather than in a spinner, and offers a way out. */
+#preparing { text-align: center; }
+#prepArt {
+  width: min(50vw, 240px); aspect-ratio: 2 / 3; margin: 22px auto 0;
+  border-radius: 14px; background: var(--card); object-fit: cover; display: block;
+}
+#prepTitle {
+  font-size: 24px; font-weight: 700; margin: 18px 8px 6px; line-height: 1.2;
+}
+#prepStep { color: var(--accent); font-size: 19px; min-height: 27px; }
+/* Indeterminate, and that is the honest choice rather than a missing feature.
+   There is no percentage to report: the lamp answers when it answers, and a
+   bar that crept to nine tenths and stopped would be a lie a child can see
+   through -- the second time it happens they stop believing the screen. */
+#prepBar {
+  height: 6px; border-radius: 3px; background: #26262e;
+  margin: 24px 4px 0; overflow: hidden;
+}
+#prepBar i {
+  display: block; height: 100%; width: 38%; border-radius: 3px;
+  background: var(--accent); animation: sweep 1.7s ease-in-out infinite;
+}
+@keyframes sweep {
+  from { transform: translateX(-110%); }
+  to   { transform: translateX(275%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #prepBar i { animation: none; width: 100%; opacity: .45; }
+}
+/* Deliberately not the red STOP. Nothing has gone wrong and nothing is being
+   interrupted -- this is changing your mind, and it should not look like an
+   emergency stop on a film that has not started. */
+#prepCancel {
+  display: block; width: 100%; margin: 32px auto 0; max-width: 420px;
+  min-height: 84px; border-radius: 20px; background: var(--card);
+  color: var(--dim); font-size: 22px; font-weight: 650;
+  transition: transform .08s ease;
+}
+#prepCancel:active { transform: scale(.97); }
+
 /* --- now playing ------------------------------------------------------- */
 #playing { text-align: center; }
 #nowTitle {
@@ -308,6 +353,14 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
   <button id="emptyClear" type="button">Show everything</button>
 </div>
 
+<div id="preparing" class="view">
+  <img id="prepArt" alt="">
+  <div id="prepTitle"></div>
+  <div id="prepStep"></div>
+  <div id="prepBar"><i></i></div>
+  <button id="prepCancel" type="button">Never mind</button>
+</div>
+
 <div id="playing" class="view">
   <div id="nowTitle"></div>
   <div id="nowSub"></div>
@@ -330,6 +383,7 @@ var thumbState = {};      // id -> whether the server said it has a real poster
 var tileImgs = {};        // id -> the <img> on that film's tile, for refreshThumbs
 var libraryFetchedAt = 0;
 var busyUntil = 0;        // debounce: a double tap must not fire twice
+var prepArtId = "";       // which poster the preparing view is showing
 
 /* --- what the grid is showing -------------------------------------------
    Held in the page rather than asked of the server. /api/library is one small
@@ -380,14 +434,27 @@ function guard() {
   return true;
 }
 
-function showBanner(text) {
+var bannerHold = 0;       // a deliberate message is not wiped by the next poll
+
+function showBanner(text, holdMs) {
   var b = el("banner");
-  if (text) { b.textContent = text; b.classList.add("on"); }
-  else { b.classList.remove("on"); }
+  if (text) {
+    b.textContent = text;
+    b.classList.add("on");
+    // Without this, a refusal shown by play() lasted until the status poll a
+    // second or two later cleared it -- so the one message that explains why
+    // nothing happened was the one nobody could read. A hold makes the six
+    // seconds it was always asking for actually six seconds.
+    if (holdMs) { bannerHold = Date.now() + holdMs; }
+    return;
+  }
+  if (Date.now() < bannerHold) { return; }
+  b.classList.remove("on");
 }
 
 function showView(name) {
   el("library").classList.toggle("on", name === "library");
+  el("preparing").classList.toggle("on", name === "preparing");
   el("playing").classList.toggle("on", name === "playing");
   // The sound icon is deliberately reachable at all times; the funnel is not.
   // Nothing on the now-playing view is a list, so a control for narrowing one
@@ -593,14 +660,20 @@ function paintChip() {
 
 function play(item) {
   if (!guard()) { return; }
-  el("nowTitle").textContent = item.title;
-  el("nowSub").textContent = "Starting…";
+  // Drawn before the POST answers, and with the poster the grid already has,
+  // so the tap produces a picture of the right film immediately. The server
+  // now returns as soon as it has accepted the film rather than when mpv is
+  // running -- a lamp takes longer to light than a browser will wait -- so
+  // everything after this arrives on the status poll.
+  el("prepTitle").textContent = item.title;
+  el("prepArt").src = "/api/thumb/" + item.id;
+  el("prepStep").textContent = "Getting ready…";
   el("barFill").style.width = "0";
-  showView("playing");
+  showView("preparing");
   post("/api/play", { id: item.id }).then(function (res) {
     if (!res.ok) {
       showView("library");
-      showBanner(res.data.error || "That didn't work.");
+      showBanner(res.data.error || "That didn't work.", 6000);
       setTimeout(function () { showBanner(""); }, 6000);
     } else {
       apply(res.data);
@@ -620,8 +693,32 @@ function clock(seconds) {
 function apply(s) {
   state = s.state;
 
+  if (state === "preparing") {
+    showView("preparing");
+    // The film may have been picked on somebody else's phone, so the title and
+    // the poster come from the server rather than from the tap that started it.
+    if (s.title) { el("prepTitle").textContent = s.title; }
+    if (s.id && prepArtId !== s.id) {
+      prepArtId = s.id;
+      el("prepArt").src = "/api/thumb/" + s.id;
+    }
+    // The server's wording, verbatim. The step and the sentence describing it
+    // belong in one place; two copies drift, and the one on the phone is the
+    // copy nobody notices is wrong.
+    el("prepStep").textContent =
+      (s.prepare && s.prepare.label) || "Getting ready…";
+    return;
+  }
+
   if (state === "playing" || state === "paused") {
     showView("playing");
+    // Said once the film is up rather than during the wait: while the steps
+    // are still running the daemon is retrying, and a warning about something
+    // it may yet recover from is noise. If the picture never appears, this is
+    // the sentence that explains why.
+    showBanner(s.projector && s.projector.fault
+      ? "The movie is playing, but I couldn't reach the projector."
+      : "");
     if (s.title) { el("nowTitle").textContent = s.title; }
     el("toggle").innerHTML = state === "paused" ? "&#9654;" : "&#10074;&#10074;";
     el("volume").classList.toggle("on", !!s.audio);
@@ -638,7 +735,13 @@ function apply(s) {
   // Anything else means the projector is ours to offer again.
   showView("library");
   el("grid").classList.toggle("blocked", state === "airplay");
-  if (state === "airplay") {
+  if (s.notice) {
+    // A preparation that gave up. It happens on a thread long after the tap
+    // was answered, so this poll is the only way the reason ever reaches the
+    // phone -- otherwise the grid simply comes back and the poster looks
+    // broken.
+    showBanner(s.notice);
+  } else if (state === "airplay") {
     showBanner("Someone is using the projector to show their phone. " +
                "The movies come back when they stop.");
   } else if (state === "unavailable") {
@@ -668,13 +771,18 @@ function poll() {
     audioStatus(s, rtt);
     // The grid only needs the library occasionally; the now-playing view not
     // at all. Posters arriving is the only thing that changes it.
-    var onGrid = state !== "playing" && state !== "paused";
+    var onGrid = state !== "playing" && state !== "paused"
+      && state !== "preparing";
     if (onGrid && Date.now() - libraryFetchedAt > 10000) { loadLibrary(); }
   }).catch(function () {
     showView("library");
     showBanner("Lost the projector. Trying again…");
   }).then(function () {
-    var soon = (state === "playing" || state === "paused") ? 1000 : 3000;
+    // Preparing polls at the playing rate: the steps are what the child is
+    // watching, and a step that arrives up to three seconds after it started
+    // makes the sequence look stuck rather than progressing.
+    var soon = (state === "playing" || state === "paused"
+                || state === "preparing") ? 1000 : 3000;
     // In a pocket the correction loop is not running and these timers are
     // throttled anyway, so polling harder only costs battery.
     if (document.hidden) { soon = 5000; }
@@ -692,6 +800,15 @@ el("toggle").addEventListener("click", function () {
 });
 
 el("stop").addEventListener("click", function () {
+  if (!guard()) { return; }
+  showView("library");
+  post("/api/stop").then(function (r) { if (r.ok) { apply(r.data); } });
+});
+
+// The same endpoint as STOP. The daemon works out whether that means abandon a
+// warming lamp or stop a running film, so the two buttons differ only in what
+// they say and how alarming they look.
+el("prepCancel").addEventListener("click", function () {
   if (!guard()) { return; }
   showView("library");
   post("/api/stop").then(function (r) { if (r.ok) { apply(r.data); } });

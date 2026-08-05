@@ -61,6 +61,32 @@ Environment=PLAYSTICK_PHONE_AUDIO_STREAMS={{ player_phone_audio_max_streams }}
 {# The gate that refuses to start a film while somebody is mirroring. Same
    port, same question, as the idle clock's blank countdown. #}
 Environment=PLAYSTICK_AIRPLAY_PORT={{ uxplay_port }}
+{# The projector, over RS-232C. Policy here, mechanism in the daemon: how long
+   a lamp takes and what counts as somebody using the room are facts about this
+   installation, not about the code that obeys them.
+
+   An empty model is the default and builds a NullProjector, so every line
+   below is inert until somebody sets one -- see roles/player/defaults/main.yml
+   for why that is the shipped state and what to run before changing it.
+
+   No DeviceAllow= is needed for the serial port. This unit runs as root (mpv
+   needs DRM master; the arbiter needs systemctl) and sets ProtectSystem=full,
+   which does not touch /dev, with no PrivateDevices=. If PrivateDevices=yes is
+   ever added below, DeviceAllow=char-ttyUSB rw becomes necessary and its
+   absence presents as "the projector never answers" -- indistinguishable from
+   the wrong cable, which is the failure this comment exists to prevent
+   somebody debugging twice. #}
+Environment=PLAYSTICK_PROJECTOR_MODEL={{ player_projector_model }}
+Environment=PLAYSTICK_PROJECTOR_DEVICE={{ player_projector_device }}
+Environment=PLAYSTICK_PROJECTOR_INPUT={{ player_projector_input }}
+Environment=PLAYSTICK_PROJECTOR_IDLE_MINUTES={{ player_projector_idle_minutes }}
+Environment=PLAYSTICK_PROJECTOR_WARMUP_SECONDS={{ player_projector_warmup_seconds }}
+Environment=PLAYSTICK_PROJECTOR_READY_SECONDS={{ player_projector_ready_seconds }}
+Environment=PLAYSTICK_PROJECTOR_TIMEOUT={{ player_projector_timeout }}
+Environment=PLAYSTICK_PROJECTOR_TICK_SECONDS={{ player_projector_tick_seconds }}
+Environment=PLAYSTICK_PROJECTOR_WAKE_ON_AIRPLAY={{ 1 if player_projector_wake_on_airplay | bool else 0 }}
+Environment=PLAYSTICK_PROJECTOR_AIRPLAY_WAKE_TICKS={{ player_projector_airplay_wake_ticks }}
+
 {# Pinned for the same reason it is pinned on the UxPlay unit: iHD does not
    cover Gen8 LP, and libva autodetection will find it anyway. #}
 Environment=LIBVA_DRIVER_NAME={{ libva_driver }}

@@ -80,6 +80,12 @@ sys.dont_write_bytecode = True
 
 from playstick import http as api           # noqa: E402
 from playstick.player import Busy           # noqa: E402
+# Re-exported for the same reason as `api`: config is read once at import, and
+# a test module that reached for playstick.* itself could beat this file to it
+# and bake in the ambient environment.
+from playstick import projector             # noqa: E402
+from playstick import projectionist         # noqa: E402
+from playstick.projector import serial_io   # noqa: E402
 
 
 # -- the fakes
@@ -141,10 +147,19 @@ class FakePlayer:
     def status(self):
         return dict(self.data)
 
-    def start(self, item):
+    def start(self, item, progress=None):
         self.calls.append(("start", item["id"]))
+        # Refused before either step is reported, which is where the real
+        # player refuses too: its state and AirPlay checks both run before it
+        # touches the display.
         if self.start_error is not None:
             raise self.start_error
+        if progress:
+            # The real player reports these two from inside itself, so a test
+            # that hands one in should see them. Nothing in the HTTP suite
+            # does; test_projectionist.py is what cares.
+            progress("display")
+            progress("starting")
         self.item = item
         self.playing = "playing"
 
@@ -159,6 +174,119 @@ class FakePlayer:
 
     def nudge_volume(self, delta):
         self.calls.append(("nudge_volume", delta))
+
+
+class FakeProjectionist:
+    """The handler's view of the projectionist, with the thread taken out.
+
+    begin() starts the film synchronously. The real one hands the work to a
+    thread and answers the page over /api/status, which is exactly the wrong
+    shape for a suite about routing and JSON: every assertion would have to
+    wait for something. The sequence itself -- steps, cancels, faults, the idle
+    timeout -- is tested against the real class in test_projectionist.py, where
+    the clock is a variable rather than a wall.
+    """
+
+    def __init__(self, player):
+        self._player = player
+        # Set to a dict to make the handler report a preparation in flight.
+        self.prepare = None
+        self.projector = {"model": "none", "power": "unknown", "fault": ""}
+        self.message = ""
+        self.calls = []
+        # Set to an exception instance to make the next begin() raise it.
+        self.begin_error = None
+
+    def state(self):
+        if self.prepare is not None:
+            return "preparing"
+        return self._player.state()
+
+    def current_item(self):
+        return self._player.current_item()
+
+    def current_title(self):
+        return self._player.current_title()
+
+    def progress(self):
+        return self.prepare
+
+    def projector_status(self):
+        return dict(self.projector)
+
+    def notice(self):
+        return self.message
+
+    def begin(self, item):
+        self.calls.append(("begin", item["id"]))
+        if self.begin_error is not None:
+            raise self.begin_error
+        self._player.start(item)
+
+    def stop(self):
+        self.calls.append(("stop",))
+        self.prepare = None
+        self._player.stop()
+
+
+class FakeProjector:
+    """A projector made of a script, for test_projectionist.py.
+
+    Records every call in order -- the sequence is mostly about ordering, so
+    the order of this list is the assertion. Any entry in `fail` makes that
+    method raise instead, which is how the "a broken projector still plays the
+    film" cases are set up.
+    """
+
+    model = "fake"
+
+    def __init__(self, power="standby", input_code=""):
+        self.power = power
+        self.input_code = input_code
+        self.calls = []
+        self.fail = {}          # method name -> exception to raise
+        self.closed = False
+        # Ticks of power_state() after power_on() before the lamp reports on.
+        # 0 means it is lit the moment PON returns.
+        self.warmup_polls = 0
+        self._polls_left = 0
+
+    def _maybe_fail(self, name):
+        exc = self.fail.get(name)
+        if exc is not None:
+            raise exc
+
+    def power_state(self):
+        self.calls.append("power_state")
+        self._maybe_fail("power_state")
+        if self._polls_left > 0:
+            self._polls_left -= 1
+            return "standby"
+        return self.power
+
+    def power_on(self):
+        self.calls.append("power_on")
+        self._maybe_fail("power_on")
+        self.power = "on"
+        self._polls_left = self.warmup_polls
+
+    def power_off(self):
+        self.calls.append("power_off")
+        self._maybe_fail("power_off")
+        self.power = "standby"
+
+    def set_input(self, code):
+        self.calls.append("set_input:%s" % code)
+        self._maybe_fail("set_input")
+        self.input_code = code
+
+    def current_input(self):
+        self.calls.append("current_input")
+        self._maybe_fail("current_input")
+        return self.input_code
+
+    def close(self):
+        self.closed = True
 
 
 class FakeThumbs:
@@ -209,10 +337,12 @@ class ApiTest(unittest.TestCase):
     def setUp(self):
         self.library = FakeLibrary()
         self.player = FakePlayer()
+        self.projectionist = FakeProjectionist(self.player)
         self.thumbs = FakeThumbs()
         handler = type("TestHandler", (api.Handler,), {
             "library": self.library,
             "player": self.player,
+            "projectionist": self.projectionist,
             "thumbs": self.thumbs,
         })
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -322,6 +452,32 @@ def audio_track(n=0, lang="eng", title="English", channels=2, default=True,
             "default": default, "offset": offset, "path": path}
 
 
-__all__ = ["ApiTest", "Busy", "FakeLibrary", "FakePlayer", "FakeThumbs",
-           "Response", "TMP", "UI_HTML", "api", "audio_track", "patched",
-           "write_file"]
+class Clock:
+    """Time as a variable the test advances.
+
+    The projectionist waits ten seconds for a lamp blackout and thirty minutes
+    for an idle timeout, and a suite that sat through either would be a suite
+    nobody runs. Both the clock and the sleep go in through the constructor,
+    and sleeping here is simply addition -- which is also what makes the
+    assertions exact instead of approximate.
+    """
+
+    def __init__(self, now=0.0):
+        self.now = now
+        self.slept = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+    def sleep(self, seconds):
+        self.slept += seconds
+        self.now += seconds
+
+
+__all__ = ["ApiTest", "Busy", "Clock", "FakeLibrary", "FakePlayer",
+           "FakeProjectionist", "FakeProjector", "FakeThumbs", "Response",
+           "TMP", "UI_HTML", "api", "audio_track", "patched", "projectionist",
+           "projector", "serial_io", "write_file"]

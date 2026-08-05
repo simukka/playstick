@@ -733,6 +733,104 @@ class Thumbs(ApiTest):
                 self.assertNotFound(self.fetch("/api/thumb/" + suffix))
 
 
+class Preparing(ApiTest):
+    """The state between a tap on a poster and a film on the screen.
+
+    All of it is additive: `prepare`, `notice` and `projector` are new keys on
+    a payload that already had a dozen, and a ui.html that has never heard of
+    them ignores them exactly as it ignores everything else it does not know.
+    """
+
+    def preparing(self, step="warming", label="Waiting for the lamp…", since=3.0):
+        self.projectionist.prepare = {"step": step, "label": label,
+                                      "since": since}
+
+    def test_play_goes_through_the_projectionist_not_the_player(self):
+        """The POST now answers as soon as the film is accepted. Everything
+        after that -- the lamp, the input, the display, mpv -- happens on a
+        thread, because a cold lamp takes longer to light than a browser will
+        hold a request open."""
+        self.library.add(FILM, "Ponyo")
+        self.fetch("/api/play", method="POST", body={"id": FILM})
+        self.assertEqual(self.projectionist.calls, [("begin", FILM)])
+
+    def test_the_state_is_preparing_while_it_prepares(self):
+        self.preparing()
+        body = self.assertJson(self.fetch("/api/status"))
+        self.assertEqual(body["state"], "preparing")
+
+    def test_the_step_and_its_words_reach_the_page(self):
+        """The label is the server's, verbatim. Two copies of the wording --
+        one here and one in the page -- drift, and the one on the phone is the
+        copy nobody notices is wrong."""
+        self.preparing(step="warming", label="Waiting for the lamp…")
+        body = self.assertJson(self.fetch("/api/status"))
+        self.assertEqual(body["prepare"]["step"], "warming")
+        self.assertEqual(body["prepare"]["label"], "Waiting for the lamp…")
+
+    def test_prepare_is_null_when_nothing_is_being_prepared(self):
+        self.assertIsNone(self.assertJson(self.fetch("/api/status"))["prepare"])
+
+    def test_a_film_names_itself_before_mpv_exists(self):
+        """The preparing view draws the poster, and the id is how it asks for
+        one. There is no mpv yet to be asked."""
+        item = self.library.add(FILM, "Ponyo")
+        self.player.item = item
+        self.preparing()
+        body = self.assertJson(self.fetch("/api/status"))
+        self.assertEqual(body["id"], FILM)
+        self.assertEqual(body["title"], "Ponyo")
+
+    def test_the_library_route_reports_preparing_too(self):
+        """It carries the same state field, and a grid that thought the
+        projector was free would offer a second film."""
+        self.library.add(FILM, "Ponyo")
+        self.preparing()
+        self.assertEqual(self.assertJson(self.fetch("/api/library"))["state"],
+                         "preparing")
+
+    def test_a_second_film_while_one_is_being_prepared_is_refused(self):
+        self.library.add(FILM, "Ponyo")
+        self.projectionist.begin_error = Busy("A movie is already starting.")
+        body = self.assertJson(self.fetch("/api/play", method="POST",
+                                          body={"id": FILM}), 409)
+        self.assertEqual(body["error"], "A movie is already starting.")
+
+    def test_stop_abandons_a_preparation(self):
+        """One button on the page, two things it may mean. The daemon works
+        out which, so the page does not have to know what state it is in."""
+        self.preparing()
+        body = self.assertJson(self.fetch("/api/stop", method="POST"))
+        self.assertIn(("stop",), self.projectionist.calls)
+        self.assertEqual(body["state"], "idle")
+
+    def test_the_projector_is_described_on_every_poll(self):
+        self.projectionist.projector = {"model": "pt-ae4000", "power": "on",
+                                        "fault": ""}
+        body = self.assertJson(self.fetch("/api/status"))
+        self.assertEqual(body["projector"],
+                         {"model": "pt-ae4000", "power": "on", "fault": ""})
+
+    def test_a_fault_reaches_the_page_in_one_sentence(self):
+        self.projectionist.projector = {"model": "pt-ae4000",
+                                        "power": "unknown",
+                                        "fault": "I couldn't reach the projector."}
+        body = self.assertJson(self.fetch("/api/status"))
+        self.assertEqual(body["projector"]["fault"],
+                         "I couldn't reach the projector.")
+
+    def test_a_notice_carries_a_failure_the_post_could_not(self):
+        """A preparation that gives up does so on a thread, long after the POST
+        that started it answered 200. Without this the grid simply comes back
+        and the poster looks broken."""
+        self.projectionist.message = "The movie would not start."
+        body = self.assertJson(self.fetch("/api/status"))
+        self.assertEqual(body["notice"], "The movie would not start.")
+
+    def test_there_is_no_notice_when_nothing_went_wrong(self):
+        self.assertEqual(self.assertJson(self.fetch("/api/status"))["notice"], "")
+
+
 def _elsewhere():
     """An allow-list that cannot contain the loopback address the tests come
     from, so the filter is exercised rather than merely configured."""

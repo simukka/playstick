@@ -83,6 +83,8 @@ fetch-results.yml        run the probes, pull output into results/
 Dockerfile               the Ansible control node
 Dockerfile.gui           the web UI on a dev machine, no hardware needed
 scripts/playstick-prep.py prepare the movie library on the DEV machine
+scripts/projector-probe.py talk to the projector by hand, ON THE DEVICE, before
+             trusting the daemon to do it
 scripts/make-testclip.sh build H.264 test clips on the CONTROL machine
 scripts/gui-*            entrypoint and AirPlay stub for Dockerfile.gui
 roles/
@@ -92,7 +94,8 @@ roles/
   uxplay/    uxplay + avahi + cage/seatd, both units, one of them started, tty1
   idle/      the framebuffer clock shown when nothing is mirroring
   nas/       read-only CIFS automount for the movie library
-  player/    mpv + the web UI a child drives it from, and the display arbiter
+  player/    mpv + the web UI a child drives it from, the display arbiter,
+             and the RS-232 control that switches the projector on and off
   probe/     measurement scripts and test clips
 docs/        install.md — every command, in order, including the vault
              matrix-narrative.md — how this was measured, and what fooled me
@@ -560,6 +563,133 @@ SoC path entirely and `player_audio_device` is the only line that changes.
 **H.265 is the real content risk, not 1080p.** If `vainfo` shows no `VAProfileHEVCMain :
 VAEntrypointVLD`, software HEVC on 4×1.44 GHz Airmont will not save it. The facts probe
 prints the decodable profiles.
+
+### Turning the projector on
+
+Until this existed, a child who picked a poster got mpv drawing to a plane nobody could
+see: the film ran, correctly, on a screen that was switched off, until an adult found the
+remote. `playstick-web` now talks to the projector over RS-232C, so picking a poster is the
+whole of what it takes to watch a film — and, more importantly, so the lamp goes out again
+when the room empties.
+
+**It is off by default and that is not timidity.** With `player_projector_model` unset the
+daemon builds a `NullProjector`: every step below is a no-op, the film starts exactly as it
+did before, and an appliance with no serial cable — or the development GUI, which never has
+one — behaves identically. Setting a model is the only thing that turns any of it on.
+
+```
+                             QPW  -> 000, standby
+  Waking the projector up…   PON
+  Waiting for the lamp…      ....... 10 s of documented deafness .......
+                             QPW  -> 000 ... 000 ... 001, lit
+  Pointing it at the movie…  IIS:HD3   then QIN to check it landed
+  Making room on the screen… systemctl stop uxplay-kms.service
+  Starting the movie…        mpv
+```
+
+`POST /api/play` now returns as soon as the film is **accepted** rather than when mpv is
+running, because a cold PT-AE4000 takes the better part of a minute to answer `QPW` with
+`001` and no browser holds a request open that long. The work happens on a thread and the
+page watches `/api/status`, which is the mechanism it already used for everything else.
+
+That is also what makes the wait bearable. A child who taps a poster and sees nothing for
+forty seconds cannot tell a warming lamp from a broken appliance, and the second guess is
+the one they act on — they press things, or they fetch somebody, or they give up. So each
+step names itself, the preparing view shows the poster of the film they picked so they can
+see the right one is coming, the bar is deliberately indeterminate (there is no honest
+percentage; a bar that crept to nine tenths and stopped would be a lie they can see
+through), and there is always a **Never mind** button.
+
+**A projector that cannot be reached never stops a film.** Every serial fault in the
+sequence is logged, reported to the page in one sentence, and stepped over. This is the
+same judgement `library.py` makes about a corrupt index, and it matters more here: if the
+lamp will not strike, the likely explanations are that somebody already switched the
+projector on by hand or that a cable is loose, and in the first case the film is exactly
+what was wanted while in the second an adult standing in the room can fix in two seconds
+something this daemon cannot fix at all. Refusing to play would help nobody. Unplug the
+adapter mid-provision and the only difference is a banner.
+
+#### The lamp goes out after thirty minutes
+
+A keeper thread ticks every fifteen seconds. The clock is reset by **a film playing or
+being prepared, or a confirmed AirPlay session** — and deliberately not by a phone with the
+page open. The page polls every three seconds, so counting that would mean the projector
+stays lit until every browser tab in the house is closed, and one phone left in a pocket
+would keep a lamp burning all night.
+
+The same tick can switch the projector **on** for a mirroring session, and the two AirPlay
+questions it asks are deliberately different:
+
+| direction | check | why |
+|---|---|---|
+| keep the lamp lit | `airplay_active()`, one `ss` sample | a false positive only postpones a power-off, which costs nothing |
+| strike a cold lamp | `airplay_confirmed()`, sustained across `player_projector_airplay_wake_ticks` | iOS opens brief connections to `:7000` merely from having the AirPlay picker on screen |
+
+Without that asymmetry, somebody glancing at an AirPlay menu across the room would light a
+lamp in an empty one. Two ticks is about thirty seconds of sustained connection: a glance
+does not survive it, a session does. `player_projector_airplay_wake_ticks` is the number to
+raise if the projector ever switches itself on unbidden, and
+`player_projector_wake_on_airplay: false` turns the direction off entirely.
+
+The input cannot be selected at wake time — the projector is deaf for ten seconds after
+`PON` and refuses `IIS` until the lamp is up — so a later tick does it once `QPW` says the
+lamp is lit.
+
+#### Prove the cable before you trust any of this
+
+**Run `scripts/projector-probe.py` on the device first.** It is not a formality; it is the
+step that decides whether this feature can work at all.
+
+```console
+$ sudo ./projector-probe.py status          # the one that proves the cable
+$ sudo ./projector-probe.py --verbose status
+$ sudo ./projector-probe.py on              # times the warm-up
+$ sudo ./projector-probe.py cycle           # times the cool-down too
+```
+
+It shares no code with the daemon on purpose. The driver is written to degrade quietly, and
+quiet degradation is precisely the wrong behaviour for the question being asked, which is
+*did any bytes come back at all*. Here every frame is printed in both directions and silence
+is a headline.
+
+Two things it settles, neither of which software can:
+
+1. **Whether the adapter is the right kind.** The one in use reports USB ID `0403:6015` —
+   the FTDI FT230X/FT231X, sold both as a real RS-232 cable with a MAX3232 on board and as
+   a bare 3.3 V TTL breakout. The projector wants ±12 V and cannot hear the second kind.
+   A moulded D-sub 9 on the projector end is the good sign; a bare header is the bad one.
+2. **Whether the protocol is right.** The command strings come from the PT-AE4000 manual
+   (TQBJ0313, pp. 42–44) by way of a Rust implementation in a sibling repository that had
+   only ever been tested against mocks. `tests/test_projector_protocol.py` ports that
+   crate's vectors byte for byte — two implementations written from the same manual agreeing
+   on the same bytes is worth more than either agreeing with itself — but agreeing with the
+   manual is not the same as agreeing with the projector.
+
+The manual is also ambiguous between models: the PT-AE3000U has two component inputs
+(`CP1`/`CP2`) where the PT-AE4000 has a computer input (`RG1`). Both code sets are offered
+and the projector answers `ER401` for whichever it lacks, which the sequence steps over.
+
+Also worth knowing: the port is straight-through to a PC (pin 2 TXD, 3 RXD, 5 GND), so a
+null-modem cable — identical from the outside — will not work; in standby the projector
+accepts nothing but `PON`; and no `DeviceAllow=` is needed in the unit, because it already
+runs as root and `ProtectSystem=full` does not touch `/dev`.
+
+#### Seeing it without a projector
+
+`docker compose up gui` runs a `fake` projector made of arithmetic, with a three-second
+warm-up and a two-minute idle timeout, so the preparing view can be looked at and its
+wording argued about on a laptop. It honours the two rules the sequence is built around —
+standby accepts nothing but `PON`, and the lamp is not lit the instant `PON` returns — and
+ignores everything else, because the rest would only be scenery. Set
+`PLAYSTICK_GUI_PROJECTOR=` (empty) to get the `NullProjector` instead, which is the path
+that must never stop a film playing.
+
+#### Adding another projector
+
+A file in `roles/player/files/playstick/projector/` and a line in its `MODELS`. Nothing
+else in the daemon names a model, an input code or a baud rate. `base.py` is the whole
+interface — `power_state`, `power_on`, `power_off`, `set_input`, `current_input` — and
+`serial_io.py` is reusable by anything that frames commands between two bytes.
 
 ### Collecting sync telemetry from a phone
 
@@ -1209,6 +1339,12 @@ All in `group_vars/all.yml`.
 | `player_index_file` | `<library>/playstick-library.json` | The index `playstick-prep.py` writes. Present means the daemon reads it instead of walking the share; `""` ignores one that is there |
 | `player_subtitles` | `true` | Hand mpv the subtitles the prep tool extracted. They are passed as `--sub-file` because the share is read-only and `--sub-auto` cannot reach them |
 | `player_airplay_unit` | *(derived)* | The unit the player stops to take DRM master. Follows `uxplay_output_path` |
+| `player_projector_model` | `""` | `pt-ae4000`, `pt-ae3000u`, or empty for no projector. **Run `scripts/projector-probe.py` before setting it** — see [Turning the projector on](#turning-the-projector-on) |
+| `player_projector_device` | *(auto)* | Serial port; discovered under `/dev/serial/by-id`, not assumed to be `/dev/ttyUSB0` |
+| `player_projector_input` | `HD3` | The `IIS:` parameter. Empty leaves the input alone |
+| `player_projector_idle_minutes` | `30` | Lamp off after this long with no film and no mirroring; `0` never |
+| `player_projector_wake_on_airplay` | `true` | Whether mirroring may strike the lamp as well as a film |
+| `player_projector_airplay_wake_ticks` | `2` | Consecutive confirmed ticks first. Raise this if the projector ever switches itself on unbidden |
 
 The rest live in `roles/nas/defaults/main.yml` and `roles/player/defaults/main.yml`, the way
 `idle_*` and `trim_*` already do.

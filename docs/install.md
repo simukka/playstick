@@ -272,6 +272,7 @@ uxplay_advert_name: Projector    # what iOS shows in the AirPlay list
 nas_server: "10.0.1.5"           # both empty skips the movie library entirely
 nas_share: "movies"              # the SHARE NAME, not /volume1/movies -- see below
 player_audio: false              # films play SILENTLY until HDMI audio is probed
+player_projector_model: ""       # "" leaves the screen to be switched on by hand
 ```
 
 Three of those have consequences worth knowing before the run rather than after:
@@ -295,6 +296,14 @@ Three of those have consequences worth knowing before the run rather than after:
   `dmesg`, and `volume1/video` asks for a share called `volume1` and returns
   `mount error(2): No such file or directory`. `smbclient -L <nas> -U <user>` lists the
   real names.
+- **`player_projector_model` is empty**, so nothing touches the projector and somebody
+  switches the screen on by hand, exactly as before. Turning it on is a two-step job and
+  the order matters: provision once with it empty, then run
+  `sudo ./projector-probe.py status` **on the device**, and only set the model once that
+  answers. The reason is in the [README](../README.md#turning-the-projector-on) — the USB
+  adapter in use has an ID that is sold both as a real RS-232 cable and as a bare 3.3 V
+  TTL breakout the projector cannot hear, and nothing in software distinguishes them.
+  You will also need `player_projector_input` set to whichever socket the stick is in.
 
 ---
 
@@ -470,9 +479,23 @@ curl -s localhost/healthz                          # the web UI, on port 80
 ss -ltnp | grep ':80 '                             # who owns it: python3, as root
 ```
 
+```bash
+# the projector, if you configured one
+ls -l /dev/serial/by-id/                           # the adapter, by its own serial number
+sudo ./projector-probe.py status                   # RUN THIS BEFORE setting the model
+journalctl -u playstick-web -b --no-pager | grep -E 'projector|preparing'
+```
+
 From a phone on the same LAN: `http://vivostick.local/` for the films, or the AirPlay
 picker for mirroring. No port to type — `player_port` is 80, which the daemon can bind
 because `player_user` is root already.
+
+With a projector configured, the three things worth watching once: tapping a poster walks
+the preparing view through its steps and the film appears; **unplugging the serial adapter
+and tapping a poster still plays the film**, with a banner rather than a refusal; and the
+lamp goes out on its own after `player_projector_idle_minutes` with nothing happening. The
+middle one is the important one — set `player_projector_idle_minutes: 1` temporarily if you
+want to see the third without waiting half an hour.
 
 **control** — one command for the whole picture, written to `results/`:
 
@@ -574,6 +597,12 @@ sudo apt update && sudo apt full-upgrade
 | A prepared film plays but has no subtitles | They are passed as `--sub-file` from `.playstick/subs/`. Check `player_subtitles` is true and that the file survived the share being remounted |
 | Films play but silently | `player_audio: false` is the shipped default. See the README on `hdmi-lpe-audio` before changing it |
 | `No test clips found in roles/probe/files/` | Run `./actl ./scripts/make-testclip.sh`, then re-run the play |
+| `projector-probe.py status` prints `NOTHING CAME BACK` | Most often the adapter is TTL, not RS-232. USB ID `0403:6015` is the FTDI FT230X/FT231X, sold both as a real RS-232 cable with a level shifter and as a bare 3.3 V UART breakout the projector cannot hear — a moulded D-sub 9 on the projector end is the good sign, a bare header the bad one. Then, in order: the projector is unplugged from the mains (standby still answers `QPW`); the cable is null-modem rather than straight-through, which looks identical; serial control is disabled in the projector's own menu |
+| `player_projector_model is "..." but nothing was found under /dev/serial/by-id` | The adapter is not enumerated. `lsusb \| grep 0403` on the device says whether the kernel sees it, `lsmod \| grep ftdi_sio` whether the driver is loaded, `dmesg \| tail` what it made of the device. Set `player_projector_device` explicitly if the by-id link is missing but a `/dev/ttyUSB*` exists |
+| The film plays but the projector stays off, and the page says `I couldn't reach the projector.` | Working as designed — a serial fault never stops a film. The journal names the failing command: `journalctl -u playstick-web \| grep projector:`. Settle it with `projector-probe.py` |
+| The projector switches itself on when nobody is mirroring | An AirPlay picker glance got through. Raise `player_projector_airplay_wake_ticks`, or set `player_projector_wake_on_airplay: false` |
+| The lamp will not go out | Something is holding the clock: a film playing or being prepared, or an established connection to UxPlay's port. `ss -tn state established sport = :7000` names it. A phone with the page open is deliberately **not** enough |
+| The preparing view sits on `Waiting for the lamp…` and then plays anyway | The lamp did not report `001` within `player_projector_ready_seconds`. If the projector had just been switched off, this is its cool-down refusing `PON`; `projector-probe.py cycle` measures the real window |
 
 More detail on any of the measured decisions is in the [README](../README.md), and the
 first-person account of how the matrix was built — including several ways it fooled its

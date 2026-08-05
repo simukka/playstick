@@ -63,6 +63,10 @@ class Handler(BaseHTTPRequestHandler):
     library = None      # set on the server before serve_forever
     thumbs = None
     player = None
+    # Asked about state, and about starting and stopping a film. The player is
+    # still here because pause, volume and the status numbers come straight
+    # from mpv and have nothing to do with the projector.
+    projectionist = None
 
     # BaseHTTPRequestHandler logs every request to stderr, i.e. into the
     # journal, and a page polling once a second per phone would be the only
@@ -123,7 +127,10 @@ class Handler(BaseHTTPRequestHandler):
     # -- state shared by /api/status and /api/library
 
     def _state(self):
-        state = self.player.state()
+        # The projectionist answers first because it is the only thing that
+        # knows about "preparing"; below that it delegates to the player, so
+        # the rest of this is unchanged.
+        state = self.projectionist.state()
         if state != "idle":
             return state
         if airplay_active():
@@ -177,7 +184,11 @@ class Handler(BaseHTTPRequestHandler):
             self.player.set_pause(path.endswith("pause"))
             return self._api_status()
         if path == "/api/stop":
-            self.player.stop()
+            # One button on the page, two things it may mean: abandon a film
+            # that is still warming a lamp, or stop one that is playing. The
+            # projectionist does whichever applies, so the page does not have
+            # to know which state it is in.
+            self.projectionist.stop()
             return self._api_status()
         if path == "/api/volume":
             # Coerced here rather than in the player, because this is where an
@@ -341,7 +352,10 @@ class Handler(BaseHTTPRequestHandler):
     def _api_status(self):
         state = self._state()
         data = self.player.status()
-        item = self.player.current_item()
+        # Through the projectionist so that a film still being prepared already
+        # names itself: the page needs the id to draw its poster on the
+        # preparing view, and mpv does not exist yet to be asked.
+        item = self.projectionist.current_item()
         position = data.get("position")
         self._log_sync(state, position, bool(data.get("buffering")))
         tracks = []
@@ -360,7 +374,7 @@ class Handler(BaseHTTPRequestHandler):
             "state": state,
             # The page cannot build an audio URL without this.
             "id": item["id"] if item else "",
-            "title": self.player.current_title(),
+            "title": self.projectionist.current_title(),
             # Unchanged shape, for the progress bar that has always read it.
             "position": position or 0,
             # ...and the distinction the progress bar does not need but a phone
@@ -376,6 +390,19 @@ class Handler(BaseHTTPRequestHandler):
             # Empty for a film nobody has run playstick-prep.py over.
             "tracks": tracks,
             "thumbs_pending": self.thumbs.pending(),
+            # Which step of getting ready we are on, or null. Additive, so an
+            # older ui.html that has never heard of it carries on ignoring it
+            # -- the same property every field added to this payload has had.
+            "prepare": self.projectionist.progress(),
+            # Why the last attempt gave up, for a few seconds after it did.
+            # A preparation fails on a thread, long after the POST that began
+            # it answered 200, so this is the only route the explanation has.
+            "notice": self.projectionist.notice(),
+            # Whether there is a projector, whether its lamp is lit, and one
+            # sentence if it could not be reached. The page only draws the
+            # last of those, and only while a film is playing: a fault while
+            # nothing is on screen is not yet anybody's problem.
+            "projector": self.projectionist.projector_status(),
         })
 
     def _api_audio(self, ident, track):
@@ -518,7 +545,11 @@ class Handler(BaseHTTPRequestHandler):
         if item is None:
             return self._json({"error": "That film is not in the library."}, 404)
         try:
-            self.player.start(item)
+            # Returns as soon as the film is accepted. Everything after that --
+            # the lamp, the input, taking the display, mpv -- happens on a
+            # thread and is reported through /api/status, because a cold lamp
+            # takes longer to light than a browser will hold a request open.
+            self.projectionist.begin(item)
         except Busy as exc:
             return self._json({"error": str(exc), "state": self._state()}, 409)
         except Exception as exc:                     # noqa: BLE001

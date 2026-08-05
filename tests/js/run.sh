@@ -18,7 +18,7 @@ else
 fi
 
 status=0
-for t in clock.js telemetry.js tune.js library.js; do
+for t in clock.js telemetry.js tune.js library.js preparing.js; do
   echo "== $t"
   run "$t" || status=1
   echo

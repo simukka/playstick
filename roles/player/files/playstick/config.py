@@ -143,6 +143,60 @@ SETTLE_SECONDS = float(os.environ.get("PLAYSTICK_SETTLE_SECONDS", "1.0") or 1.0)
 HAS_AUDIO = (os.environ.get("PLAYSTICK_AUDIO", "0") or "0").lower() in ("1", "true", "yes")
 
 
+# --- the projector -------------------------------------------------------
+# Which driver, and where. Empty model means there is no projector, which is
+# the default and the only configuration the development GUI ever runs: the
+# daemon then behaves exactly as it did before this feature existed. See
+# projector/__init__.py for why every way of getting this wrong ends up at the
+# same place rather than at an exception.
+PROJECTOR_MODEL = os.environ.get("PLAYSTICK_PROJECTOR_MODEL", "")
+# A /dev/serial/by-id path rather than /dev/ttyUSB0. The number depends on USB
+# enumeration order, so a hub that comes up differently after a reboot silently
+# moves it; the by-id link is derived from the adapter's own serial number and
+# does not.
+PROJECTOR_DEVICE = os.environ.get("PLAYSTICK_PROJECTOR_DEVICE", "")
+# Which socket the stick is plugged into. Empty means "do not switch inputs",
+# which is the right setting for a projector that auto-selects the live source
+# and the safe one if the code below turns out to be wrong -- an input this
+# model does not have answers ER401 and the step is skipped.
+PROJECTOR_INPUT = (os.environ.get("PLAYSTICK_PROJECTOR_INPUT", "") or "").strip().upper()
+# Seconds to wait for a whole reply. Generous: five ASCII characters at 9600
+# baud take five milliseconds, so anything near this means the projector is not
+# answering rather than answering slowly.
+PROJECTOR_TIMEOUT = float(os.environ.get("PLAYSTICK_PROJECTOR_TIMEOUT", "1.5") or 1.5)
+# The manual's post-PON blackout, during which the projector ignores every
+# command including the one asking whether it is on yet. Spent sleeping rather
+# than polling, because a timeout inside this window says nothing.
+PROJECTOR_WARMUP_SECONDS = float(
+    os.environ.get("PLAYSTICK_PROJECTOR_WARMUP_SECONDS", "10") or 10)
+# ...and how long after that to keep asking before starting the film regardless.
+# Long enough to cover a cold lamp and a post-POF cool-down retry; short enough
+# that a projector which will never answer does not hold a child indefinitely.
+PROJECTOR_READY_SECONDS = float(
+    os.environ.get("PLAYSTICK_PROJECTOR_READY_SECONDS", "90") or 90)
+# Minutes of no film and no mirroring before the lamp goes out. 0 disables it.
+# Minutes in the environment because that is the unit the decision is made in;
+# seconds here because that is the unit the arithmetic is done in.
+PROJECTOR_IDLE_SECONDS = int(
+    float(os.environ.get("PLAYSTICK_PROJECTOR_IDLE_MINUTES", "30") or 0) * 60)
+# How often the keeper thread looks. Nothing it watches changes faster than
+# this, and every tick costs one ss invocation.
+PROJECTOR_TICK_SECONDS = float(
+    os.environ.get("PLAYSTICK_PROJECTOR_TICK_SECONDS", "15") or 15)
+# Whether a mirroring session may switch the projector on. The film path always
+# may; this is only about AirPlay.
+PROJECTOR_WAKE_ON_AIRPLAY = (
+    os.environ.get("PLAYSTICK_PROJECTOR_WAKE_ON_AIRPLAY", "1") or "1"
+).lower() in ("1", "true", "yes")
+# ...and how many consecutive ticks a confirmed session must survive first.
+# This is the safeguard on the whole idea: iOS opens connections to UxPlay's
+# port merely from having the AirPlay picker on screen, so at the default tick
+# two of them is about thirty seconds of sustained mirroring. A glance does not
+# reach that; a session does. Raise it if the lamp ever strikes on its own.
+PROJECTOR_AIRPLAY_WAKE_TICKS = max(1, int(
+    os.environ.get("PLAYSTICK_PROJECTOR_AIRPLAY_WAKE_TICKS", "2") or 2))
+
+
 def _parse_networks(spec):
     """Thin, and honest about it. ufw is purged by explicit decision, so this
     is the only filtering there is -- it keeps a misconfigured router from

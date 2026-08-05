@@ -98,6 +98,21 @@ services:
       # player_allow_networks is deliberately not set: the Docker bridge is
       # inside 172.16.0.0/12 and would pass it anyway, so enforcing it here
       # would only ever reject the host and teach nothing.
+      #
+      # A projector made of arithmetic, so the preparing view can be looked at
+      # and its wording argued about on a laptop. "fake" warms up in three
+      # seconds instead of forty and honours the two rules the sequence is
+      # built around: standby accepts nothing but PON, and the lamp is not lit
+      # the instant PON returns.
+      #
+      # Set PLAYSTICK_GUI_PROJECTOR= (empty) to get the NullProjector instead,
+      # which is what the appliance ships with and the path that must never
+      # stop a film playing.
+      PLAYSTICK_PROJECTOR_MODEL: "${PLAYSTICK_GUI_PROJECTOR-fake}"
+      # Minutes. Short enough to watch the lamp go out over a cup of tea.
+      PLAYSTICK_PROJECTOR_IDLE_MINUTES: "${PLAYSTICK_GUI_PROJECTOR_IDLE-2}"
+      PLAYSTICK_PROJECTOR_INPUT: HD3
+      PLAYSTICK_PROJECTOR_TICK_SECONDS: "5"
     stdin_open: true
     tty: true
 

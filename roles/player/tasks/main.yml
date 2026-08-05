@@ -57,6 +57,67 @@
           fail -- run the player probe and set player_vo from the result.
       when: player_vo_check.rc != 0
 
+    # The serial cable to the projector. The whole block is skipped when no
+    # model is configured, which is the shipped state: with none set the daemon
+    # builds a NullProjector and behaves exactly as it did before this feature
+    # existed.
+    - name: Locate the projector
+      when: player_projector_model | length > 0
+      block:
+
+        # The same shape as drm_card_path discovery in the graphics role, and
+        # for the same reason: the path should not have to be written down for
+        # the usual case, and must be overridable when the usual case is wrong.
+        - name: Find the USB serial adapter
+          ansible.builtin.shell:
+            executable: /bin/bash
+            cmd: |
+              set -o pipefail
+              ls -1 /dev/serial/by-id/*FTDI* 2>/dev/null | head -1 && exit 0
+              ls -1 /dev/serial/by-id/* 2>/dev/null | head -1
+          register: player_projector_found
+          changed_when: false
+          failed_when: false
+          when: player_projector_device | length == 0
+
+        - name: Use the adapter that was found
+          ansible.builtin.set_fact:
+            player_projector_device: "{{ player_projector_found.stdout | trim }}"
+          when: player_projector_device | length == 0
+                and player_projector_found.stdout | default('') | trim | length > 0
+
+        - name: Refuse to configure a projector with no cable to it
+          ansible.builtin.assert:
+            that: player_projector_device | length > 0
+            fail_msg: >-
+              player_projector_model is "{{ player_projector_model }}" but
+              nothing was found under /dev/serial/by-id and
+              player_projector_device is not set. Plug the adapter in, or set
+              the path explicitly. `lsusb | grep 0403` says whether the kernel
+              sees the adapter at all; `dmesg | tail` says what it made of it.
+            success_msg: >-
+              Projector {{ player_projector_model }} on
+              {{ player_projector_device }}.
+
+        # Not fatal, and not the same question as "is a device present": this
+        # catches a kernel whose serial drivers were trimmed away, which
+        # presents as a projector that never answers -- indistinguishable from
+        # the wrong cable, and worth one line here rather than an evening with
+        # a multimeter.
+        - name: Check that the FTDI serial driver is available
+          ansible.builtin.command: modinfo ftdi_sio
+          register: player_ftdi
+          changed_when: false
+          failed_when: false
+
+        - name: Warn if the FTDI serial driver is missing
+          ansible.builtin.debug:
+            msg: >-
+              modinfo cannot find ftdi_sio. If the projector never answers,
+              this is why -- the adapter needs it to appear as a tty at all.
+              Install linux-modules-extra for this kernel.
+          when: player_ftdi.rc != 0
+
     - name: Create the poster cache
       ansible.builtin.file:
         path: "{{ player_thumb_dir }}"
@@ -91,10 +152,32 @@
         directory_mode: "0755"
       register: player_package
 
+    # Compared by path RELATIVE to the package root rather than by basename.
+    # The package grew a subdirectory when the projector drivers arrived, and
+    # basenames stopped being unique the moment it did -- projector/base.py and
+    # a future base.py at the top level would each keep the other alive.
+    # ONE LINE PER SUBPACKAGE, and it has to be written out: fileglob returns
+    # files only and does not cross a directory boundary, so '*/*.py' matches
+    # nothing at all rather than matching everything. Forgetting to add a line
+    # here fails in the harmless direction -- stale modules in that
+    # subdirectory stop being pruned, which is dead weight that still shadows
+    # nothing and imports cleanly.
+    - name: List the modules this release ships
+      vars:
+        player_pkg_src: "{{ role_path }}/files/playstick"
+      ansible.builtin.set_fact:
+        player_shipped: >-
+          {{ (lookup('ansible.builtin.fileglob',
+                     player_pkg_src ~ '/*.py', wantlist=True)
+              + lookup('ansible.builtin.fileglob',
+                       player_pkg_src ~ '/projector/*.py', wantlist=True))
+             | map('relpath', player_pkg_src) | list }}
+
     - name: Find stale modules left by an older release
       ansible.builtin.find:
         paths: /usr/local/lib/playstick
         patterns: "*.py"
+        recurse: true
       register: player_installed
 
     - name: Remove stale modules
@@ -103,21 +186,32 @@
         state: absent
       loop: "{{ player_installed.files }}"
       loop_control:
-        label: "{{ item.path | basename }}"
-      when: item.path | basename not in
-            (lookup('ansible.builtin.fileglob', role_path + '/files/playstick/*.py',
-                    wantlist=True) | map('basename') | list)
+        label: "{{ item.path | relpath('/usr/local/lib/playstick') }}"
+      when: item.path | relpath('/usr/local/lib/playstick') not in player_shipped
       register: player_pruned
 
     # Under the unit's ProtectSystem=full the daemon cannot write here, so in
-    # normal service this directory never appears. It shows up after somebody
-    # runs the script by hand as root to debug something, and then survives the
-    # next deploy -- which is the only way stale bytecode ever gets a chance.
+    # normal service these directories never appear. They show up after
+    # somebody runs the script by hand as root to debug something, and then
+    # survive the next deploy -- which is the only way stale bytecode ever gets
+    # a chance. Recursive since the package has subpackages: a __pycache__
+    # missed inside one is exactly as stale as one missed at the top.
+    - name: Find bytecode caches
+      ansible.builtin.find:
+        paths: /usr/local/lib/playstick
+        patterns: "__pycache__"
+        file_type: directory
+        recurse: true
+      register: player_pycache
+      when: player_package is changed or player_pruned is changed
+
     - name: Drop the package bytecode cache
       ansible.builtin.file:
-        path: /usr/local/lib/playstick/__pycache__
+        path: "{{ item.path }}"
         state: absent
-      when: player_package is changed or player_pruned is changed
+      loop: "{{ player_pycache.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path | relpath('/usr/local/lib/playstick') }}"
 
     - name: Install the player daemon
       ansible.builtin.copy:
@@ -205,6 +299,16 @@
                 Films need playstick-prep.py run over them first.'
                if player_phone_audio | bool
                else 'off. See player_phone_audio.' }}
+          - >-
+            Projector control is
+            {{ player_projector_model ~ ' on ' ~ player_projector_device
+               ~ (', input ' ~ player_projector_input
+                  if player_projector_input else ', input left alone')
+               ~ ', off after ' ~ player_projector_idle_minutes ~ ' idle minutes.'
+               if player_projector_model
+               else 'off -- somebody has to switch the screen on by hand.
+                     Run scripts/projector-probe.py, then set
+                     player_projector_model.' }}
 
 - name: Movie player is disabled
   when: not (player_enabled | bool)

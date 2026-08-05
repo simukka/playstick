@@ -63,7 +63,16 @@ class Player:
 
     # -- lifecycle
 
-    def start(self, item):
+    def start(self, item, progress=None):
+        """Put a film on the screen.
+
+        `progress` is an optional callable taking a step name, called at the
+        two points inside here that a person waiting can perceive: taking the
+        display away from the AirPlay receiver, which can take twenty seconds,
+        and launching mpv. It exists so that projectionist.py can report those
+        steps without this method being split apart -- the ordering below is
+        load-bearing in several places and is worth keeping in one piece.
+        """
         with self._lock:
             if self.state() != "idle":
                 raise Busy("A film is already playing.")
@@ -76,6 +85,9 @@ class Player:
             root = os.path.realpath(LIBRARY)
             if not (real == root or real.startswith(root + os.sep)):
                 raise Busy("That file is not in the library.")
+
+            if progress:
+                progress("display")
 
             # Only ever restore what we took away. The repo installs
             # uxplay-kms.service without enabling it -- which output path wins
@@ -108,6 +120,8 @@ class Player:
             if SUBTITLES:
                 argv += ["--sub-file=" + sub for sub in item.get("subs") or []]
             argv += ["--input-ipc-server=" + MPV_SOCKET, "--", item["path"]]
+            if progress:
+                progress("starting")
             log("playing %s", item["title"])
             log("  %s", " ".join(shlex.quote(a) for a in argv))
             tty = self._open_tty()
