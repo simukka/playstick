@@ -9,10 +9,10 @@ const { install, load, check, done, state } = require("./page.js");
 
 install("?debug");
 const P = load(process.argv[2] || __dirname + "/../../roles/player/files/playstick-ui.html",
-  ["debugSync", "sndDest", "sndClockOff", "sndClockOffRaw", "sndOffsets",
+  ["debugSync", "sndDest", "srvWin", "srvBest", "srvRatio", "tcBase",
     "sndErr", "sndDrift", "sndRateSet", "sndLastRtt", "sndPrevAt",
     "sndRateWrites", "telAheadMin", "telErrPeak", "telRateStep", "snd"],
-  ["syncTelemetry", "sndWatchClock", "sndAhead", "sndResetClock"]);
+  ["syncTelemetry", "sndWatchClock", "sndAhead", "sndReplace", "srvNow"]);
 
 const parse = (s) => Object.fromEntries(
   s.split(";").map((p) => { const i = p.indexOf("="); return [p.slice(0, i), p.slice(i + 1)]; }));
@@ -38,9 +38,6 @@ P.snd.src = "/api/audio/0123456789abcdef/0";
 P.snd.paused = false;
 P.snd.currentTime = 1421.79;
 P.snd.setBuffered([[1400.0, 1470.0]]);
-P.sndClockOff = 0;
-P.sndClockOffRaw = 0;
-P.sndOffsets = [0, 0, 0];
 P.sndErr = -0.038;
 P.sndDrift = -0.00068;
 P.sndRateSet = 1 - 0.000712;
@@ -58,6 +55,16 @@ P.telErrPeak = -0.041;
 P.telRateStep = 0.00014;
 P.sndRateWrites = 1;
 
+// A phone with a locked clock, following a timeline. Stated as the sample the
+// offset comes out of rather than poked in directly, and set here rather than
+// above because both readings are made against the clock as it is NOW -- an
+// offset carried forward at the ratio, and an anchor whose age is measured on
+// the daemon's clock and not on this one.
+P.srvBest = { off: -1.2048, rtt: 0.011, at: state.clock / 1000 };
+P.srvWin = [P.srvBest];
+P.srvRatio = -0.00064;
+P.tcBase = { tc: 1421.83, at: P.srvNow() - 0.43, rate: 1, epoch: 7 };
+
 blob = P.syncTelemetry();
 const f = parse(blob);
 console.log("\n  " + blob + "\n");
@@ -69,7 +76,17 @@ check("buffer low-water mark <= now", parseFloat(f.amin) <= parseFloat(f.ahead) 
 check("error in ms", f.err === "-38", f.err);
 check("signed peak error kept", f.errp === "-41", f.errp);
 check("rate as ppm", f.rate === "-712", f.rate);
-check("drift as ppm", f.drift === "-680", f.drift);
+// Two numbers, not one, because they answer different questions: what was
+// measured between this phone and the daemon, and what the integrator still
+// had to find inside the phone. A capture where `drift` grows to look like
+// `ratio` is one where the measurement is not reaching the element.
+check("measured clock ratio as ppm", f.ratio === "-640", f.ratio);
+check("residual drift as ppm", f.drift === "-680", f.drift);
+check("clock offset in ms", f.off === "-1204.8", f.off);
+check("...and the round trip it came out of", f.ort === "11", f.ort);
+check("the timeline being followed", f.ep === "7", f.ep);
+check("...and how old the anchor is", Math.abs(parseFloat(f.tcage) - 430) < 5,
+  f.tcage);
 check("rate writes counted", f.w === "1", f.w);
 check("largest write in ppm", f.dw === "140", f.dw);
 check("readyState", f.rs === "4");
@@ -121,7 +138,7 @@ check("frame quantisation is not counted as a stall", k.ls === "0", "ls=" + k.ls
 P.sndPrevAt = null;
 state.clock += 250; P.snd.currentTime += 0.25; P.sndWatchClock();
 P.snd.currentTime -= 5;
-P.sndResetClock();
+P.sndReplace();
 state.clock += 250; P.snd.currentTime += 0.25; P.sndWatchClock();
 const m = parse(P.syncTelemetry());
 check("a seek is not counted as a stall", m.ls === "0", "ls=" + m.ls + " lag=" + m.lag);

@@ -11,6 +11,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler
@@ -29,6 +30,13 @@ from .player import Busy
 
 _sync_lock = threading.Lock()
 _sync_window = [0.0, 0]         # start of the current second, lines written in it
+
+# Which run of this daemon a clock reading came from. time.monotonic() counts
+# from an arbitrary origin, and a restart picks a different one -- so without
+# this a phone would carry on applying an offset that is wrong by an unbounded
+# amount, silently, with no reading it could take that would say so. Opaque and
+# per-process, like the build stamp: it names a run, not a machine or a person.
+SESSION = secrets.token_hex(4)
 
 
 def sync_allowed():
@@ -215,6 +223,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, b"ok\n", "text/plain")
         if not self._allowed():
             return self._json({"error": "not on the local network"}, 403)
+        if path == "/api/time":
+            return self._api_time()
         if path == "/":
             return self._serve_ui()
         if path == "/api/library":
@@ -435,10 +445,10 @@ class Handler(BaseHTTPRequestHandler):
         position against the element's, and mpv's buffering against the
         element's. A line reading
 
-            sync 192.168.1.42 playing pos=1421.83 buf=0 v=1;id=8f2c;t=612.4;
+            sync 192.168.1.42 playing pos=1421.83 buf=0 v=2;id=8f2c;t=612.4;
             st=play;hid=0;ct=1421.79;rs=4;nb=1;ahead=48.2;amin=47.9;err=-38;
-            errp=-41;rate=-712;drift=-680;step=0.2;ns=8;rtt=24;trim=0;w=1;
-            dw=140;sk=0;wt=0;bf=0;lag=22;ls=0
+            errp=-41;rate=-712;ratio=-640;drift=-72;off=-1204.8;ort=11;ns=34;
+            ep=7;tcage=430;rtt=24;trim=0;w=1;dw=140;sk=0;wt=0;bf=0;lag=22;ls=0
 
         says: the phone is 38 ms behind, correcting by 712 ppm, holding 48
         seconds of buffer, and lost no time to stalls. FIELDS --
@@ -454,10 +464,19 @@ class Handler(BaseHTTPRequestHandler):
           amin    ...and its low-water mark since the previous line
           err     sound minus picture, ms. Negative is sound behind
           errp    the peak of that, signed, since the previous line
-          rate    playbackRate as an offset in ppm
-          drift   the integrator: this phone's crystal against mpv's, ppm
-          step    last jump in the measured clock offset, ms
-          ns      offset samples in the window, 0-8
+          rate    playbackRate as an offset in ppm -- the command, which is
+                  ratio and drift together plus the proportional term
+          ratio   this phone's clock against this daemon's, ppm, MEASURED off
+                  /api/time rather than inferred from the audio error
+          drift   what the integrator still has to add on top of that, ppm.
+                  Small on a healthy phone: it is the difference between the
+                  clock that timed the round trips and the one clocking the DAC
+          off     this phone's clock offset from the daemon's, ms
+          ort     round trip of the sample that offset came from, ms. The error
+                  bar on `off` is half of this
+          ns      clock samples in the window the slope is fitted through
+          ep      timecode epoch. A change is a discontinuity the daemon saw
+          tcage   how old the timecode anchor being extrapolated is, ms
           rtt     last round trip to this daemon, ms
           trim    this listener's manual headphone offset, ms
           w       writes to playbackRate since the previous line
@@ -491,6 +510,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         log("sync %s %s pos=%s buf=%d %s", self.client_address[0], state,
             "?" if position is None else "%.2f" % position, int(buffering), clean)
+
+    def _api_time(self):
+        """What time it is here. Nothing else, and that is the whole design.
+
+        A phone measures its own clock against this one by timing the round
+        trip: the answer was true somewhere between the request leaving and the
+        reply arriving, so the midpoint is the estimate and half the round trip
+        is the error bar on it. Which means every millisecond this handler
+        spends is a millisecond of error bar -- so it takes no lock, reads no
+        disk, asks mpv nothing, and answers first in do_GET, above the routes
+        that do. log_message() is already silenced, so a burst of these costs
+        no journal either.
+
+        It is deliberately not folded into /api/status. That route takes the
+        library snapshot and talks to mpv over a socket, and a phone estimating
+        its clock offset from it would be measuring this daemon's own queueing
+        as though it were the network. Measuring the film's position and the
+        server's clock through one number is exactly the confusion the timecode
+        exists to end; putting them back on one route would restore it.
+        """
+        self._json({"now": round(time.monotonic(), 4), "session": SESSION})
 
     def _api_status(self):
         state = self._state()
@@ -528,6 +568,12 @@ class Handler(BaseHTTPRequestHandler):
             # ...and the distinction the progress bar does not need but a phone
             # syncing to the film does: mpv has not told us where it is yet.
             "position_valid": position is not None,
+            # The master clock: where the film was, the instant on this
+            # machine's clock when it was there, whether it is moving, and
+            # which timeline that belongs to. Null while nothing is playing.
+            # `at` is on the clock /api/time publishes and is meaningless
+            # without it -- see Player._advance() for the rest.
+            "timecode": data.get("timecode"),
             "buffering": bool(data.get("buffering")),
             "duration": data.get("duration", 0),
             "volume": data.get("volume"),

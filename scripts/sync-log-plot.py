@@ -80,9 +80,14 @@ PANELS = [
     {
         "title": "playbackRate (ppm)",
         "note": "every write costs ~43 ms of audio on iOS. At the clamp the "
-                "integrator is frozen.",
+                "integrator is frozen. On a v=2 capture `ratio` is what was "
+                "measured between the two machines and `drift` is only what "
+                "was left inside the phone -- a drift that grows to look like "
+                "the ratio is a measurement not reaching the element.",
         "series": [
             {"key": "rate", "label": "rate", "colour": "#ea580c", "kind": "line"},
+            {"key": "ratio", "label": "ratio (measured)", "colour": "#7c3aed",
+             "kind": "line"},
             {"key": "drift", "label": "drift", "colour": "#f59e0b", "kind": "line"},
             {"key": "dw", "label": "largest write", "colour": "#fca5a5", "kind": "bar"},
         ],
@@ -101,11 +106,29 @@ PANELS = [
     },
     {
         "title": "network and model",
-        "note": "rtt in ms, ns is offset samples in the window (0–8).",
+        "note": "rtt is the status poll; ort is the /api/time round trip the "
+                "clock offset came out of, and half of it is the error bar on "
+                "that offset. ns is samples in the window.",
         "series": [
             {"key": "rtt", "label": "rtt ms", "colour": "#6b7280", "kind": "line"},
+            {"key": "ort", "label": "ort ms", "colour": "#0d9488", "kind": "line"},
             {"key": "ns", "label": "ns", "colour": "#16a34a", "kind": "line"},
             {"key": "dt", "label": "dt s", "colour": "#d1d5db", "kind": "line"},
+        ],
+        "floor": 0,
+    },
+    {
+        # A v=1 capture draws nothing here, which is right: it had no timecode
+        # and no notion of a timeline that could change under it.
+        "title": "the timeline being followed",
+        "note": "ep steps at every discontinuity the daemon saw -- a pause, a "
+                "resume, a buffering stall, a film change. tcage is how old "
+                "the anchor being extrapolated was, in ms; it should sit "
+                "around one poll and a jump in it means polls were missed.",
+        "series": [
+            {"key": "ep", "label": "epoch", "colour": "#be123c", "kind": "line"},
+            {"key": "tcage", "label": "anchor age ms", "colour": "#fb7185",
+             "kind": "line"},
         ],
         "floor": 0,
     },

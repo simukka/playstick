@@ -438,6 +438,7 @@ class Status(ApiTest):
         self.assertFalse(body["buffering"])
         self.assertEqual(body["tracks"], [])
         self.assertEqual(body["thumbs_pending"], 0)
+        self.assertIsNone(body["timecode"])
 
     def test_playing_status_names_the_film(self):
         item = self.library.add(FILM, "Ponyo")
@@ -471,6 +472,37 @@ class Status(ApiTest):
         self.player.data = {"position": 0.0}
         body = self.assertJson(self.fetch("/api/status"))
         self.assertTrue(body["position_valid"])
+
+    def test_the_timecode_is_passed_through_whole(self):
+        """Four keys that only mean anything together: where the film was, the
+        instant on this machine's clock when it was there, whether it is
+        moving, and which timeline that belongs to. A phone evaluates the line
+        they describe against its own clock -- see Player._advance()."""
+        self.player.item = self.library.add(FILM, "Ponyo")
+        self.player.playing = "playing"
+        tc = self.player.timecode(1421.834, 918273.4551, rate=1.0, epoch=7)
+        body = self.assertJson(self.fetch("/api/status"))
+        self.assertEqual(body["timecode"], tc)
+
+    def test_the_timecode_is_on_the_clock_the_time_route_publishes(self):
+        """`at` is meaningless except against /api/time. If the two ever came
+        off different clocks, every listener would be wrong by the difference
+        and nothing in either payload would show it."""
+        self.player.item = self.library.add(FILM, "Ponyo")
+        self.player.playing = "playing"
+        now = self.assertJson(self.fetch("/api/time"))["now"]
+        self.player.timecode(10.0, now)
+        body = self.assertJson(self.fetch("/api/status"))
+        self.assertEqual(body["timecode"]["at"], now)
+
+    def test_a_film_mpv_has_not_opened_yet_has_no_timecode(self):
+        """Null rather than a timecode at zero, for the same reason
+        position_valid exists: a phone that believed the second one would
+        place its audio at the start of the film."""
+        self.player.item = self.library.add(FILM, "Ponyo")
+        self.player.playing = "playing"
+        self.player.data = {"position": None, "duration": 5400.0}
+        self.assertIsNone(self.assertJson(self.fetch("/api/status"))["timecode"])
 
     def test_buffering_is_reported_as_a_boolean(self):
         """The page pauses every listener's headphones on this, so it must be

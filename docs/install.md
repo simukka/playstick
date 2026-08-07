@@ -483,6 +483,11 @@ ss -ltnp | grep ':80 '                             # who owns it: python3, as ro
 # only when that file does.
 curl -s localhost/ | grep -o 'var BUILD = "[^"]*"'
 curl -s localhost/api/status | grep -o '"build": "[^"]*"'
+
+# the clock every listening phone measures itself against. Two readings should
+# differ by about the time between them, and `session` should not change unless
+# the daemon has restarted.
+curl -s localhost/api/time; echo; sleep 2; curl -s localhost/api/time
 ```
 
 ```bash
@@ -611,6 +616,9 @@ sudo apt update && sudo apt full-upgrade
 | A phone is still showing the old page after a deploy | It should reload itself within about three seconds; a page still open across a film reloads when that film ends. Check the two ends agree on what "old" means: `curl -s <stick>/api/status \| grep -o '"build": "[^"]*"'` against `curl -s <stick>/ \| grep 'var BUILD'`. Matching values mean the phone has the current page and the difference is elsewhere. Empty or absent `build` means the deploy did not land — `systemctl status playstick-web` |
 | Every phone reloads itself on every playbook run | The build is a hash of `ui.html`, so this means the file really is changing. A local edit to `roles/player/files/playstick-ui.html` is the usual reason; `git status` says |
 | The grid is slow to fill in, but only right after a deploy | Expected, once. Posters and soundtracks carry the build in their URL (`?v=…`), so a deploy re-pulls them rather than leaving a phone on a poster cached for a year. Every load after that is served from the cache again |
+| A phone shows the film but never starts making a sound | The clock offset never locked, so the page has nothing to place the audio against and will not guess. `curl -s <stick>/api/time` from that phone's network — if it answers here and not there, the phone is on a different VLAN or a guest network with client isolation. Open the page with `?debug` and read `off` and `ort`: empty means no sample has ever won |
+| The sound is steadily ahead of or behind the picture on one phone only | That is what the **Sync** nudge in the sound sheet is for, and it is per device on purpose — wired headphones are ~30 ms behind, AirPods ~200 ms, and both people are watching the same screen. A drift that *grows* over a film is different: capture with `?debug` and compare `ratio` against `drift` |
+| Every phone re-places its audio every few seconds | Something is making the daemon think the timeline jumped. `journalctl -u playstick-web` for mpv trouble, and `?debug` telemetry: `ep` stepping repeatedly is the timecode epoch changing, which means `paused-for-cache` is flapping — a NAS or Wi-Fi problem, not a page one |
 | The preparing view sits on `Waiting for the lamp…` and then plays anyway | The lamp did not report `001` within `player_projector_ready_seconds`. If the projector had just been switched off, this is its cool-down refusing `PON`; `projector-probe.py cycle` measures the real window |
 
 More detail on any of the measured decisions is in the [README](../README.md), and the

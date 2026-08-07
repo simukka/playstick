@@ -36,6 +36,16 @@ LINE = (
     "ls=2")
 
 
+# The same phone, one rewrite later. Same daemon prefix, same shared fields,
+# and the five the timecode model added.
+V2 = (
+    "Aug 05 21:12:44 simukka-atom playstick-web.py[60875]: playstick: sync "
+    "10.0.1.237 playing pos=1421.83 buf=0 v=2;id=8f2c;t=612.4;st=play;hid=0;"
+    "ct=1421.79;rs=4;nb=1;ahead=48.2;amin=47.9;err=-38;errp=-41;rate=-712;"
+    "ratio=-640;drift=-72;off=-1204.8;ort=11;ns=34;ep=7;tcage=430;rtt=24;"
+    "trim=0;w=1;dw=140;sk=0;wt=0;bf=0;lag=22;ls=0;tun=")
+
+
 def blob(**fields):
     """A telemetry line with the given fields, as -o cat renders it."""
     pairs = ";".join("%s=%s" % kv for kv in fields.items())
@@ -98,6 +108,54 @@ class Parsing(unittest.TestCase):
     def test_a_field_this_script_has_never_heard_of_is_kept(self):
         row = csvtool.parse(blob(id="ab", t="1", newthing="7"))
         self.assertEqual(row["newthing"], "7")
+
+
+class Versions(unittest.TestCase):
+    """Two telemetry versions have to keep landing in the right columns.
+
+    v=1 is the 2026-08-02 capture, which is where the controller's constants
+    came from and which the README still argues from. v=2 is the timecode
+    rewrite. This script reads every field by name, so the only way one version
+    could damage the other is a column list that has forgotten about it -- and
+    that failure looks like a plausible number in the wrong place rather than
+    like an error.
+    """
+
+    def test_a_v2_line_lands_in_the_right_columns(self):
+        row = csvtool.parse(V2)
+        self.assertEqual(row["v"], "2")
+        self.assertEqual(row["ratio"], "-640")
+        self.assertEqual(row["drift"], "-72")
+        self.assertEqual(row["off"], "-1204.8")
+        self.assertEqual(row["ort"], "11")
+        self.assertEqual(row["ep"], "7")
+        self.assertEqual(row["tcage"], "430")
+        # The fields both versions share have not moved.
+        self.assertEqual(row["err"], "-38")
+        self.assertEqual(row["rate"], "-712")
+        self.assertEqual(row["ct"], "1421.79")
+
+    def test_every_field_a_v2_page_sends_has_a_column(self):
+        missing = set(csvtool.parse(V2)) - set(csvtool.COLUMNS)
+        self.assertEqual(missing, set(),
+                         "no column for %s; add it to COLUMNS" % missing)
+
+    def test_the_old_captures_fields_still_have_theirs(self):
+        """`step` and the v=1 sense of `ns` describe machinery the page no
+        longer has. They keep their columns anyway: a capture that can no
+        longer be read is a measurement that has been thrown away."""
+        for field in ("step", "ns", "drift"):
+            self.assertIn(field, csvtool.COLUMNS, field)
+
+    def test_a_version_a_field_is_missing_from_leaves_it_empty(self):
+        """Not shifted, and not filled in from a neighbour. Every field is read
+        by name, so this is really a check that nothing positional crept in."""
+        v1 = csvtool.parse(LINE)
+        self.assertNotIn("ratio", v1)
+        self.assertNotIn("ep", v1)
+        self.assertEqual(v1["drift"], "-427")
+        v2 = csvtool.parse(V2)
+        self.assertNotIn("step", v2)
 
 
 class Timestamps(unittest.TestCase):

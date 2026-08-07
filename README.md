@@ -691,6 +691,96 @@ else in the daemon names a model, an input code or a baud rate. `base.py` is the
 interface — `power_state`, `power_on`, `power_off`, `set_input`, `current_input` — and
 `serial_io.py` is reusable by anything that frames commands between two bytes.
 
+### The timecode: one clock every device follows
+
+The projector is silent, so everybody who wants to hear the film listens on their own phone.
+Keeping that audio pinned to the picture is the hardest thing this appliance does. Nobody
+hears room speakers, but everybody is looking at the screen, and the eye starts noticing when
+sound leads the picture by about **45 ms** or lags it by about **125 ms** — over a Wi-Fi link
+whose round trip is a good fraction of that on its own.
+
+The daemon publishes the film's clock as a **timecode**, on `/api/status`:
+
+```json
+"timecode": {"tc": 1421.834, "at": 918273.4551, "rate": 1.0, "epoch": 7}
+```
+
+Where the film was, the instant on this machine's clock when it was there, whether it is
+moving, and which timeline that belongs to. A phone that knows how its own clock compares to
+the daemon's can evaluate that line continuously, without asking anybody:
+
+```
+film_now = tc + rate * (server_now() - at)
+```
+
+Every audio decision in the page — start, place, seek, nudge, park, switch track, call a
+stall — reads that one function. Nothing reads a poll.
+
+**The clock offset is measured on its own route, and that is the point.** *What time is it
+there* and *where is the film* are unrelated facts. One question that answers both — which is
+what subtracting a polled position from a local clock does — makes a slow poll
+indistinguishable from a film that moved, and that conflation was the cause of everything
+below it. So there is a second route that answers nothing else:
+
+```console
+$ curl -s http://vivostick/api/time
+{"now": 918273.4551, "session": "9f3c1a2b"}
+```
+
+It takes no lock, reads no disk and asks mpv nothing, so the round trip it measures is the
+network and the kernel rather than this daemon's own queueing. A phone times the exchange,
+takes the midpoint as the estimate and half the round trip as the error bar on it, and keeps
+**the quickest recent exchange** — delay is one-sided, so the fastest round trip is the one
+with the least room to be wrong and averaging it against slower ones can only move it away
+from the truth. NTP's rule, for NTP's reason. Eight requests fired back to back on arrival
+lock the offset in **under a second**; before this the same thing took eight status polls,
+and a film opened with two seconds of deliberate silence rather than risk placing the audio
+off a thin estimate.
+
+`session` is eight hex characters generated once per run. `time.monotonic()` counts from an
+arbitrary origin and a restart picks a new one, so without it a phone would keep applying an
+offset wrong by an unbounded amount, with no reading it could take that would say so.
+
+**The epoch is what a discontinuity costs.** While it holds, the line a phone is
+extrapolating is still the right line and a fresh anchor only sharpens it. When it changes,
+whatever that phone had is wrong. It moves for a film starting or ending, a pause in either
+direction, the demuxer stalling on the NAS, and — the one there is no other way to see — a
+`time-pos` that is not where the last timecode said it would be, which covers whatever mpv
+does that this process did not ask it to.
+
+That one number is most of what the rewrite bought. A pause, a resume, a buffering blink and
+a film change used to empty an eight-sample offset window that took eight polls to refill,
+and the audio was not allowed to make a sound for any of them. **Each of them now costs one
+seek**, because the clock offset and the crystal ratio have nothing to do with which film is
+playing or where in it we are, and are not touched.
+
+**Two things the daemon does so that six phones do not each do them worse.** The reading is
+stamped *around* the one IPC call that takes it rather than after the four that follow —
+which is what this used to do, dating every sample by however long mpv took to answer them.
+And the published anchor is the **least-late reading in a four-second window**, not the
+newest: mpv reports `time-pos` on frame boundaries, so a reading is up to 42 ms behind the
+truth at 24 fps and never ahead of it, and a one-sided error is the kind a maximum removes.
+
+**The crystal ratio is measured, not searched for.** The offset samples have a slope, and
+that slope *is* this phone's clock against the daemon's — up to ~100 ppm between two consumer
+parts, which is 0.7 s over a feature film. Fitting it over three minutes of samples resolves
+it to under 10 ppm, and it is fed forward to the element's `playbackRate` directly.
+
+It is not the whole answer and the code says so. The slope compares the clock that timed the
+round trips — `performance.now()` — against the daemon's; the element is clocked by the audio
+hardware, which on iOS is not that oscillator. So the integrator stays, with a far smaller
+job: whatever is left is the phone's own CPU against its own DAC. The telemetry reports the
+two separately as `ratio` and `drift` for exactly this reason — **a `drift` that grows to
+look like the old whole-model number is a measurement that is not reaching the element.**
+
+This is also what makes a pocketed phone work, and it is the part that is easy to leave out.
+iOS keeps a playing `<audio>` element going when the screen locks but suspends the page's
+timers, so for the twenty minutes somebody has their phone in a pocket there is nobody home
+to correct anything. A `playbackRate` baked into the element before the screen locked keeps
+working after it locks; an offset correction would not. Coming back out, nothing is torn
+down: the winning offset sample has aged out by itself, while the samples that aged out are
+still in the window holding up a slope that is exactly as true as when it was measured.
+
 ### Collecting sync telemetry from a phone
 
 Headphone audio that breaks up for a few milliseconds every second or two only
@@ -709,20 +799,30 @@ ssh vivostick 'journalctl -u playstick-web --since "1 hour ago" -o short-iso' \
 One line per phone per second, and one field per thing that could be wrong:
 
 ```
-sync 192.168.1.42 playing pos=1421.83 buf=0 v=1;id=8f2c;t=612.4;st=play;hid=0;
-ct=1421.79;rs=4;nb=1;ahead=48.2;amin=47.9;err=-38;errp=-41;rate=-712;drift=-680;
-step=0.2;ns=8;rtt=24;trim=0;w=1;dw=140;sk=0;wt=0;bf=0;lag=22;ls=0
+sync 192.168.1.42 playing pos=1421.83 buf=0 v=2;id=8f2c;t=612.4;st=play;hid=0;
+ct=1421.79;rs=4;nb=1;ahead=48.2;amin=47.9;err=-38;errp=-41;rate=-712;ratio=-640;
+drift=-72;off=-1204.8;ort=11;ns=34;ep=7;tcage=430;rtt=24;trim=0;w=1;dw=140;sk=0;
+wt=0;bf=0;lag=22;ls=0
 ```
 
-Everything before `v=1` is the daemon's own view. After it: `id` distinguishes
+Everything before `v=2` is the daemon's own view. After it: `id` distinguishes
 phones (and reloads), `t` is seconds since that page loaded, `ct` the element's
 `currentTime`, `ahead`/`amin` seconds of buffer now and at its low-water mark,
-`err`/`errp` sound-minus-picture in ms and its signed peak, `rate`/`drift` the
-correction and the crystal estimate in ppm, `w`/`dw` writes to `playbackRate`
-and the largest of them, `wt` `waiting`/`stalled` events, `bf` polls where mpv
-reported paused-for-cache, and `lag`/`ls` the worst shortfall in the element's
-own clock and how many exceeded 30 ms. The full legend is in the docstring of
+`err`/`errp` sound-minus-picture in ms and its signed peak, `rate` the
+correction command in ppm, `ratio`/`drift` the crystal difference measured off
+`/api/time` and the residual the integrator still had to find, `off`/`ort` the
+clock offset and the round trip it came out of, `ep`/`tcage` the timeline being
+followed and how old its anchor is, `w`/`dw` writes to `playbackRate` and the
+largest of them, `wt` `waiting`/`stalled` events, `bf` polls where mpv reported
+paused-for-cache, and `lag`/`ls` the worst shortfall in the element's own clock
+and how many exceeded 30 ms. The full legend is in the docstring of
 `Handler._log_sync`.
+
+**`v=1` captures are still readable.** The 2026-08-02 capture below is where
+half the controller's constants came from, and `sync-log-to-csv.py` keeps its
+columns — including `step` and `ns`, which described machinery the page no
+longer has. Its `drift` is not the same quantity as `v=2`'s: it was the whole
+clock-ratio estimate, where the split above now puts most of that in `ratio`.
 
 **Counts and peaks describe the interval since the previous line, not the film.**
 The correction loop runs at 250 ms and the poll at 1 s, so a line that sampled
@@ -757,15 +857,16 @@ Three columns are added to the ones the phone sends:
 | --- | --- |
 | `dt` | seconds since that phone's previous line — **divide the counters by it.** The poll backs off to 5 s behind a locked screen, so a pocketed phone otherwise looks calm when it is not |
 | `gap` | 1 when a poll was skipped before this line: do not read a trend across it |
-| `ctpos` | `ct - pos` in ms, the element's clock against mpv's. A coarse cross-check on `err`, biased by the RTT and offset corrections `err` includes — good for catching an `err` that looks healthy because the page's own clock model has drifted |
+| `ctpos` | `ct - pos` in ms, the element's clock against mpv's. A coarse cross-check on `err`, biased by the track-offset and trim corrections `err` includes and by `pos` being the daemon's own extrapolation rather than the timecode — good for catching an `err` that looks healthy because the page's own clock model has drifted |
 
 ### Adjusting the controller from the phone
 
 `?debug` also puts a **Playback parameters** section in the sound sheet, one
-row per constant the sync loop runs on — seek threshold, samples before
-placing, proportional and integral gain, write deadband, rate clamp, error
-smoothing, offset slew, correction interval, stall threshold. Minus and plus,
-applied immediately, on the phone that is hearing the problem.
+row per constant the sync loop runs on — seek threshold, proportional and
+integral gain, write deadband, rate clamp, error smoothing, clock sample
+interval, offset shelf life, ratio fit window, correction interval, stall
+threshold. Minus and plus, applied immediately, on the phone that is hearing
+the problem.
 
 This exists because the loop between "change a number" and "hear whether it
 helped" was an Ansible run, a service restart and a reload — and two of these
@@ -893,6 +994,34 @@ straight into the target. Two changes, both in `playstick-ui.html`:
 Replaying the capture's opening against the page's real clock model: the old
 constants plant the element 1180 ms late, the new ones land it within 10 ms.
 
+#### ...and what the timecode changed about it
+
+Both of those fixes were mitigations for a payload that could not say *when*.
+The daemon reported a position with no instant attached, so a phone had to
+guess how stale it was — and the whole apparatus above, the eight-sample
+window, the max filter, `SEEK_SAMPLES`, the two seconds of opening silence,
+existed to make that guess survivable. A timecode carries the instant, so there
+is nothing left to guess and nothing left to average.
+
+What survives the rewrite, deliberately: **`SEEK_LIMIT`, `RATE_EPS`, `ERR_LP`,
+`RATE_LIMIT` and `STALL` keep their values and their reasons.** They describe
+an iPhone's audio pipeline rather than the architecture that was replaced, and
+they were not derivable from the armchair — two of them had already been set
+wrong from it. `SEEK_SAMPLES` and the offset slew are gone with the machinery
+they served. The capture's opening is still replayed in `tests/js/clock.js`,
+now as the acceptance test for the new model: the same reading, taken 1.19 s
+before it was sent, must land the element within 10 ms.
+
+One thing the rewrite did not settle, and the next capture should. At a full
+21.3 ms `currentTime` quantum the loop writes `playbackRate` on about half its
+ticks, because `ERR_LP` leaves the command moving by ~90 ppm a tick against a
+`RATE_EPS` of 100. The 2026-08-02 capture shows a real iPhone writing once or
+twice a *second*, so the device's own `currentTime` is smoother than a
+full-amplitude staircase — but by how much is not something a harness can know,
+and it is not a number to set from the armchair either. `tests/js/clock.js`
+bounds the failure that would matter (writing on every tick, at 43 ms of audio
+each) and leaves the rest to a measurement.
+
 ### The page notices when it has been replaced
 
 Deploying used to change nothing on any phone in the house. `/` is served
@@ -984,6 +1113,14 @@ characters the library table is keyed by, and the track is a small integer index
 whose paths were already proved to sit under the library root when the index was read. The
 only files it can name are ones `playstick-prep.py` wrote.
 
+`/api/time` is the newest route and the smallest. It answers `{"now": <float>, "session":
+<8 hex>}` and nothing else: a counter with an arbitrary origin, and an opaque name for one
+run of one process. It reveals no path, no film, no address and no uptime that `/healthz`
+did not already imply, it takes no argument — a query string is ignored, like everywhere
+else here — and it is the one route that touches neither the library nor mpv, which is why
+it can be answered before either of them. It is still behind
+`player_allow_networks`.
+
 ```bash
 systemctl disable --now playstick-web.service   # rollback
 systemctl disable --now srv-movies.automount    # and the share
@@ -1020,7 +1157,7 @@ clone runs without being installed:
 | `airplay.py` | the UxPlay interlock: one sample, and the debounced version |
 | `library.py` | `Library`, plus the title cleaning and sidecar search |
 | `thumbs.py` | `Thumbs`, and the placeholder for films without a poster |
-| `player.py` | `Player` and `Busy` — mpv, and the master clock phones sync to |
+| `player.py` | `Player` and `Busy` — mpv, and the timecode every phone follows |
 | `http.py` | `Handler` — every route |
 | `main.py` | build the workers, hand them to the handler, serve |
 
@@ -1057,7 +1194,7 @@ they would never be looked at. Set it to `0` to see the layout as it ships.
 ### Tests
 
 ```bash
-python3 -m unittest discover -s tests            # ~310 tests, about 11 seconds
+python3 -m unittest discover -s tests            # ~355 tests, about 12 seconds
 ./actl 'python3 -m unittest discover -s tests'   # the same, in the control node
 ```
 
@@ -1114,10 +1251,22 @@ The page has its own, kept separate because they need node:
 
 `tests/js/page.js` loads the real `playstick-ui.html` script under a stub DOM
 where **time is a variable the driver holds**, which is the only way a
-controller is testable at all. `clock.js` replays the opening of the 2026-08-02
-capture — the old constants plant the element 1180 ms behind the film, the
-current ones land it within 10 ms — and holds the placement rules and the
-steady-state write rate. `telemetry.js` is mostly negatives: a stall detector
+controller is testable at all. It also holds the network: a route can be given
+a round trip and a one-sided delay, so an estimate built out of timing is
+tested against a truth the driver knows exactly.
+
+`time.js` is the clock offset — that the quickest exchange wins and a congested
+one cannot walk the estimate off the truth, that a 40 ppm crystal is recovered
+through a network jittering by 60 ms, that an offset nobody refreshed goes
+quiet rather than stale while the ratio it helped measure survives, and that a
+daemon which restarted is noticed rather than absorbed. `clock.js` is the
+timecode: audio starting on the first poll, a stopped timeline parking the
+element where the daemon says rather than where it drifted to, a discontinuity
+costing one seek and not a clock model, and a phone whose DAC is 60 ppm off
+being found by the integrator that the measurement cannot reach inside for. It
+still replays the opening of the 2026-08-02 capture — the same reading, taken
+1.19 s before it was sent, must land the element within 10 ms where the old
+model put it 1180 ms late. `telemetry.js` is mostly negatives: a stall detector
 that counts a seek, a deliberate slowdown or iOS's frame quantisation as a
 dropout does not report a fault, it manufactures one, in the log the next fix
 gets argued from. `tune.js` covers the debug sheet's parameter controls,

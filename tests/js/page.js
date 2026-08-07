@@ -86,6 +86,62 @@ class FakeAudio {
 
 const state = { clock: 1000 };
 
+// Timers the page asked for. Nothing fires on its own: run() advances the
+// clock and fires whatever came due, so a test that never calls it sees
+// exactly the behaviour these tests have always seen.
+const timers = [];
+let timerId = 0;
+
+// Routes the page is allowed to fetch. A path with no entry NEVER SETTLES,
+// which is what every test here relied on before there were any -- the driver
+// calls audioStatus() itself rather than letting a fake network decide when
+// things happen. /api/time is the exception, and has to be: the page's whole
+// clock model is built out of that round trip, so the round trip has to be
+// something a test can set and then change.
+const routes = {};
+
+// A resolved promise that runs its callbacks inline. Real promises defer to a
+// microtask, which would mean every check in every driver had to become async
+// to observe a fetch the page made two lines earlier. Nothing in the page
+// depends on that deferral, and a test that reads like a straight line is
+// worth more here than one that models the event loop.
+function settled(v) {
+  return {
+    then(fn) {
+      const out = fn ? fn(v) : v;
+      return out && typeof out.then === "function" ? out : settled(out);
+    },
+    catch() { return this; },
+  };
+}
+
+// ...and its opposite, for a route that could not answer. A real fetch REJECTS
+// rather than throwing, and code written against a harness that threw would be
+// wrong in the one case it exists to survive: the daemon going away.
+function rejected(err) {
+  return {
+    then() { return this; },
+    catch(fn) { return settled(fn ? fn(err) : undefined); },
+  };
+}
+
+function run(ms) {
+  const end = state.clock + ms;
+  // Re-scanned after every callback, because a callback may schedule the next
+  // link in its own chain -- which is exactly what the /api/time burst does.
+  for (;;) {
+    let next = null;
+    for (const t of timers) {
+      if (t.at <= end && (next === null || t.at < next.at)) { next = t; }
+    }
+    if (next === null) { break; }
+    timers.splice(timers.indexOf(next), 1);
+    state.clock = Math.max(state.clock, next.at);
+    next.fn();
+  }
+  state.clock = end;
+}
+
 function install(search) {
   const els = {};
   global.document = {
@@ -109,12 +165,38 @@ function install(search) {
   };
   global.performance = { now: () => state.clock };
   global.navigator = { userAgent: "harness" };
-  // Never settles: the driver calls audioStatus() itself, with a status object
-  // it controls, rather than letting a fake network decide when things happen.
-  global.fetch = () => new Promise(() => {});
-  global.setTimeout = () => 0;
+  timers.length = 0;
+  Object.keys(routes).forEach((k) => { delete routes[k]; });
+  global.fetch = (url) => {
+    const route = routes[String(url).split("?")[0]];
+    if (!route) { return new Promise(() => {}); }
+    // The clock moves across the request, because the page is timing it, and
+    // the body is built halfway through -- a symmetric path, where the answer
+    // really was true at the midpoint the page assumes. A route that wants a
+    // one-sided path moves the clock itself inside body().
+    const rtt = route.rtt || 0;
+    state.clock += rtt / 2;
+    let body;
+    try {
+      body = route.body(state);
+    } catch (err) {
+      state.clock += rtt / 2;
+      return rejected(err);
+    }
+    state.clock += rtt / 2;
+    return settled({ json: () => settled(body) });
+  };
+  global.setTimeout = (fn, ms) => {
+    timers.push({ id: ++timerId, at: state.clock + (ms || 0), fn });
+    return timerId;
+  };
+  // Left as a no-op on purpose: the correction loop is driven by the driver
+  // calling sndCorrect(), which is the only way a controller is testable.
   global.setInterval = () => 0;
-  global.clearTimeout = () => {};
+  global.clearTimeout = (id) => {
+    const i = timers.findIndex((t) => t.id === id);
+    if (i >= 0) { timers.splice(i, 1); }
+  };
   global.clearInterval = () => {};
   global.requestAnimationFrame = () => 0;
   global.addEventListener = () => {};
@@ -148,5 +230,5 @@ function done() {
   process.exit(fail.length ? 1 : 0);
 }
 
-module.exports = { install, load, check, done, acts, reloads, state,
-  FakeEl, FakeAudio };
+module.exports = { install, load, check, done, run, acts, reloads, routes,
+  state, FakeEl, FakeAudio };

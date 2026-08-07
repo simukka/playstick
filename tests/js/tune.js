@@ -8,9 +8,9 @@ const { install, load, check, done, state } = require("./page.js");
 
 const PAGE = process.argv[2] ||
   __dirname + "/../../roles/player/files/playstick-ui.html";
-const VARS = ["TUNABLES", "SEEK_LIMIT", "SEEK_SAMPLES", "KP", "KI", "RATE_EPS",
-  "RATE_LIMIT", "ERR_LP", "SLEW", "TICK", "STALL", "debugSync", "sndDest",
-  "snd", "sndOffsets", "sndErr", "sndClockOff", "sndRateSet"];
+const VARS = ["TUNABLES", "SEEK_LIMIT", "KP", "KI", "RATE_EPS", "RATE_LIMIT",
+  "ERR_LP", "TICK", "STALL", "TIME_EVERY", "OFF_MAX_AGE", "RATIO_SPAN",
+  "debugSync", "sndDest", "snd", "sndErr", "sndRateSet", "srvBest", "srvWin"];
 const FNS = ["tuneLoad", "tuneSave", "tuneStep", "tuneDigest", "tuneValue",
   "tuneText", "tuneApply", "paintTune", "syncTelemetry"];
 
@@ -95,8 +95,8 @@ check("the digest survives the daemon's filter",
 P.sndDest = "device";
 P.snd.src = "/api/audio/abc/0";
 P.snd.paused = false;
-P.sndOffsets = [0, 0, 0];
-P.sndClockOff = 0;
+P.srvBest = { off: 0, rtt: 0.004, at: state.clock / 1000 };
+P.srvWin = [P.srvBest];
 const blob = P.syncTelemetry();
 check("tun rides in the telemetry header", /;tun=sl:350/.test(blob), blob);
 check("the whole header still fits the daemon's 512-char cap",

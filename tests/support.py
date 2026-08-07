@@ -79,6 +79,7 @@ if FILES not in sys.path:
 sys.dont_write_bytecode = True
 
 from playstick import http as api           # noqa: E402
+from playstick import player                # noqa: E402
 from playstick.player import Busy           # noqa: E402
 # Re-exported for the same reason as `api`: config is read once at import, and
 # a test module that reached for playstick.* itself could beat this file to it
@@ -104,6 +105,10 @@ class FakeLibrary:
         self.error = ""
         self.rescans = 0
         self.overrides = []
+        # Counted so a route can be asserted NOT to have asked. /api/time
+        # exists to be the cheapest thing this server does, and "cheap" is a
+        # claim about what it touches, not a comment about it.
+        self.snapshots = 0
 
     def add(self, ident, title, **extra):
         item = {"id": ident, "title": title}
@@ -113,6 +118,7 @@ class FakeLibrary:
         return item
 
     def snapshot(self):
+        self.snapshots += 1
         return (list(self.order), dict(self.items), self.available,
                 self.scanned_at, self.error)
 
@@ -151,6 +157,10 @@ class FakePlayer:
         self.calls = []
         # Set to an exception instance to make the next start() raise it.
         self.start_error = None
+        # Same counter, same reason as FakeLibrary.snapshots: the real status()
+        # is four round trips to mpv, and a route that claims to touch nothing
+        # has to be held to it.
+        self.statuses = 0
 
     def state(self):
         return self.playing
@@ -162,7 +172,21 @@ class FakePlayer:
         return self.item
 
     def status(self):
+        self.statuses += 1
         return dict(self.data)
+
+    def timecode(self, tc, at, rate=1.0, epoch=1):
+        """Publish a timeline, the way Player._advance() would.
+
+        Kept as a method rather than left to each test to build the dict,
+        because the four keys travel together and a test that spelled one of
+        them wrong would assert successfully about nothing.
+        """
+        self.data["timecode"] = {"tc": tc, "at": at, "rate": rate,
+                                 "epoch": epoch}
+        self.data["position"] = tc
+        self.data["position_valid"] = True
+        return self.data["timecode"]
 
     def start(self, item, progress=None):
         self.calls.append(("start", item["id"]))

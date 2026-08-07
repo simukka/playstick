@@ -29,12 +29,26 @@ THREE DERIVED COLUMNS are added; every other column is verbatim from the log.
           two stretches of a film, or a pocketed phone will look calm.
   ctpos   (ct - pos) in ms: the element's clock against mpv's, as the two were
           reported in this one line. It is a coarse cross-check on `err` and
-          not a replacement -- it lacks the RTT and track-offset corrections
-          the page applies, so expect a constant bias of tens of ms. What it
-          is good for is catching the case where `err` looks healthy because
-          the page's own clock model has come adrift.
+          not a replacement -- it lacks the track-offset and trim corrections
+          the page applies, and `pos` is where the daemon's own extrapolation
+          put the film rather than where the timecode says it was. Expect a
+          constant bias of tens of ms. What it is good for is catching the
+          case where `err` looks healthy because the page's own clock model
+          has come adrift.
   gap     1 when this phone skipped at least one poll before this line (dt >
           1.8 s). Marks the boundaries you should not read a trend across.
+
+TWO TELEMETRY VERSIONS reach this script, and both have to keep working: the
+2026-08-02 capture the controller's constants were set from is v=1, and the
+README still draws conclusions from it. v=2 is the timecode rewrite. Fields
+that exist in one and not the other come out empty in the other's rows rather
+than shifting anything, because every field is read by name.
+
+  v=1 only   drift meant the whole clock-ratio estimate; step and ns described
+             the offset window the page used to keep
+  v=2 only   ratio (measured against the daemon), off, ort, ep, tcage -- and
+             drift now means only the residual the measurement did not cover,
+             so the two versions' `drift` columns are NOT comparable
 """
 
 import argparse
@@ -66,8 +80,10 @@ COLUMNS = [
     "pos", "ct", "ctpos", "err", "errp", "trim",
     "lag", "ls", "wt", "sk",
     "ahead", "amin", "rs", "nb", "buf", "bf",
-    "rate", "drift", "step", "ns", "w", "dw",
-    "rtt", "tun", "v",
+    "rate", "ratio", "drift", "w", "dw",
+    "off", "ort", "ns", "ep", "tcage", "rtt",
+    "step",                              # v=1 only; see the module docstring
+    "tun", "v",
 ]
 DERIVED = ("time", "host", "ip", "state", "pos", "buf", "dt", "gap", "ctpos")
 
