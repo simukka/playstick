@@ -10,9 +10,15 @@ roles/probe/files/*.h264
 
 # Site-specific values: addresses, the login, the share name. Plaintext and
 # unpublished, which is why secrets do NOT go here -- those belong in the
-# encrypted vault above, which IS committed. The pattern deliberately does not
-# match local.yml.example, the committed template.
+# vault below, which is encrypted. The pattern deliberately does not match
+# local.yml.example, the committed template.
 host_vars/*/local.yml
+
+# The vault. Encrypted, so committing it would be defensible -- ansible-vault
+# is AES-256 and the whole point of it is that the ciphertext can live in git.
+# Kept out anyway, which has one consequence worth knowing: nothing backs this
+# file up. Lose the working copy and the NAS credentials go with it, and no
+# clone of this repo has them. Copy it somewhere safe.
 host_vars/*/vault.yml
 
 *.retry

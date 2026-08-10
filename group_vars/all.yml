@@ -234,7 +234,8 @@ claim_tty1: true
 # role asserts on the value before it can get that far. See docs/install.md.
 #
 # Credentials are a separate question again: they are secrets, so they go in
-# the ENCRYPTED vault, which is committed, rather than in the gitignored file.
+# the ENCRYPTED vault rather than in the merely-gitignored file. Both are kept
+# out of git; only one of them would still be safe if that stopped being true.
 #   ./actl 'ansible-vault create host_vars/vivostick/vault.yml'
 #   ./actl 'ansible-playbook site.yml --ask-vault-pass'
 #
@@ -304,6 +305,44 @@ player_hwdec: "no"             # no | vaapi | vaapi-copy | auto-safe
 # adapter sidesteps the SoC path entirely and player_audio_device is the only
 # line that changes.
 player_audio: false
+
+# WHICH IS WHY THE PHONES DO THE LISTENING.
+#
+# The line above is not a gap waiting to be filled. The projector is a
+# Panasonic PT-AE4000 and has no speakers, so even a working HDMI audio path
+# would have nowhere to put the sound. What there is instead: a film plays
+# silently on the screen, and everybody who wants to hear it opens the same web
+# UI on their own phone, taps the speaker icon, picks a language and listens on
+# their own headphones. Two people can pick differently, which is the point of
+# it rather than a side effect -- it is the only way this household watches a
+# film in two languages at once.
+#
+# Nothing is encoded on the stick. scripts/playstick-prep.py extracts one
+# AAC-LC track per language on the developer machine, next to the posters and
+# subtitles it already writes, and this box only ever serves those bytes.
+# ffmpeg stays uninstalled here.
+#
+# The tunables are player_phone_audio* in roles/player/defaults/main.yml. Three
+# things worth knowing before touching them:
+#
+#   - It is independent of player_audio in both directions. Turning HDMI audio
+#     on later does not turn this off, and this working does not mean that one
+#     would.
+#   - It is the one endpoint in the daemon that streams file bytes, and the
+#     package docstring in playstick/__init__.py explains how far that reaches.
+#   - Each listener costs the Wi-Fi radio twice what the bitrate suggests,
+#     because the daemon reads the track from the NAS over the same radio it
+#     writes it to the phone on. If a film starts stuttering when somebody
+#     picks a language, player_phone_audio_kbps is the first thing to lower.
+#   - The sync slider in the sheet is per device and lives in that phone's
+#     localStorage, because headphone latency is a property of the headphones
+#     -- wired is ~30 ms behind, AirPods ~200 ms. Anyone who set one before the
+#     round-trip sign fix in sndSample() had dialled out a bias that is now
+#     gone, and should reset it to 0 and re-tune from there.
+#
+# And one that is enforced rather than documented: --ao=null is now the master
+# clock the phones sync to. See the mpv argv comment in the unit template
+# before deciding that decoding an inaudible audio track is waste.
 
 # --- probe --------------------------------------------------------------
 probe_results_dir: /var/log/uxplay-probe

@@ -28,8 +28,8 @@
           are specific to your LAN -- the stick's address, the login, the NAS
           -- and it is gitignored, so a fresh clone never has one. Create it:
           cp host_vars/vivostick/local.yml.example host_vars/vivostick/local.yml
-          and edit it. Secrets are a separate file: host_vars/vivostick/vault.yml,
-          encrypted, and that one IS committed.
+          and edit it. Secrets are a separate file, encrypted rather than
+          merely ignored: host_vars/vivostick/vault.yml.
         success_msg: "Site configuration found."
 
 - name: Provision the VivoStick TS10 as a no-X AirPlay receiver

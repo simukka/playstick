@@ -8,7 +8,10 @@ that plugs directly into a projector's HDMI port.
 It provisions and measures a minimal Ubuntu Server installation running [`UxPlay`](https://github.com/simukka/UxPlay), 
 with video rendered directly through the Intel integrated graphics stack **without an X server or desktop environment**.
 
-The device is managed entirely over SSH from a separate control machine, currently a ThinkPad X1.
+* The device is managed entirely over SSH from a separate control machine.
+* Plays movies from a NAS (simple enough for a child to use).
+* Web based movie library.
+* 
 
 ## Motivation
 
@@ -73,12 +76,15 @@ source of failure. If audio is wanted later, a USB audio adapter sidesteps the S
 ansible.cfg              inventory path, pipelining, longer timeouts
 inventory.yml            single host: vivostick, and nothing site-specific
 host_vars/vivostick/     local.yml  <- YOUR address, login, NAS. gitignored
-                         vault.yml  <- secrets. committed, encrypted
+                         vault.yml  <- secrets. gitignored AND encrypted
 group_vars/all.yml       every tunable lives here
 site.yml                 base -> trim -> graphics -> uxplay -> idle -> nas -> player -> probe
 fetch-results.yml        run the probes, pull output into results/
 Dockerfile               the Ansible control node
 Dockerfile.gui           the web UI on a dev machine, no hardware needed
+scripts/playstick-prep.py prepare the movie library on the DEV machine
+scripts/projector-probe.py talk to the projector by hand, ON THE DEVICE, before
+             trusting the daemon to do it
 scripts/make-testclip.sh build H.264 test clips on the CONTROL machine
 scripts/gui-*            entrypoint and AirPlay stub for Dockerfile.gui
 roles/
@@ -88,7 +94,8 @@ roles/
   uxplay/    uxplay + avahi + cage/seatd, both units, one of them started, tty1
   idle/      the framebuffer clock shown when nothing is mirroring
   nas/       read-only CIFS automount for the movie library
-  player/    mpv + the web UI a child drives it from, and the display arbiter
+  player/    mpv + the web UI a child drives it from, the display arbiter,
+             and the RS-232 control that switches the projector on and off
   probe/     measurement scripts and test clips
 docs/        install.md — every command, in order, including the vault
              matrix-narrative.md — how this was measured, and what fooled me
@@ -356,11 +363,138 @@ shadows `group_vars/all.yml`. `vault.yml` also overrides `local.yml` where both 
 the same variable — lexical load order — so keep each variable in one file. The full
 command sequence is in [docs/install.md](docs/install.md#4-secrets-the-vault).
 
+### Preparing the library first
+
+`scripts/playstick-prep.py` runs on the **developer machine** and does everything the
+stick would otherwise have to do badly, or could not do at all:
+
+```bash
+./scripts/playstick-prep.py --library /mnt/nas/video
+```
+
+It walks the share, probes every file, and writes `playstick-library.json` next to the
+films. The daemon reads that instead of walking, and everything in it was decided on a
+machine with cores to spare:
+
+| it does | because on the stick |
+|---|---|
+| **verifies** each file decodes, and that the ending is actually there | a partial download plays fine for 40 minutes and then stops, in the dark, at bedtime |
+| **de-duplicates** — same film, best copy wins | the grid otherwise shows *Ponyo* three times and a child picks the 480p one |
+| **transcodes** anything that is not already 8-bit H.264 at ≤720p | HEVC, 10-bit and 4K do not play at all; software H.264 at 720p is measured at 29 fps with nothing to spare |
+| **extracts posters** — sidecar, embedded cover, or a frame | the daemon does this with mpv, one at a time, only while nothing is playing, over CIFS. A hundred films is an afternoon |
+| **extracts subtitles** to UTF-8 SRT | the share is mounted read-only, so nothing can be written beside the film |
+| **collects rating and genre** from `.nfo` files and container tags | there is no metadata database on a 2 GB appliance |
+| **matches against TMDb** on title, year *and* runtime, and refuses rather than guesses | the shelf is what a child picks from, and a wrong film on it is worse than a plain one |
+
+Artifacts go in `<library>/.playstick/`, which the daemon's fallback walk skips — so a
+half-prepared library shows the originals rather than each film twice. Nothing under the
+library is ever modified or deleted; losing duplicates are reported, and only moved if
+you pass `--duplicates-dir`.
+
+The index is a preference, not a requirement. Missing, unparseable or written by a newer
+version, it logs one line and walks the share as before.
+
+```bash
+--verify full            # decode every frame, not just the first and last seconds
+--transcode never        # index and collect metadata, encode nothing
+--dry-run                # say what would happen
+--tmdb-key <key>         # ratings, genres and posters from themoviedb.org.
+                         # OFF by default: it sends your film titles to a third party
+--refresh-posters        # re-download every TMDb poster instead of keeping what
+                         # is on disk. Run once after upgrading — see below
+```
+
+#### A TMDb match has to be earned
+
+The first run of this against a real library published **Red Hook Summer** — its title,
+its poster, its plot and its rating — for `Hook (1991)/Hook.1991.720p.BRrip.x264.YIFY.mp4`.
+Thirty-three of a hundred and seventeen entries were somebody else's film. Nothing about
+it looked like a failure: every step succeeded and returned a plausible answer.
+
+The cause was a chain, and the first link is worth knowing about if you have YIFY rips:
+**that file's only date is `creation_time: 2012-10-08`, the moment it was muxed.** It was
+read as a release year, so TMDb was asked for a 1991 film released in 2012, and the top
+hit for `query=Hook&year=2012` is Red Hook Summer. 69 of 547 films were dated by their
+muxer this way. `creation_time` is no longer read, a container tag can no longer overwrite
+a year the filename gave, and the year is taken from the folder when the file has none
+(`Die.Hard.1988…/die_hard.mkv` had no year at all).
+
+The second link is that the search result was simply believed. It now has to survive three
+independent checks — the title, compared after normalising accents, punctuation and
+articles; the year; and **the runtime**, which is the one signal that owes nothing to
+anybody's spelling and would have caught this on its own: 121 minutes of Red Hook Summer
+against 142 minutes of Hook. Popularity breaks ties and nothing else, since sorting by
+popularity is what caused this. Below the bar, the run says so and moves on:
+
+```
+TMDb: 112 matched, 5 not confident enough to use
+  no match: Contact (1997)/Contac.1997.720p.x264.YIFY.mkv -- best was …
+```
+
+An unmatched film keeps its filename title and year and gets a frame for a poster, which
+is what an unmatched film has always looked like. That is deliberate: a wrong film on a
+shelf a child picks from is worse than a plain one. The usual cause is a typo in the
+filename — `Contac` above — and renaming the file fixes it.
+
+Two notes for a library prepared by an earlier version. The state cache stores the derived
+title and year, so entries written under the old rules are re-probed automatically; it
+costs one `ffprobe` per film and no re-encoding. Posters are not so lucky — a JPEG
+downloaded for the wrong film is indistinguishable from a right one here — so pass
+`--refresh-posters` once.
+
 Then `http://vivostick.local/` from any phone on the LAN — the `player` role
 advertises the UI over the avahi daemon that is already running for AirPlay, so nobody
 has to know the stick's IP address, and `player_port: 80` means there is nothing to
 remember after the hostname either. The daemon runs as root for reasons that predate the
 port (mpv needs DRM master), so binding below 1024 costs nothing here.
+
+### Narrowing the shelf
+
+Prep collects a year, a score and a genre list for every film, and until now the page threw
+all three away — the grid was every film the share held, in one order, and at a couple of
+hundred posters that is a wall to scroll past rather than a shelf to pick from. A funnel
+button next to the sound icon opens a second sheet:
+
+| | |
+|---|---|
+| **Order** | A to Z, newest first, oldest first |
+| **Kind** | one row per genre the library actually has, each carrying the count that choosing it would leave |
+| **Score** | any, 6+, 7+, 8+ — the 0–10 number from the `.nfo`, the container tag or TMDb |
+| **Headphones** | only the films a phone can hear |
+
+**A to Z is the order the server already sends, and the page does not re-sort it.** Prep
+files by a normalised title so *The Fifth Element* sits under F the way it would on a shelf,
+and the daemon keeps that order verbatim; a page that sorted on `title` instead would file
+every *The* together and quietly disagree with its own default. `sort_title` is on the wire
+for exactly this, and falls back to the title for a library nobody has prepped.
+
+A film with **no year is last in both year orders**, not oldest. It is unknown, and burying
+it under "oldest first" is a lie the grid would tell silently. Same reasoning for a missing
+score: it drops out only once a threshold is actually asked for.
+
+"Ready for headphones" is keyed on **extracted audio tracks, not the index's `prepared`
+flag**. That flag is set only where prep had to transcode, so a film it judged already
+stick-friendly reads false while playing perfectly on every phone in the room — the property
+somebody in the room can notice is whether there is a soundtrack to send them, and that is
+`audio_langs`.
+
+The filtering is in the page, not in the daemon. `/api/library` is one small payload the page
+already holds in full, so a filter is an array operation over it; the alternative — query
+parameters — would have this process parsing attacker-shaped strings, when its whole design
+is that clients send opaque ids and small integers.
+
+Two consequences of a child being the user. A choice is remembered across reloads
+(`ps.lib.*` in `localStorage`), so the grid they left is the grid they come back to — which
+means a filter that hides everything must never be a dead end: the active filters show as a
+chip above the grid that clears on tap, an empty grid says *"Nothing matches what you
+picked"* with a full-width way out, and a genre that has left the library since it was
+chosen un-picks itself on the next scan. And a library nobody has prepped has no genres, no
+years and no scores, so those sections are taken away rather than rendered empty, and the
+sheet says why.
+
+One latent bug fell out of this. `refreshThumbs()` used to swap posters by matching the
+grid's `<img>` list against the server's item list *by position*, which held only while the
+grid was the whole library in the order it arrived. Tiles are now looked up by id.
 
 ### AirPlay is unavailable while a film plays
 
@@ -430,6 +564,536 @@ SoC path entirely and `player_audio_device` is the only line that changes.
 VAEntrypointVLD`, software HEVC on 4×1.44 GHz Airmont will not save it. The facts probe
 prints the decodable profiles.
 
+### Turning the projector on
+
+Until this existed, a child who picked a poster got mpv drawing to a plane nobody could
+see: the film ran, correctly, on a screen that was switched off, until an adult found the
+remote. `playstick-web` now talks to the projector over RS-232C, so picking a poster is the
+whole of what it takes to watch a film — and, more importantly, so the lamp goes out again
+when the room empties.
+
+**It is off by default and that is not timidity.** With `player_projector_model` unset the
+daemon builds a `NullProjector`: every step below is a no-op, the film starts exactly as it
+did before, and an appliance with no serial cable — or the development GUI, which never has
+one — behaves identically. Setting a model is the only thing that turns any of it on.
+
+```
+                             QPW  -> 000, standby
+  Waking the projector up…   PON
+  Waiting for the lamp…      ....... 10 s of documented deafness .......
+                             QPW  -> 000 ... 000 ... 001, lit
+  Pointing it at the movie…  IIS:HD3   then QIN to check it landed
+  Making room on the screen… systemctl stop uxplay-kms.service
+  Starting the movie…        mpv
+```
+
+`POST /api/play` now returns as soon as the film is **accepted** rather than when mpv is
+running, because a cold PT-AE4000 takes the better part of a minute to answer `QPW` with
+`001` and no browser holds a request open that long. The work happens on a thread and the
+page watches `/api/status`, which is the mechanism it already used for everything else.
+
+That is also what makes the wait bearable. A child who taps a poster and sees nothing for
+forty seconds cannot tell a warming lamp from a broken appliance, and the second guess is
+the one they act on — they press things, or they fetch somebody, or they give up. So each
+step names itself, the preparing view shows the poster of the film they picked so they can
+see the right one is coming, the bar is deliberately indeterminate (there is no honest
+percentage; a bar that crept to nine tenths and stopped would be a lie they can see
+through), and there is always a **Never mind** button.
+
+**A projector that cannot be reached never stops a film.** Every serial fault in the
+sequence is logged, reported to the page in one sentence, and stepped over. This is the
+same judgement `library.py` makes about a corrupt index, and it matters more here: if the
+lamp will not strike, the likely explanations are that somebody already switched the
+projector on by hand or that a cable is loose, and in the first case the film is exactly
+what was wanted while in the second an adult standing in the room can fix in two seconds
+something this daemon cannot fix at all. Refusing to play would help nobody. Unplug the
+adapter mid-provision and the only difference is a banner.
+
+#### The lamp goes out after thirty minutes
+
+A keeper thread ticks every fifteen seconds. The clock is reset by **a film playing or
+being prepared, or a confirmed AirPlay session** — and deliberately not by a phone with the
+page open. The page polls every three seconds, so counting that would mean the projector
+stays lit until every browser tab in the house is closed, and one phone left in a pocket
+would keep a lamp burning all night.
+
+The same tick can switch the projector **on** for a mirroring session, and the two AirPlay
+questions it asks are deliberately different:
+
+| direction | check | why |
+|---|---|---|
+| keep the lamp lit | `airplay_active()`, one `ss` sample | a false positive only postpones a power-off, which costs nothing |
+| strike a cold lamp | `airplay_confirmed()`, sustained across `player_projector_airplay_wake_ticks` | iOS opens brief connections to `:7000` merely from having the AirPlay picker on screen |
+
+Without that asymmetry, somebody glancing at an AirPlay menu across the room would light a
+lamp in an empty one. Two ticks is about thirty seconds of sustained connection: a glance
+does not survive it, a session does. `player_projector_airplay_wake_ticks` is the number to
+raise if the projector ever switches itself on unbidden, and
+`player_projector_wake_on_airplay: false` turns the direction off entirely.
+
+The input cannot be selected at wake time — the projector is deaf for ten seconds after
+`PON` and refuses `IIS` until the lamp is up — so a later tick does it once `QPW` says the
+lamp is lit.
+
+#### Prove the cable before you trust any of this
+
+**Run `scripts/projector-probe.py` on the device first.** It is not a formality; it is the
+step that decides whether this feature can work at all.
+
+```console
+$ sudo ./projector-probe.py status          # the one that proves the cable
+$ sudo ./projector-probe.py --verbose status
+$ sudo ./projector-probe.py on              # times the warm-up
+$ sudo ./projector-probe.py cycle           # times the cool-down too
+```
+
+It shares no code with the daemon on purpose. The driver is written to degrade quietly, and
+quiet degradation is precisely the wrong behaviour for the question being asked, which is
+*did any bytes come back at all*. Here every frame is printed in both directions and silence
+is a headline.
+
+Two things it settles, neither of which software can:
+
+1. **Whether the adapter is the right kind.** The one in use reports USB ID `0403:6015` —
+   the FTDI FT230X/FT231X, sold both as a real RS-232 cable with a MAX3232 on board and as
+   a bare 3.3 V TTL breakout. The projector wants ±12 V and cannot hear the second kind.
+   A moulded D-sub 9 on the projector end is the good sign; a bare header is the bad one.
+2. **Whether the protocol is right.** The command strings come from the PT-AE4000 manual
+   (TQBJ0313, pp. 42–44) by way of a Rust implementation in a sibling repository that had
+   only ever been tested against mocks. `tests/test_projector_protocol.py` ports that
+   crate's vectors byte for byte — two implementations written from the same manual agreeing
+   on the same bytes is worth more than either agreeing with itself — but agreeing with the
+   manual is not the same as agreeing with the projector.
+
+The manual is also ambiguous between models: the PT-AE3000U has two component inputs
+(`CP1`/`CP2`) where the PT-AE4000 has a computer input (`RG1`). Both code sets are offered
+and the projector answers `ER401` for whichever it lacks, which the sequence steps over.
+
+Also worth knowing: the port is straight-through to a PC (pin 2 TXD, 3 RXD, 5 GND), so a
+null-modem cable — identical from the outside — will not work; in standby the projector
+accepts nothing but `PON`; and no `DeviceAllow=` is needed in the unit, because it already
+runs as root and `ProtectSystem=full` does not touch `/dev`.
+
+#### Seeing it without a projector
+
+`docker compose up gui` runs a `fake` projector made of arithmetic, with a three-second
+warm-up and a two-minute idle timeout, so the preparing view can be looked at and its
+wording argued about on a laptop. It honours the two rules the sequence is built around —
+standby accepts nothing but `PON`, and the lamp is not lit the instant `PON` returns — and
+ignores everything else, because the rest would only be scenery. Set
+`PLAYSTICK_GUI_PROJECTOR=` (empty) to get the `NullProjector` instead, which is the path
+that must never stop a film playing.
+
+#### Adding another projector
+
+A file in `roles/player/files/playstick/projector/` and a line in its `MODELS`. Nothing
+else in the daemon names a model, an input code or a baud rate. `base.py` is the whole
+interface — `power_state`, `power_on`, `power_off`, `set_input`, `current_input` — and
+`serial_io.py` is reusable by anything that frames commands between two bytes.
+
+### The timecode: one clock every device follows
+
+The projector is silent, so everybody who wants to hear the film listens on their own phone.
+Keeping that audio pinned to the picture is the hardest thing this appliance does. Nobody
+hears room speakers, but everybody is looking at the screen, and the eye starts noticing when
+sound leads the picture by about **45 ms** or lags it by about **125 ms** — over a Wi-Fi link
+whose round trip is a good fraction of that on its own.
+
+The daemon publishes the film's clock as a **timecode**, on `/api/status`:
+
+```json
+"timecode": {"tc": 1421.834, "at": 918273.4551, "rate": 1.0, "epoch": 7}
+```
+
+Where the film was, the instant on this machine's clock when it was there, whether it is
+moving, and which timeline that belongs to. A phone that knows how its own clock compares to
+the daemon's can evaluate that line continuously, without asking anybody:
+
+```
+film_now = tc + rate * (server_now() - at)
+```
+
+Every audio decision in the page — start, place, seek, nudge, park, switch track, call a
+stall — reads that one function. Nothing reads a poll.
+
+**The clock offset is measured on its own route, and that is the point.** *What time is it
+there* and *where is the film* are unrelated facts. One question that answers both — which is
+what subtracting a polled position from a local clock does — makes a slow poll
+indistinguishable from a film that moved, and that conflation was the cause of everything
+below it. So there is a second route that answers nothing else:
+
+```console
+$ curl -s http://vivostick/api/time
+{"now": 918273.4551, "session": "9f3c1a2b"}
+```
+
+It takes no lock, reads no disk and asks mpv nothing, so the round trip it measures is the
+network and the kernel rather than this daemon's own queueing. A phone times the exchange,
+takes the midpoint as the estimate and half the round trip as the error bar on it, and keeps
+**the quickest recent exchange** — delay is one-sided, so the fastest round trip is the one
+with the least room to be wrong and averaging it against slower ones can only move it away
+from the truth. NTP's rule, for NTP's reason. Eight requests fired back to back on arrival
+lock the offset in **under a second**; before this the same thing took eight status polls,
+and a film opened with two seconds of deliberate silence rather than risk placing the audio
+off a thin estimate.
+
+`session` is eight hex characters generated once per run. `time.monotonic()` counts from an
+arbitrary origin and a restart picks a new one, so without it a phone would keep applying an
+offset wrong by an unbounded amount, with no reading it could take that would say so.
+
+**The epoch is what a discontinuity costs.** While it holds, the line a phone is
+extrapolating is still the right line and a fresh anchor only sharpens it. When it changes,
+whatever that phone had is wrong. It moves for a film starting or ending, a pause in either
+direction, the demuxer stalling on the NAS, and — the one there is no other way to see — a
+`time-pos` that is not where the last timecode said it would be, which covers whatever mpv
+does that this process did not ask it to.
+
+That one number is most of what the rewrite bought. A pause, a resume, a buffering blink and
+a film change used to empty an eight-sample offset window that took eight polls to refill,
+and the audio was not allowed to make a sound for any of them. **Each of them now costs one
+seek**, because the clock offset and the crystal ratio have nothing to do with which film is
+playing or where in it we are, and are not touched.
+
+**Two things the daemon does so that six phones do not each do them worse.** The reading is
+stamped *around* the one IPC call that takes it rather than after the four that follow —
+which is what this used to do, dating every sample by however long mpv took to answer them.
+And the published anchor is the **least-late reading in a four-second window**, not the
+newest: mpv reports `time-pos` on frame boundaries, so a reading is up to 42 ms behind the
+truth at 24 fps and never ahead of it, and a one-sided error is the kind a maximum removes.
+
+**The crystal ratio is measured, not searched for.** The offset samples have a slope, and
+that slope *is* this phone's clock against the daemon's — up to ~100 ppm between two consumer
+parts, which is 0.7 s over a feature film. Fitting it over three minutes of samples resolves
+it to under 10 ppm, and it is fed forward to the element's `playbackRate` directly.
+
+It is not the whole answer and the code says so. The slope compares the clock that timed the
+round trips — `performance.now()` — against the daemon's; the element is clocked by the audio
+hardware, which on iOS is not that oscillator. So the integrator stays, with a far smaller
+job: whatever is left is the phone's own CPU against its own DAC. The telemetry reports the
+two separately as `ratio` and `drift` for exactly this reason — **a `drift` that grows to
+look like the old whole-model number is a measurement that is not reaching the element.**
+
+This is also what makes a pocketed phone work, and it is the part that is easy to leave out.
+iOS keeps a playing `<audio>` element going when the screen locks but suspends the page's
+timers, so for the twenty minutes somebody has their phone in a pocket there is nobody home
+to correct anything. A `playbackRate` baked into the element before the screen locked keeps
+working after it locks; an offset correction would not. Coming back out, nothing is torn
+down: the winning offset sample has aged out by itself, while the samples that aged out are
+still in the window holding up a slope that is exactly as true as when it was measured.
+
+### Collecting sync telemetry from a phone
+
+Headphone audio that breaks up for a few milliseconds every second or two only
+reproduces on a real phone over real Wi-Fi — where there is no console to read
+and nothing to attach a profiler to. So the phone measures and the stick keeps
+the record: open the page with **`?debug`**, and every status poll carries the
+listener's own numbers in an `X-Playstick-Sync` request header, which the daemon
+writes to the journal next to what mpv believed at the same instant.
+
+```bash
+ssh vivostick 'journalctl -u playstick-web -f' | grep sync          # watch live
+ssh vivostick 'journalctl -u playstick-web --since "1 hour ago" -o short-iso' \
+  > sync.log                                                        # keep a film
+```
+
+One line per phone per second, and one field per thing that could be wrong:
+
+```
+sync 192.168.1.42 playing pos=1421.83 buf=0 v=2;id=8f2c;t=612.4;st=play;hid=0;
+ct=1421.79;rs=4;nb=1;ahead=48.2;amin=47.9;err=-38;errp=-41;rate=-712;ratio=-640;
+drift=-72;off=-1204.8;ort=11;ns=34;ep=7;tcage=430;rtt=24;trim=0;w=1;dw=140;sk=0;
+wt=0;bf=0;lag=22;ls=0
+```
+
+Everything before `v=2` is the daemon's own view. After it: `id` distinguishes
+phones (and reloads), `t` is seconds since that page loaded, `ct` the element's
+`currentTime`, `ahead`/`amin` seconds of buffer now and at its low-water mark,
+`err`/`errp` sound-minus-picture in ms and its signed peak, `rate` the
+correction command in ppm, `ratio`/`drift` the crystal difference measured off
+`/api/time` and the residual the integrator still had to find, `off`/`ort` the
+clock offset and the round trip it came out of, `ep`/`tcage` the timeline being
+followed and how old its anchor is, `w`/`dw` writes to `playbackRate` and the
+largest of them, `wt` `waiting`/`stalled` events, `bf` polls where mpv reported
+paused-for-cache, and `lag`/`ls` the worst shortfall in the element's own clock
+and how many exceeded 30 ms. The full legend is in the docstring of
+`Handler._log_sync`.
+
+**`v=1` captures are still readable.** The 2026-08-02 capture below is where
+half the controller's constants came from, and `sync-log-to-csv.py` keeps its
+columns — including `step` and `ns`, which described machinery the page no
+longer has. Its `drift` is not the same quantity as `v=2`'s: it was the whole
+clock-ratio estimate, where the split above now puts most of that in `ratio`.
+
+**Counts and peaks describe the interval since the previous line, not the film.**
+The correction loop runs at 250 ms and the poll at 1 s, so a line that sampled
+rather than accumulated would miss three quarters of what happened — which is
+most of the point, since the fault is shorter than either.
+
+### Reading a capture
+
+Ten minutes of one phone is six hundred lines, which is past the point of
+reading them. `scripts/sync-log-to-csv.py` flattens the journal into a table,
+one column per field, and prints a digest first so a wasted capture is obvious
+before anything gets plotted:
+
+```bash
+./scripts/sync-log-to-csv.py --summary sync.log > sync.csv
+```
+```
+3 telemetry lines from 2 phone(s)
+  phone                   lines     span   play  stalls  worst lag  min buf  rate writes   gaps
+  10.0.1.237/d32b8e         612     611s    598      31     310 ms     0.4s          842      4
+  10.0.1.99/aa11cc            8       8s      0       0          -        -            0      0
+```
+
+It reads whichever journalctl format it is handed (`-o short-iso`, `-o json`,
+`-o cat`, or the default) and ignores everything that is not telemetry, so a
+whole unfiltered journal can be piped in. `--id` narrows to one page load and
+`--playing` drops the lines from a phone that was not listening.
+
+Three columns are added to the ones the phone sends:
+
+| column | |
+| --- | --- |
+| `dt` | seconds since that phone's previous line — **divide the counters by it.** The poll backs off to 5 s behind a locked screen, so a pocketed phone otherwise looks calm when it is not |
+| `gap` | 1 when a poll was skipped before this line: do not read a trend across it |
+| `ctpos` | `ct - pos` in ms, the element's clock against mpv's. A coarse cross-check on `err`, biased by the track-offset and trim corrections `err` includes and by `pos` being the daemon's own extrapolation rather than the timecode — good for catching an `err` that looks healthy because the page's own clock model has drifted |
+
+### Adjusting the controller from the phone
+
+`?debug` also puts a **Playback parameters** section in the sound sheet, one
+row per constant the sync loop runs on — seek threshold, proportional and
+integral gain, write deadband, rate clamp, error smoothing, clock sample
+interval, offset shelf life, ratio fit window, correction interval, stall
+threshold. Minus and plus, applied immediately, on the phone that is hearing
+the problem.
+
+This exists because the loop between "change a number" and "hear whether it
+helped" was an Ansible run, a service restart and a reload — and two of these
+constants have already been set wrong from the armchair. `SEEK_LIMIT` below the
+cost of the seek it triggers, `RATE_EPS` below the noise it was meant to
+reject: neither is findable without a real device making a real sound.
+
+Values are shown in the same units the telemetry uses — ppm and milliseconds —
+so a number read off a capture can be typed straight back in. Each row names
+the constant and its shipped value, so `git grep` still finds the thing you
+just changed.
+
+Three rules, all deliberate:
+
+- **`?debug` only.** A value tuned during one film would otherwise sit in that
+  phone's `localStorage` for good, invisibly, and the next listener would be
+  debugging a build that exists nowhere.
+- **This phone only.** Nothing is sent to the daemon and no other listener is
+  affected. Six people can hold six different tunings at once, which is the
+  cheapest A/B this system will ever offer.
+- **Every telemetry line records them**, in a `tun` field listing whatever is
+  not the shipped value (`tun=sl:350,re:300`). Empty on a stock build. Without
+  it a capture taken mid-experiment is a capture of an unknown build.
+
+**Reset to shipped** puts everything back. Nothing survives a reload without
+`?debug`, so the way out of a tuning that made things worse is to drop the
+query string.
+
+### Plotting a capture
+
+```bash
+./scripts/sync-log-plot.py sync.csv -o sync.html     # or pipe the journal straight in
+```
+
+A standalone HTML file — inline SVG, no libraries, no network — with every
+metric stacked against one time axis. Hovering anywhere reports every field at
+that instant, which is what an SVG `<title>` is for and why there is no
+JavaScript in it.
+
+**One axis, because none of these faults is visible in a single series.** A
+dropout is a *coincidence*: the element lost time and the rate was written, or
+it lost time and the buffer collapsed, or it lost time and neither. Two
+separate plots make that a guess. The panels are, in order: sync error with the
+±45/−125 ms perception band drawn in, element clock loss against the 30 ms
+stall threshold, per-interval counts (stalls, rate writes, seeks,
+`waiting`/`stalled`, mpv buffering), `playbackRate` against its clamp, buffer
+headroom, and rtt/`ns`/`dt`. A state strip along the top says whether the phone
+was even playing, and stretches where a poll was skipped are shaded — a spike
+in a count there may only mean the interval was five seconds instead of one.
+
+`--id` picks a page load when several are in the capture (one page is one
+phone; two of them share no clock), and `--start`/`--end` clip to a window in
+seconds. Y ranges are set by Tukey fences, so a 13-second startup error does
+not flatten the next four minutes; anything outside is drawn on the panel edge
+and the panel says so.
+
+Three readings settle which of the two candidate causes it is:
+
+| what the log shows | what it means |
+| --- | --- |
+| `ahead`/`amin` collapsing toward zero | the daemon's pacing or the radio is starving the element |
+| `w`/`dw` moving with the dropouts | this page is re-arming the render pipeline; on iOS `playbackRate` lands on `AVPlayer.rate` |
+| `lag`/`ls` at zero through an audible break | neither — the clock never stopped, and the interruption is below anything the page can observe |
+
+`lag` sits around 16–21 ms even when nothing is wrong: iOS reports `currentTime`
+on decoded-frame boundaries, 21.3 ms for AAC-LC, so a reader sampling at 4 Hz
+sees a staircase. That is why `ls` only counts shortfalls past 30 ms.
+
+Nothing is logged unless a client sends the header, and only the page with
+`?debug` does — there is no server-side switch, because the alternative to
+logging this is not logging less, it is having no way to see what a phone in
+another room was doing. The value is a header from an unauthenticated LAN
+client, so it is filtered to `[A-Za-z0-9=;:.,+_-]` (newline and `%` are not in
+that set), truncated to 400 characters, passed to the log call as an argument
+rather than interpolated, and capped at 20 lines a second across all clients —
+triple the design load of six phones, and a bound on what a client stuck in a
+retry loop can do to a journal sharing 32 GB of eMMC with everything else.
+
+### What the first capture found
+
+68 seconds of an iPhone over Wi-Fi, 2026-08-02, and it settled the question in
+the table above on the second row. Buffer headroom ran **80–296 s and never
+dipped**; mpv never reported paused-for-cache; the element never fired
+`waiting`/`stalled` on a line where it lost time. Not starvation, and not the
+daemon's pacing. What it was:
+
+| | stalled | clean |
+| --- | --- | --- |
+| wrote `playbackRate` in that second | **7** | 1 |
+| didn't | 1 (the startup seek) | **58** |
+
+Each write cost about 43 ms — two AAC-LC frames, which is what a re-armed
+`AVPlayer` discards — and up to three ticks in one second, so 110 ms of audio
+gone. `ctpos`, which compares mpv's clock to the element's without involving
+the page's own model at all, confirmed the loss on every one.
+
+The writes were not the disease. `rate` sat at the **+20000 ppm clamp on 64 of
+67 playing lines**, because the element had been placed **1.01 s behind the
+film** at the top of the playback and `RATE_LIMIT` can only walk that out at 2%.
+The command leaves the clamp when `|err| < RATE_LIMIT/KP = 133 ms`; the `|err|`
+on all seven writing lines was 97–132 ms. So: error shrinks to ~100 ms, command
+comes off the clamp, write, 40–110 ms lost, error back to ~200 ms, re-saturate.
+A limit cycle, and the audio stayed 100–250 ms behind the picture — past the
+125 ms where a listener sees it — for the whole capture without converging.
+
+The second was inherited at `t=24.1`, from `ns=1`: **the element was placed off
+a single offset sample.** The max filter in `sndSample()` is what rejects a
+sample that arrived late, and with one sample there is nothing to reject, so
+the daemon's cached position — stale, because mpv had only just started — went
+straight into the target. Two changes, both in `playstick-ui.html`:
+
+- **`SEEK_SAMPLES = 3`.** Nothing is placed until the offset window has a
+  population. The element is not started before then either, so a film opens
+  with up to two seconds of silence rather than with a second of error that
+  takes a minute to come out. A phone coming out of a pocket is the one case
+  that keeps playing through a thin window — `visibilitychange` empties it on
+  purpose while keeping the clock ratio, and silencing that phone every time
+  somebody glanced at the time would be its own bug.
+- **`SEEK_LIMIT` 1.0 → 0.25 s.** An error takes `err/RATE_LIMIT` to nudge out,
+  so the old limit meant fifty seconds pinned at the clamp with the integrator
+  frozen. 0.25 caps that at twelve, and stays above the worst standing error
+  ever measured (216 ms) so that a loop which somehow re-saturates degrades
+  into nudging rather than into a cut every few seconds.
+
+Replaying the capture's opening against the page's real clock model: the old
+constants plant the element 1180 ms late, the new ones land it within 10 ms.
+
+#### ...and what the timecode changed about it
+
+Both of those fixes were mitigations for a payload that could not say *when*.
+The daemon reported a position with no instant attached, so a phone had to
+guess how stale it was — and the whole apparatus above, the eight-sample
+window, the max filter, `SEEK_SAMPLES`, the two seconds of opening silence,
+existed to make that guess survivable. A timecode carries the instant, so there
+is nothing left to guess and nothing left to average.
+
+What survives the rewrite, deliberately: **`SEEK_LIMIT`, `RATE_EPS`, `ERR_LP`,
+`RATE_LIMIT` and `STALL` keep their values and their reasons.** They describe
+an iPhone's audio pipeline rather than the architecture that was replaced, and
+they were not derivable from the armchair — two of them had already been set
+wrong from it. `SEEK_SAMPLES` and the offset slew are gone with the machinery
+they served. The capture's opening is still replayed in `tests/js/clock.js`,
+now as the acceptance test for the new model: the same reading, taken 1.19 s
+before it was sent, must land the element within 10 ms.
+
+One thing the rewrite did not settle, and the next capture should. At a full
+21.3 ms `currentTime` quantum the loop writes `playbackRate` on about half its
+ticks, because `ERR_LP` leaves the command moving by ~90 ppm a tick against a
+`RATE_EPS` of 100. The 2026-08-02 capture shows a real iPhone writing once or
+twice a *second*, so the device's own `currentTime` is smoother than a
+full-amplitude staircase — but by how much is not something a harness can know,
+and it is not a number to set from the armchair either. `tests/js/clock.js`
+bounds the failure that would matter (writing on every tick, at 43 ms of audio
+each) and leaves the rest to a measurement.
+
+### The page notices when it has been replaced
+
+Deploying used to change nothing on any phone in the house. `/` is served
+`no-store`, so a browser that *asks* for the page always gets the current one —
+but after the first visit none of them ask again. The page polls `/api/status`
+forever and never navigates, so a tab opened last month keeps running last
+month's JavaScript until somebody thinks to pull down and refresh. Children do
+not refresh, and the adults do not think to.
+
+So the daemon stamps each copy on the way out and reports the same value on
+every poll:
+
+```console
+$ curl -s stick.local/ | grep 'var BUILD'
+var BUILD = "c20e48476c19";
+$ curl -s stick.local/api/status | python3 -m json.tool | grep build
+    "build": "c20e48476c19",
+```
+
+A page whose own stamp no longer matches reloads itself, normally within three
+seconds of the deploy finishing.
+
+**The stamp is a hash of `ui.html`, and every alternative was worse.** A version
+number is something somebody has to remember to raise. The daemon's start time
+would order every phone in the house to reload after a power cut, for a page
+that had not changed by a byte — and `copy` gives the file a new mtime on every
+playbook run, most of which have nothing to do with the page, so a timestamp is
+the same mistake with extra steps. Hashing the daemon as well would be wrong in
+the other direction: this payload is additive by house rule, an older page
+against a newer daemon is a supported combination, and reloading for it would
+be interrupting people to deliver nothing.
+
+**It waits for a moment when there is nothing to lose.** A reload is a page that
+forgets which film it is following, throws away the clock offset the headphone
+sync spent a minute measuring, and drops the audio element out of somebody's
+ears. So a mismatch found while a film is playing, paused, or a lamp is warming
+is held until the state goes idle. In practice the wait never happens — the
+deploy restarts the daemon, which stops the film — but a deploy run while
+somebody was watching should not be the thing that ends it.
+
+The hash is computed from the file on disk and cached against its mtime and
+size, which costs one `stat` per poll and gets the dev container the same
+behaviour for free: edit `roles/player/files/playstick-ui.html`, and every
+browser pointed at `docker compose up gui` reloads itself. That is the shipped
+mechanism, exercised every time anybody touches the page.
+
+**The same stamp busts the posters and the soundtracks.** There is no third
+asset to worry about — no CDN, no web fonts, no external images, one file — but
+reloading the page does not empty a browser's image or media cache, and those
+two are the only things this page fetches that a browser is allowed to keep. A
+prepared poster is held for a day, an extracted frame for a year under
+`immutable`, and a soundtrack for an hour. So every URL for one carries the
+build:
+
+```
+/api/thumb/0123456789abcdef?v=c20e48476c19
+/api/audio/0123456789abcdef/0?v=c20e48476c19
+```
+
+It goes in the **query**, and that is the whole reason it is safe. Every route
+matches against the parsed path, so nothing on the daemon reads this — no new
+value crosses the boundary, and those routes still accept exactly what they
+accepted before: an opaque sixteen-hex id and a small integer. The
+[no-authentication](#no-authentication) argument is untouched.
+
+The cost is one deploy's worth of re-downloading: after a playbook run every
+phone pulls the posters in its grid again, and a listener who reconnects pulls
+their soundtrack again rather than resuming from the hour-long cache entry.
+That is the trade being made deliberately — a poster or a track cached for a
+year that the current release no longer produces is a fault nobody can see and
+nobody can clear, and `Ctrl-Shift-R` is not a thing you can ask a child for.
+
 ### No authentication
 
 `ufw` is purged by explicit decision, so port 80 is open to the LAN and anyone on it can
@@ -438,8 +1102,24 @@ start a film — consistent with UxPlay next door accepting unauthenticated mirr
 misconfigured router from publishing the UI to the internet and is not a defence against
 anybody already on your Wi-Fi. The control that does matter is that no filesystem path ever
 crosses the HTTP boundary: the page addresses films by an opaque id that indexes a table
-the daemon built by walking the share, every resolved path is re-checked for containment
-before it reaches mpv, and there is no endpoint that streams file bytes.
+the daemon built from the index or by walking the share, every resolved path is re-checked
+for containment before it reaches mpv, and no endpoint takes a path.
+
+Exactly one endpoint streams file bytes, and this sentence used to say that none did.
+`/api/audio` is what lets several people watch one silent projector and each hear their own
+language in their own headphones. It is narrowed to the point of being dull: the route is a
+regex matched against the whole path, the id must be exactly the sixteen lowercase hex
+characters the library table is keyed by, and the track is a small integer indexing a list
+whose paths were already proved to sit under the library root when the index was read. The
+only files it can name are ones `playstick-prep.py` wrote.
+
+`/api/time` is the newest route and the smallest. It answers `{"now": <float>, "session":
+<8 hex>}` and nothing else: a counter with an arbitrary origin, and an opaque name for one
+run of one process. It reveals no path, no film, no address and no uptime that `/healthz`
+did not already imply, it takes no argument — a query string is ignored, like everywhere
+else here — and it is the one route that touches neither the library nor mpv, which is why
+it can be answered before either of them. It is still behind
+`player_allow_networks`.
 
 ```bash
 systemctl disable --now playstick-web.service   # rollback
@@ -464,7 +1144,24 @@ The container serves on port 80 exactly as the device does; only the *published*
 
 The daemon and the page are bind-mounted from `roles/player/files/`, and the
 daemon re-reads `ui.html` on every request: edit the HTML, reload the browser.
-Python changes need `docker compose restart gui`. With no library mounted the
+Python changes need `docker compose restart gui`.
+
+The daemon itself is the `playstick/` package next to `playstick-web.py`, which
+is only an entry point — it prefers a `playstick/` sitting beside it, so a
+clone runs without being installed:
+
+| module | what is in it |
+| --- | --- |
+| `__init__.py` | why the daemon arbitrates the display itself, and what never crosses the HTTP boundary |
+| `config.py` | every environment variable, read once |
+| `airplay.py` | the UxPlay interlock: one sample, and the debounced version |
+| `library.py` | `Library`, plus the title cleaning and sidecar search |
+| `thumbs.py` | `Thumbs`, and the placeholder for films without a poster |
+| `player.py` | `Player` and `Busy` — mpv, and the timecode every phone follows |
+| `http.py` | `Handler` — every route |
+| `main.py` | build the workers, hand them to the handler, serve |
+
+With no library mounted the
 entrypoint generates one out of lavfi test patterns, named the way a real
 collection is — most of what the library code does is undo those names, and a
 test library of `movie1.mkv` would never exercise it. Two of the seven files
@@ -493,6 +1190,95 @@ and worth knowing before trusting what you see — `PLAYSTICK_MIN_SIZE_MB=0`,
 because the generated clips are a few MB against the device's 100 MB floor, and
 `PLAYSTICK_AUDIO=1`, because the page hides its volume controls otherwise and
 they would never be looked at. Set it to `0` to see the layout as it ships.
+
+### Tests
+
+```bash
+python3 -m unittest discover -s tests            # ~355 tests, about 12 seconds
+./actl 'python3 -m unittest discover -s tests'   # the same, in the control node
+```
+
+No dependencies and no device: `unittest` from the standard library, a real
+`ThreadingHTTPServer` on a loopback port the kernel picks, and fakes in place of
+the three workers behind the handler. What is exercised is the wire — status
+lines, headers, Range arithmetic, and when each piece of a paced body arrives.
+
+Two things to know before adding a test, both in `tests/support.py`:
+configuration is read from the environment once at import of
+`playstick.config`, so tests reach the package through the names that module
+re-exports rather than importing it themselves; and because `http.py` binds its
+constants with `from .config import ...`, overriding one for a single test means
+patching it in the *handler's* namespace, which is what `patched()` does.
+
+The audio route has its own file. Most of what is in it is there because the
+client is iOS Safari: `Range: bytes=0-1` answered with a 200 rather than a 206
+makes it refuse the resource outright, and it will pull a progressive file as
+fast as the socket allows across the one radio that is also reading the film off
+the NAS — hence the pacing, and hence a test that asserts the delivery
+granularity `AUDIO_CHUNK` implies rather than only its value.
+
+`tests/test_sync_csv.py` covers the telemetry-to-CSV script above, and needs
+none of that harness. A field quietly landing in the wrong column there would
+not look like a failure — it would look like an answer.
+
+`tests/test_prep_metadata.py` is the same argument about the library index, and
+it exists because that failure really happened: every case in it is a real file
+from a real shelf, under its own name, with the runtime `ffprobe` measured and
+the result set TMDb actually returned. It holds the mux date out of the year,
+the release string out of the title, and — the one that matters — asserts that
+being asked the wrong question is survivable: fed the recorded `year=2012`
+response for *Hook*, the lookup returns nothing rather than Red Hook Summer. It
+also diffs `clean_title()` against the daemon's copy, because the comment saying
+those two are kept byte-for-byte in step was, until now, only a comment.
+
+`tests/test_prep_media.py` is the same argument again, one level down: what prep
+*names* the encode it made. That one also really happened —
+`033fa22cc64e9f97-f1-the-movie.mp4` and `033fa22cc64e9f97-f1.mp4` side by side,
+the same film twice, because the name used to carry a slug of the title and the
+title is re-derived on every run. It is the quietest class of bug this tool has.
+Nothing returns an error, nothing looks wrong on the projector, and the only
+symptom is a share filling up at twice the rate it should. So the file holds the
+naming contract from both ends: one encode per film, named for the id alone, and
+everything else that shares that id — another film's encode, a poster, a
+subtitle, a half-written `.part`, a `--force` run that failed — left exactly
+where it was.
+
+The page has its own, kept separate because they need node:
+
+```bash
+./tests/js/run.sh          # uses local node, or node:22-alpine if there is none
+```
+
+`tests/js/page.js` loads the real `playstick-ui.html` script under a stub DOM
+where **time is a variable the driver holds**, which is the only way a
+controller is testable at all. It also holds the network: a route can be given
+a round trip and a one-sided delay, so an estimate built out of timing is
+tested against a truth the driver knows exactly.
+
+`time.js` is the clock offset — that the quickest exchange wins and a congested
+one cannot walk the estimate off the truth, that a 40 ppm crystal is recovered
+through a network jittering by 60 ms, that an offset nobody refreshed goes
+quiet rather than stale while the ratio it helped measure survives, and that a
+daemon which restarted is noticed rather than absorbed. `clock.js` is the
+timecode: audio starting on the first poll, a stopped timeline parking the
+element where the daemon says rather than where it drifted to, a discontinuity
+costing one seek and not a clock model, and a phone whose DAC is 60 ppm off
+being found by the integrator that the measurement cannot reach inside for. It
+still replays the opening of the 2026-08-02 capture — the same reading, taken
+1.19 s before it was sent, must land the element within 10 ms where the old
+model put it 1180 ms late. `telemetry.js` is mostly negatives: a stall detector
+that counts a seek, a deliberate slowdown or iOS's frame quantisation as a
+dropout does not report a fault, it manufactures one, in the log the next fix
+gets argued from. `tune.js` covers the debug sheet's parameter controls,
+including the taps going through the handlers the page really attached.
+`library.js` is the grid's filters, and holds the things that decide what a
+child can see: A to Z is byte-identical to the unfiltered order the server sent,
+a film with no year is last in *both* year orders, no combination can leave the
+grid empty without a way back out, and a poster arriving mid-scan lands on its
+own tile rather than on whichever one shares its index. `preparing.js` is the
+view a child watches while a lamp warms up, `admin.js` the curator's editor, and
+`build.js` the reload after a deploy — mostly the moments it must *not* pick,
+since a reload drops the audio element out of somebody's ears.
 
 ## Results so far
 
@@ -774,7 +1560,15 @@ All in `group_vars/all.yml`.
 | `player_vo` / `player_hwdec` | `drm` / `no` | Unproven pair — see [Movies from the NAS](#movies-from-the-nas) |
 | `player_audio` | `false` | `--ao=null`. **Films play silently** until HDMI audio is probed |
 | `player_enabled` / `player_port` | `true` / `80` | The web UI. Below 1024 needs `player_user: root`, which is the default |
+| `player_index_file` | `<library>/playstick-library.json` | The index `playstick-prep.py` writes. Present means the daemon reads it instead of walking the share; `""` ignores one that is there |
+| `player_subtitles` | `true` | Hand mpv the subtitles the prep tool extracted. They are passed as `--sub-file` because the share is read-only and `--sub-auto` cannot reach them |
 | `player_airplay_unit` | *(derived)* | The unit the player stops to take DRM master. Follows `uxplay_output_path` |
+| `player_projector_model` | `""` | `pt-ae4000`, `pt-ae3000u`, or empty for no projector. **Run `scripts/projector-probe.py` before setting it** — see [Turning the projector on](#turning-the-projector-on) |
+| `player_projector_device` | *(auto)* | Serial port; discovered under `/dev/serial/by-id`, not assumed to be `/dev/ttyUSB0` |
+| `player_projector_input` | `HD3` | The `IIS:` parameter. Empty leaves the input alone |
+| `player_projector_idle_minutes` | `30` | Lamp off after this long with no film and no mirroring; `0` never |
+| `player_projector_wake_on_airplay` | `true` | Whether mirroring may strike the lamp as well as a film |
+| `player_projector_airplay_wake_ticks` | `2` | Consecutive confirmed ticks first. Raise this if the projector ever switches itself on unbidden |
 
 The rest live in `roles/nas/defaults/main.yml` and `roles/player/defaults/main.yml`, the way
 `idle_*` and `trim_*` already do.

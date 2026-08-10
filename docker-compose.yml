@@ -65,8 +65,23 @@ services:
       # The repository's own daemon and page, over the copies baked into the
       # image. Edit the HTML and reload the browser; the daemon re-reads it on
       # every request. Python changes need `docker compose restart gui`.
+      #
+      # The package is mounted as a DIRECTORY, which also sidesteps something
+      # the two single-file mounts below still suffer from: a bind-mounted file
+      # is bound to an inode, and an editor that writes a replacement and
+      # renames it over the original leaves the container holding the old one
+      # until it is restarted. A directory mount resolves names on each open.
+      - ./roles/player/files/playstick:/usr/local/lib/playstick:ro
       - ./roles/player/files/playstick-ui.html:/usr/local/share/playstick/ui.html:ro
       - ./roles/player/files/playstick-web.py:/usr/local/bin/playstick-web.py:ro
+      # playstick-prep.py runs on the DEVELOPER machine, never on the stick,
+      # and this container is the closest thing to one that also has the
+      # library mounted -- ffmpeg is already here for the sample generator. It
+      # is how the per-language headphone audio gets made for the test films:
+      #   docker compose exec gui playstick-prep.py --library /srv/movies \
+      #       --transcode never --verify none --no-posters \
+      #       --min-duration 10 --min-size-mb 0
+      - ./scripts:/work/scripts:ro
       # A generated test library by default. Point it at your own films with
       # PLAYSTICK_GUI_LIBRARY=/path/to/movies -- read-write only because the
       # generator populates an empty volume; nothing else here ever writes
@@ -83,6 +98,21 @@ services:
       # player_allow_networks is deliberately not set: the Docker bridge is
       # inside 172.16.0.0/12 and would pass it anyway, so enforcing it here
       # would only ever reject the host and teach nothing.
+      #
+      # A projector made of arithmetic, so the preparing view can be looked at
+      # and its wording argued about on a laptop. "fake" warms up in three
+      # seconds instead of forty and honours the two rules the sequence is
+      # built around: standby accepts nothing but PON, and the lamp is not lit
+      # the instant PON returns.
+      #
+      # Set PLAYSTICK_GUI_PROJECTOR= (empty) to get the NullProjector instead,
+      # which is what the appliance ships with and the path that must never
+      # stop a film playing.
+      PLAYSTICK_PROJECTOR_MODEL: "${PLAYSTICK_GUI_PROJECTOR-fake}"
+      # Minutes. Short enough to watch the lamp go out over a cup of tea.
+      PLAYSTICK_PROJECTOR_IDLE_MINUTES: "${PLAYSTICK_GUI_PROJECTOR_IDLE-2}"
+      PLAYSTICK_PROJECTOR_INPUT: HD3
+      PLAYSTICK_PROJECTOR_TICK_SECONDS: "5"
     stdin_open: true
     tty: true
 

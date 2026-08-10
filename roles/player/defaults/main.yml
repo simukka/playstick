@@ -71,6 +71,26 @@ player_allow_networks:
 player_library_path: "{{ nas_mount_point }}"
 player_extensions: [".mkv", ".mp4", ".m4v", ".avi", ".mov", ".m2ts", ".ts"]
 
+# The index scripts/playstick-prep.py writes on the developer machine. When
+# this file exists the daemon takes the library from it -- deduplicated,
+# verified, with posters, ratings, genres and subtitles already prepared --
+# instead of walking the share and stat-ing every file over CIFS.
+#
+# It is a preference, not a requirement: a missing, unparseable or
+# newer-than-understood index logs one line and falls back to the walk, so a
+# library nobody has prepped still works exactly as it did before. Every
+# setting below applies to that fallback and is ignored while an index is in
+# use, because the answers are already in it.
+#
+# Set to "" to ignore an index that is present.
+player_index_file: "{{ player_library_path }}/playstick-library.json"
+
+# Whether to hand mpv the subtitles the prep tool extracted. They live under
+# .playstick/subs/ rather than beside each film, because the share is mounted
+# read-only, so --sub-auto cannot find them and the daemon passes --sub-file
+# explicitly. Off means the film plays with no subtitles at all.
+player_subtitles: false
+
 # Two filters, in the order they cost. The size test is free -- the scan has
 # already stat'ed the file -- and removes samples, trailers and stray extras
 # without needing the regex to be right. The regex is the backstop.
@@ -121,7 +141,141 @@ player_audio_channels: stereo
 
 player_mpv_extra_args: ""
 
+# --- audio on the phones -------------------------------------------------
+# Which is where the sound actually comes from. player_audio above is false and
+# the projector has no speakers, so a film plays silently on the screen and
+# everybody who wants to hear it opens this page on their own phone, picks a
+# language and listens on their own headphones. Two people can pick differently
+# -- that is the point of it rather than a side effect.
+#
+# Nothing is encoded here. scripts/playstick-prep.py extracts one AAC-LC track
+# per language on the developer machine and leaves it under .playstick/audio/;
+# this device only ever serves those bytes. ffmpeg is not installed on it and
+# does not need to be.
+#
+# Independent of player_audio in both directions: turning HDMI audio on later
+# does not turn this off, and this working does not mean that one does.
+player_phone_audio: true
+
+# Kilobits per second per listener, after the burst below. This is the tunable
+# to reach for first if a film starts stuttering when somebody picks a
+# language, and the reason is worth knowing: every byte crosses this box's one
+# SDIO-attached Wi-Fi radio TWICE -- once reading the track off the NAS, once
+# writing it to the phone -- while the film's own ~4 Mbps CIFS read is on the
+# same radio. Safari will pull a progressive media file as fast as the socket
+# allows unless something paces it.
+#
+# 384 is four times a 96 kbps track: fast enough to refill after a stall,
+# slow enough to leave the film its bandwidth. 0 disables the pacing.
+player_phone_audio_kbps: 384
+
+# Seconds of audio handed over at full speed before the pacing starts, so that
+# playback begins the moment somebody taps rather than after a wait.
+player_phone_audio_burst_seconds: 30
+
+# Concurrent listeners. Each one holds a thread in the daemon for as long as
+# they are listening, so this is a floor under the page staying responsive for
+# everybody else, not a licence limit.
+player_phone_audio_max_streams: 6
+
 # Seconds to wait after the AirPlay unit reports inactive before mpv reaches
 # for the card. The fd is closed by the kernel when the process exits, so this
 # is slack rather than a requirement.
 player_settle_seconds: 1.0
+
+# --- the projector -------------------------------------------------------
+# Switching the screen on, so that a child picking a poster is the whole of
+# what it takes to watch a film.
+#
+# OFF BY DEFAULT, and that is not timidity. With no model set the daemon builds
+# a NullProjector: every step of the sequence is a no-op, the film starts
+# exactly as it did before this feature existed, and an appliance with no
+# serial cable -- or the development GUI, which never has one -- behaves
+# identically. Setting a model is the only thing that turns any of it on.
+#
+#   ""            no projector (default)
+#   pt-ae4000     Panasonic PT-AE4000, over RS-232C
+#   pt-ae3000u    the same driver; the models differ only in which inputs
+#                 answer ER401, and it offers both sets
+#
+# BEFORE SETTING THIS, run scripts/projector-probe.py on the device. It is not
+# a formality: the protocol was ported from an implementation that had only
+# ever been tested against mocks, and the USB adapter in use reports FTDI ID
+# 0403:6015, which is sold both as a real RS-232 cable and as a bare 3.3 V TTL
+# breakout the projector cannot hear. `projector-probe.py status` distinguishes
+# them in about a second, and nothing else does.
+player_projector_model: ""
+
+# The serial port. Empty means "find it": the discovery task below takes the
+# first FTDI adapter under /dev/serial/by-id, which is the same shape as
+# drm_card_path in the graphics role and is there for the same reason -- the
+# path should not have to be written down for the usual case, and should be
+# overridable when the usual case is wrong.
+#
+# by-id rather than /dev/ttyUSB0 because ttyUSB numbering depends on USB
+# enumeration order: a hub that comes up differently after a reboot, or a
+# second serial device, silently moves it. The by-id link is derived from the
+# adapter's own serial number.
+player_projector_device: ""
+
+# Which socket the stick is plugged into, as the manual's IIS parameter.
+#
+#   HD1 HD2 HD3   HDMI 1-3
+#   CP1 CP2       component (CP2 is PT-AE3000U only)
+#   VID SVD       composite, S-video
+#   RG1           computer (PT-AE4000 only)
+#
+# Empty means "leave the input alone", which is right for a projector that
+# auto-selects its live source and is the safe setting if the code turns out to
+# be wrong: an input the projector does not have answers ER401, the daemon logs
+# it and starts the film anyway.
+player_projector_input: HD3
+
+# Minutes with no film and no mirroring before the lamp goes out. 0 never
+# switches it off.
+#
+# What resets the clock is deliberately narrow: a film playing or being
+# prepared, or a confirmed AirPlay session. NOT a phone with the page open --
+# it polls every three seconds, so counting that would mean the projector stays
+# on until every browser tab in the house is closed, and a phone left in a
+# pocket would keep the lamp burning all night.
+player_projector_idle_minutes: 30
+
+# The manual's post-PON blackout, during which the projector ignores every
+# command including the one asking whether it is on yet. Spent sleeping rather
+# than polling, because a timeout inside this window says nothing about the
+# cable. 10 is the documented figure; projector-probe.py measures the real one.
+player_projector_warmup_seconds: 10
+
+# ...and how long after that to keep asking before giving up and starting the
+# film regardless. Generous, because it also has to cover a projector still
+# running its post-POF cool-down, during which PON is refused outright and the
+# only remedy is to ask again. `projector-probe.py cycle` measures both.
+player_projector_ready_seconds: 90
+
+# Seconds to wait for a whole reply. Five ASCII characters at 9600 baud take
+# five milliseconds, so anything approaching this means the projector is not
+# answering rather than answering slowly.
+player_projector_timeout: 1.5
+
+# Whether a mirroring session may switch the projector on as well as a film.
+#
+# THE RISK IS WORTH KNOWING BEFORE LEAVING THIS ON. iOS opens short-lived
+# connections to UxPlay's port merely from having the AirPlay picker on screen
+# -- nobody is mirroring, the list is being drawn -- and a projector that
+# strikes its lamp because somebody across the room glanced at a menu is a
+# projector switching itself on in an empty room. The safeguard is the tick
+# count below rather than this flag; turn this off if the safeguard proves
+# insufficient.
+player_projector_wake_on_airplay: true
+
+# How many consecutive keeper ticks a CONFIRMED mirroring session must survive
+# before the lamp is struck. At the default tick, 2 is about thirty seconds of
+# sustained connection: a glance at the picker does not reach that and a real
+# session does. This is the number to raise if the projector ever switches
+# itself on unbidden.
+player_projector_airplay_wake_ticks: 2
+
+# How often the keeper looks. Nothing it watches changes faster than this, and
+# every tick costs one ss invocation.
+player_projector_tick_seconds: 15

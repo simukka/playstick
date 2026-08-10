@@ -142,7 +142,7 @@ Three files, three jobs, and the split is worth holding onto:
 |---|---|---|
 | `group_vars/all.yml` | yes | decisions about how the appliance behaves — the same for everyone |
 | `host_vars/vivostick/local.yml` | **no** | addresses, logins, share names — true of your LAN only |
-| `host_vars/vivostick/vault.yml` | yes, **encrypted** | secrets, and nothing else |
+| `host_vars/vivostick/vault.yml` | **no**, and **encrypted** | secrets, and nothing else |
 
 Secrets do not go in `local.yml`. Gitignored is not encrypted: one `git add -f`, one
 tarball, one backup of your home directory and it is readable. That is what section 4 is
@@ -272,6 +272,7 @@ uxplay_advert_name: Projector    # what iOS shows in the AirPlay list
 nas_server: "10.0.1.5"           # both empty skips the movie library entirely
 nas_share: "movies"              # the SHARE NAME, not /volume1/movies -- see below
 player_audio: false              # films play SILENTLY until HDMI audio is probed
+player_projector_model: ""       # "" leaves the screen to be switched on by hand
 ```
 
 Three of those have consequences worth knowing before the run rather than after:
@@ -295,6 +296,77 @@ Three of those have consequences worth knowing before the run rather than after:
   `dmesg`, and `volume1/video` asks for a share called `volume1` and returns
   `mount error(2): No such file or directory`. `smbclient -L <nas> -U <user>` lists the
   real names.
+- **`player_projector_model` is empty**, so nothing touches the projector and somebody
+  switches the screen on by hand, exactly as before. Turning it on is a two-step job and
+  the order matters: provision once with it empty, then run
+  `sudo ./projector-probe.py status` **on the device**, and only set the model once that
+  answers. The reason is in the [README](../README.md#turning-the-projector-on) — the USB
+  adapter in use has an ID that is sold both as a real RS-232 cable and as a bare 3.3 V
+  TTL breakout the projector cannot hear, and nothing in software distinguishes them.
+  You will also need `player_projector_input` set to whichever socket the stick is in.
+
+---
+
+## 5b. Prepare the movie library (optional, but do it)
+
+`scripts/playstick-prep.py` runs on the **developer machine** — the one with the NAS
+mounted and cores to spare — and leaves an index the daemon reads instead of walking the
+share. Without it everything still works; the stick just has to do the expensive parts
+itself, one at a time, over CIFS, on four 1.44 GHz cores.
+
+**dev machine** (needs `ffmpeg` and `ffprobe`; nothing to pip install):
+
+```bash
+./scripts/playstick-prep.py --library /mnt/nas/video --dry-run   # look first
+./scripts/playstick-prep.py --library /mnt/nas/video
+```
+
+What it writes, all of it under the library:
+
+```
+playstick-library.json      the index
+.playstick/media/<id>.mp4   the transcode, only for files that needed one
+.playstick/posters/         one JPEG per film
+.playstick/subs/            extracted subtitles, UTF-8 SRT
+.playstick/prep-state.json  cache -- a second run is seconds, not hours
+```
+
+Every one of those is named for the film's id, which is a sha1 of the source's path.
+Nothing derived is named after the *title*: the title is worked out afresh on each run,
+so an `.nfo` turning up or a TMDb match landing would rename the encode, and the next run
+would not recognise its own work. A run that finds more than one encode for a film — a
+library prepared before that was true — keeps the newest, deletes the rest and renames the
+survivor. That is the only thing under `.playstick/` it will remove, and all of it can be
+made again from the source.
+
+It never modifies or deletes a source film. Duplicates are dropped from the index and
+listed on stderr; `--duplicates-dir <path>` moves them somewhere else if you want that,
+and refuses a path inside the library.
+
+Worth knowing before the first run:
+
+- **It re-encodes anything that is not already 8-bit H.264 at 720p or below.** That is
+  HEVC, 10-bit, 4K, and any file over `--max-bitrate` (6 Mbps, which is a CIFS-over-Wi-Fi
+  limit rather than a decoder one). On a large library that is hours. `--dry-run` tells
+  you which files and why; `--transcode never` collects metadata and skips all of it.
+- **`--verify quick`** decodes the first and last seconds of every film, which is what
+  catches a download that stopped at 80%. `--verify full` decodes every frame and takes
+  as long as watching the library. `--verify probe` only reads headers.
+- **Films shorter than `--min-duration` (20 minutes) are rejected as extras**, and
+  anything matching `--skip-pattern` never gets looked at.
+- **`--tmdb-key` is off by default and sends your film titles to themoviedb.org.** It is
+  the only thing here that touches the network. Ratings and genres otherwise come from
+  `.nfo` sidecars and container tags, which is where most libraries already keep them.
+
+```bash
+./actl 'ansible-playbook site.yml -K --tags player'   # nothing to redeploy, but
+ssh <user>@<host> 'journalctl -u playstick-web -n 5'  # this line proves it took
+#   playstick: library: 92 films from /srv/movies/playstick-library.json
+```
+
+If that line says `films under /srv/movies` instead, the daemon is walking — the index is
+missing, unreadable, or written by a newer version of the script than the device has.
+That is a fallback, not a failure; the journal line above it says which.
 
 ---
 
@@ -405,11 +477,36 @@ systemctl status srv-movies.automount
 ls /srv/movies                                     # triggers the automount
 curl -s localhost/healthz                          # the web UI, on port 80
 ss -ltnp | grep ':80 '                             # who owns it: python3, as root
+
+# the page and the daemon must name the same build, or the phones will not
+# know a deploy happened. The value is a hash of ui.html; it changes when and
+# only when that file does.
+curl -s localhost/ | grep -o 'var BUILD = "[^"]*"'
+curl -s localhost/api/status | grep -o '"build": "[^"]*"'
+
+# the clock every listening phone measures itself against. Two readings should
+# differ by about the time between them, and `session` should not change unless
+# the daemon has restarted.
+curl -s localhost/api/time; echo; sleep 2; curl -s localhost/api/time
+```
+
+```bash
+# the projector, if you configured one
+ls -l /dev/serial/by-id/                           # the adapter, by its own serial number
+sudo ./projector-probe.py status                   # RUN THIS BEFORE setting the model
+journalctl -u playstick-web -b --no-pager | grep -E 'projector|preparing'
 ```
 
 From a phone on the same LAN: `http://vivostick.local/` for the films, or the AirPlay
 picker for mirroring. No port to type — `player_port` is 80, which the daemon can bind
 because `player_user` is root already.
+
+With a projector configured, the three things worth watching once: tapping a poster walks
+the preparing view through its steps and the film appears; **unplugging the serial adapter
+and tapping a poster still plays the film**, with a banner rather than a refusal; and the
+lamp goes out on its own after `player_projector_idle_minutes` with nothing happening. The
+middle one is the important one — set `player_projector_idle_minutes: 1` temporarily if you
+want to see the third without waiting half an hour.
 
 **control** — one command for the whole picture, written to `results/`:
 
@@ -506,8 +603,23 @@ sudo apt update && sudo apt full-upgrade
 | `Malformed UNC in devname` in `dmesg`, the mount unit failing with nothing useful in its own journal | `nas_share` holds a path, not a share name. `/volume1/video` renders `//nas//volume1/video`, which is not a UNC. Use `video`. The role now asserts before this reaches the kernel |
 | `mount error(2): No such file or directory` on the share | The share name does not exist on the server — `volume1/video` asks for a share called `volume1`. `smbclient -L <nas> -U <user>` lists the real ones |
 | `mount error(13): Permission denied` on the share | Credentials. An empty `nas_username` mounts as **guest**, and most NAS boxes refuse that outright: put `nas_username`/`nas_password` in `host_vars/vivostick/vault.yml`. If they are set, check the vault is actually being loaded — see the two rows above about `group_vars` |
+| The grid shows a film twice, or shows one that will not play | The daemon is walking the share, not reading an index. Run `scripts/playstick-prep.py` on the dev machine — de-duplication and verification happen there, not on the stick |
+| `index unusable (...); walking the share instead` in the journal | Exactly what it says, and the run continues. Re-run the prep script; if it mentions a schema number, the device's player daemon is older than the script that wrote the index |
+| A prepared film plays but has no subtitles | They are passed as `--sub-file` from `.playstick/subs/`. Check `player_subtitles` is true and that the file survived the share being remounted |
 | Films play but silently | `player_audio: false` is the shipped default. See the README on `hdmi-lpe-audio` before changing it |
 | `No test clips found in roles/probe/files/` | Run `./actl ./scripts/make-testclip.sh`, then re-run the play |
+| `projector-probe.py status` prints `NOTHING CAME BACK` | Most often the adapter is TTL, not RS-232. USB ID `0403:6015` is the FTDI FT230X/FT231X, sold both as a real RS-232 cable with a level shifter and as a bare 3.3 V UART breakout the projector cannot hear — a moulded D-sub 9 on the projector end is the good sign, a bare header the bad one. Then, in order: the projector is unplugged from the mains (standby still answers `QPW`); the cable is null-modem rather than straight-through, which looks identical; serial control is disabled in the projector's own menu |
+| `player_projector_model is "..." but nothing was found under /dev/serial/by-id` | The adapter is not enumerated. `lsusb \| grep 0403` on the device says whether the kernel sees it, `lsmod \| grep ftdi_sio` whether the driver is loaded, `dmesg \| tail` what it made of the device. Set `player_projector_device` explicitly if the by-id link is missing but a `/dev/ttyUSB*` exists |
+| The film plays but the projector stays off, and the page says `I couldn't reach the projector.` | Working as designed — a serial fault never stops a film. The journal names the failing command: `journalctl -u playstick-web \| grep projector:`. Settle it with `projector-probe.py` |
+| The projector switches itself on when nobody is mirroring | An AirPlay picker glance got through. Raise `player_projector_airplay_wake_ticks`, or set `player_projector_wake_on_airplay: false` |
+| The lamp will not go out | Something is holding the clock: a film playing or being prepared, or an established connection to UxPlay's port. `ss -tn state established sport = :7000` names it. A phone with the page open is deliberately **not** enough |
+| A phone is still showing the old page after a deploy | It should reload itself within about three seconds; a page still open across a film reloads when that film ends. Check the two ends agree on what "old" means: `curl -s <stick>/api/status \| grep -o '"build": "[^"]*"'` against `curl -s <stick>/ \| grep 'var BUILD'`. Matching values mean the phone has the current page and the difference is elsewhere. Empty or absent `build` means the deploy did not land — `systemctl status playstick-web` |
+| Every phone reloads itself on every playbook run | The build is a hash of `ui.html`, so this means the file really is changing. A local edit to `roles/player/files/playstick-ui.html` is the usual reason; `git status` says |
+| The grid is slow to fill in, but only right after a deploy | Expected, once. Posters and soundtracks carry the build in their URL (`?v=…`), so a deploy re-pulls them rather than leaving a phone on a poster cached for a year. Every load after that is served from the cache again |
+| A phone shows the film but never starts making a sound | The clock offset never locked, so the page has nothing to place the audio against and will not guess. `curl -s <stick>/api/time` from that phone's network — if it answers here and not there, the phone is on a different VLAN or a guest network with client isolation. Open the page with `?debug` and read `off` and `ort`: empty means no sample has ever won |
+| The sound is steadily ahead of or behind the picture on one phone only | That is what the **Sync** nudge in the sound sheet is for, and it is per device on purpose — wired headphones are ~30 ms behind, AirPods ~200 ms, and both people are watching the same screen. A drift that *grows* over a film is different: capture with `?debug` and compare `ratio` against `drift` |
+| Every phone re-places its audio every few seconds | Something is making the daemon think the timeline jumped. `journalctl -u playstick-web` for mpv trouble, and `?debug` telemetry: `ep` stepping repeatedly is the timecode epoch changing, which means `paused-for-cache` is flapping — a NAS or Wi-Fi problem, not a page one |
+| The preparing view sits on `Waiting for the lamp…` and then plays anyway | The lamp did not report `001` within `player_projector_ready_seconds`. If the projector had just been switched off, this is its cool-down refusing `PON`; `projector-probe.py cycle` measures the real window |
 
 More detail on any of the measured decisions is in the [README](../README.md), and the
 first-person account of how the matrix was built — including several ways it fooled its
