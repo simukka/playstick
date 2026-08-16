@@ -1,0 +1,21 @@
+{
+  "name": "playstick-player",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The movie player's phone UI: a clean-slate TypeScript rewrite bundled into one self-contained HTML.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node build.mjs",
+    "test": "vitest run",
+    "bench": "vitest bench --run"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^30.0.0",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.25.0",
+    "jsdom": "^30.0.1",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}

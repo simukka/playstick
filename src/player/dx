@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Runs the Node toolchain for the player UI. Like tests/js/run.sh, it uses a
+# local node when there is one and falls back to node:22 in Docker otherwise --
+# the device never has node, and most dev machines here do not either.
+#
+#   ./dx npm install         install dev deps
+#   ./dx npm run typecheck   tsc --noEmit
+#   ./dx npm test            vitest run
+#   ./dx npm run bench       vitest bench --run
+#   ./dx npm run build       bundle -> dist/playstick-ui.html
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+repo="$(cd "$here/../.." && pwd)"
+
+if command -v node >/dev/null 2>&1 && [ "${PLAYSTICK_FORCE_DOCKER:-0}" != "1" ]; then
+  cd "$here"
+  exec "$@"
+fi
+
+exec docker run --rm -v "$repo":/w -w /w/src/player node:22 "$@"

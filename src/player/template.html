@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<!-- Managed by Ansible (uxplay-atom)
+
+     The whole UI, in one file. No CDN, no web fonts, no external images: the
+     stick may have no route to the internet and the phone holding this page
+     very well might not either.
+
+     The page itself is only this shell. Every element and every rule is built
+     by the bundle below, from the TypeScript in src/ -- a view and the markup
+     it writes to are one thing, and this is what is left when they are kept
+     together. What stays here is what the parser must see before the script
+     runs: the character set, how the phone should size the page, and the colour
+     the browser paints around it.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Playstick</title>
+</head>
+<body>
+<script>
+//__BUNDLE__
+</script>
+</body>
+</html>

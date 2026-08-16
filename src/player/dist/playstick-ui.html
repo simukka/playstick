@@ -1,0 +1,2627 @@
+<!DOCTYPE html>
+<!-- Managed by Ansible (uxplay-atom)
+
+     The whole UI, in one file. No CDN, no web fonts, no external images: the
+     stick may have no route to the internet and the phone holding this page
+     very well might not either.
+
+     The page itself is only this shell. Every element and every rule is built
+     by the bundle below, from the TypeScript in src/ -- a view and the markup
+     it writes to are one thing, and this is what is left when they are kept
+     together. What stays here is what the parser must see before the script
+     runs: the character set, how the phone should size the page, and the colour
+     the browser paints around it.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Playstick</title>
+</head>
+<body>
+<script>
+"use strict";
+(() => {
+  // src/build.ts
+  var BUILD = "__PLAYSTICK_BUILD__";
+  function stamped(path, build = BUILD) {
+    return path + "?v=" + build;
+  }
+  var ReloadPolicy = class {
+    constructor(deps, build = BUILD) {
+      this.deps = deps;
+      this.build = build;
+      this.reloading = false;
+    }
+    /**
+     * Given the build the daemon just reported and what is on screen, reload if
+     * and only if it is safe to. Returns true when a reload was asked for.
+     */
+    consider(statusBuild, state) {
+      if (!statusBuild || statusBuild === this.build) {
+        return false;
+      }
+      if (state === "playing" || state === "paused" || state === "preparing") {
+        return false;
+      }
+      if (this.reloading) {
+        return false;
+      }
+      this.reloading = true;
+      this.deps.reload();
+      return true;
+    }
+  };
+
+  // src/config.ts
+  var CLOCK = {
+    ratioSpan: 180,
+    ratioMin: 30,
+    offMaxAge: 30,
+    rttSlack: 2e-3,
+    rateLimit: 0.02
+  };
+  var SYNC = {
+    seekLimit: 0.25,
+    kp: 0.15,
+    ki: 2e-3,
+    rateLimit: 0.02,
+    driftLimit: 5e-4,
+    rateEps: 1e-4,
+    writeEvery: 15,
+    errLp: 0.1,
+    tick: 0.25,
+    stall: 0.03
+  };
+  var TIMING = {
+    burst: 8,
+    spacing: 0.08,
+    every: 5
+  };
+  function clamp(v, lo, hi) {
+    return v < lo ? lo : v > hi ? hi : v;
+  }
+
+  // src/clock.ts
+  var ServerClock = class {
+    constructor(cfg, capacity = 512) {
+      this.cfg = cfg;
+      this.head = 0;
+      this.len = 0;
+      this.best = -1;
+      // ring index of the offset in use, or -1 for no fix
+      this._ratio = 0;
+      this._session = "";
+      this.cap = capacity;
+      this.off = new Float64Array(capacity);
+      this.rtt = new Float64Array(capacity);
+      this.at = new Float64Array(capacity);
+    }
+    /** Daemon seconds per phone second, as a rate offset (0 == identical). */
+    get ratio() {
+      return this._ratio;
+    }
+    get session() {
+      return this._session;
+    }
+    get samples() {
+      return this.len;
+    }
+    hasFix() {
+      return this.best >= 0;
+    }
+    /** The round trip of the offset currently in use, or null. Telemetry only. */
+    bestRtt() {
+      return this.best >= 0 ? this.rtt[this.best] : null;
+    }
+    /**
+     * A different run of the daemon. Its clock counts from a new origin, so every
+     * offset, the slope through them, and any timeline read off them is now wrong
+     * by an unbounded amount. Everything is dropped. Returns true when it reset,
+     * so the caller can force the audio element to re-place itself.
+     */
+    adoptSession(id) {
+      if (id === this._session) {
+        return false;
+      }
+      this._session = id;
+      this.head = 0;
+      this.len = 0;
+      this.best = -1;
+      this._ratio = 0;
+      return true;
+    }
+    /**
+     * Record one round trip. `off` is the daemon's clock minus the local midpoint
+     * of the exchange; `rtt` is the round trip; `at` is the local instant it
+     * arrived. Samples must arrive in non-decreasing `at`.
+     */
+    accept(off, rtt, at) {
+      const i = (this.head + this.len) % this.cap;
+      if (this.len === this.cap) {
+        this.head = (this.head + 1) % this.cap;
+      } else {
+        this.len++;
+      }
+      this.off[i] = off;
+      this.rtt[i] = rtt;
+      this.at[i] = at;
+      this.recompute(at);
+    }
+    /**
+     * Re-choose the offset and re-fit the slope as of `now`, without a new
+     * sample. Driven off the correction tick so a stale offset ages out on the
+     * clock rather than waiting for a reply that a pocketed phone will not get.
+     */
+    tick(now) {
+      this.recompute(now);
+    }
+    /** This phone's clock read in the daemon's, or null with no fix. */
+    now(local) {
+      if (this.best < 0) {
+        return null;
+      }
+      return local + this.off[this.best] + this._ratio * (local - this.at[this.best]);
+    }
+    recompute(now) {
+      const { ratioSpan, ratioMin, offMaxAge, rttSlack, rateLimit } = this.cfg;
+      while (this.len > 0 && now - this.at[this.head] > ratioSpan) {
+        this.head = (this.head + 1) % this.cap;
+        this.len--;
+      }
+      let best = -1;
+      let bestRtt = Infinity;
+      for (let k = 0; k < this.len; k++) {
+        const idx = (this.head + k) % this.cap;
+        if (now - this.at[idx] > offMaxAge) {
+          continue;
+        }
+        if (this.rtt[idx] < bestRtt) {
+          bestRtt = this.rtt[idx];
+          best = idx;
+        }
+      }
+      this.best = best;
+      if (best < 0) {
+        return;
+      }
+      const cut = 2 * bestRtt + rttSlack;
+      let n = 0;
+      let mx = 0;
+      let my = 0;
+      let first = -1;
+      let last = -1;
+      for (let k = 0; k < this.len; k++) {
+        const idx = (this.head + k) % this.cap;
+        if (this.rtt[idx] > cut) {
+          continue;
+        }
+        if (first < 0) {
+          first = idx;
+        }
+        last = idx;
+        mx += this.at[idx];
+        my += this.off[idx];
+        n++;
+      }
+      if (n < 3) {
+        return;
+      }
+      if (this.at[last] - this.at[first] < ratioMin) {
+        return;
+      }
+      mx /= n;
+      my /= n;
+      let num2 = 0;
+      let den = 0;
+      for (let k = 0; k < this.len; k++) {
+        const idx = (this.head + k) % this.cap;
+        if (this.rtt[idx] > cut) {
+          continue;
+        }
+        const dx = this.at[idx] - mx;
+        num2 += dx * (this.off[idx] - my);
+        den += dx * dx;
+      }
+      if (den > 0) {
+        this._ratio = clamp(num2 / den, -rateLimit, rateLimit);
+      }
+    }
+  };
+
+  // src/timecode.ts
+  var FilmClock = class {
+    constructor(clock) {
+      this.clock = clock;
+      this.tc = null;
+    }
+    /** Adopt a timeline. Returns true when the epoch changed (a seek/reset). */
+    set(tc) {
+      const changed = tc !== null && (this.tc === null || tc.epoch !== this.tc.epoch);
+      this.tc = tc;
+      return changed;
+    }
+    get epoch() {
+      return this.tc ? this.tc.epoch : null;
+    }
+    /** 0 when the timeline is not advancing, 1 while it plays, null when unknown. */
+    get rate() {
+      return this.tc ? this.tc.rate : null;
+    }
+    /** Where the film is, right now, on this phone's clock. Null until both the
+     * clock offset and a timeline exist. */
+    now(local) {
+      const srv = this.clock.now(local);
+      if (srv === null || this.tc === null) {
+        return null;
+      }
+      return this.tc.tc + this.tc.rate * (srv - this.tc.at);
+    }
+  };
+  function targetFor(filmNow, trackOffset, trimMs) {
+    return filmNow === null ? null : filmNow + trackOffset + trimMs / 1e3;
+  }
+
+  // src/sync.ts
+  var SyncController = class {
+    // largest single write since telemetry last cleared it
+    constructor(cfg) {
+      this.cfg = cfg;
+      this.errF = null;
+      // smoothed error, for the P and I terms
+      this.drift = 0;
+      // integrator: what the measured ratio did not cover
+      this.rateSet = 1;
+      // last rate actually written to the element
+      this.rateAt = 0;
+      // ...and when, so writeEvery can space writes out
+      /** Set whenever the element must be placed rather than nudged. */
+      this.seekPending = true;
+      // Read by the telemetry feature; written only here.
+      this.err = 0;
+      // raw error last tick, for the journal and the overlay
+      this.seeks = 0;
+      this.rateWrites = 0;
+      this.lastRateStep = 0;
+    }
+    /** The rate currently commanded on the element. */
+    get rate() {
+      return this.rateSet;
+    }
+    /** The integrator's current contribution, a fraction. Telemetry. */
+    get integrator() {
+      return this.drift;
+    }
+    /**
+     * The element is no longer where it belongs (a new timeline, a resume). Place
+     * it next tick rather than nudging, and drop the error filter. The integrator
+     * is NOT cleared: it describes two oscillators in this phone, and neither
+     * changed because the film did.
+     */
+    replace() {
+      this.errF = null;
+      this.seekPending = true;
+    }
+    /**
+     * A fresh track from a known rate, so the deadband compares against what the
+     * element is actually doing. Drift survives, for the same reason as replace().
+     */
+    reset(el) {
+      this.errF = null;
+      this.seekPending = true;
+      this.rateSet = 1;
+      el.playbackRate = 1;
+    }
+    setRate(el, now, r) {
+      const { rateLimit, rateEps, writeEvery } = this.cfg;
+      r = clamp(r, 1 - rateLimit, 1 + rateLimit);
+      const moved = Math.abs(r - this.rateSet);
+      if (moved < rateEps) {
+        return;
+      }
+      if (now - this.rateAt < writeEvery && moved < rateLimit / 2) {
+        return;
+      }
+      if (moved > this.lastRateStep) {
+        this.lastRateStep = moved;
+      }
+      this.rateAt = now;
+      this.rateSet = r;
+      el.playbackRate = r;
+      this.rateWrites++;
+    }
+    /**
+     * One correction tick. `want` is the target position (film position plus the
+     * track origin plus this listener's trim), or null when there is no fix yet;
+     * `ratio` is the measured crystal offset from ServerClock. Placing or nudging
+     * the element is the only side effect.
+     *
+     * Returns "seek" | "nudge" | "idle" for the tests and telemetry.
+     */
+    correct(el, now, want, ratio) {
+      if (want === null) {
+        return "idle";
+      }
+      if (!el.duration) {
+        return "idle";
+      }
+      const { seekLimit, errLp, kp, ki, tick, rateLimit, driftLimit } = this.cfg;
+      const clampedWant = clamp(want, 0, el.duration);
+      this.err = el.currentTime - clampedWant;
+      if (this.seekPending || Math.abs(this.err) > seekLimit) {
+        el.currentTime = clampedWant;
+        this.seekPending = false;
+        this.errF = null;
+        this.seeks++;
+        return "seek";
+      }
+      this.errF = this.errF === null ? this.err : this.errF + errLp * (this.err - this.errF);
+      const wantDrift = this.drift + this.errF * ki * tick;
+      const cmd = 1 + ratio - wantDrift - this.errF * kp;
+      if (Math.abs(cmd - 1) < rateLimit || Math.abs(wantDrift) < Math.abs(this.drift)) {
+        this.drift = clamp(wantDrift, -driftLimit, driftLimit);
+      }
+      this.setRate(el, now, 1 + ratio - this.drift - this.errF * kp);
+      return "nudge";
+    }
+    /**
+     * Going into a pocket: drop the proportional term and leave the element
+     * running on the crystal ratio alone, because that ratio is the only estimate
+     * a locked screen cannot take away.
+     */
+    coast(el, now, ratio) {
+      this.setRate(el, now, 1 + ratio - this.drift);
+    }
+    /** Clears the largest-write high-water mark; the telemetry line owns the reset. */
+    takeRateStep() {
+      const step = this.lastRateStep;
+      this.lastRateStep = 0;
+      return step;
+    }
+  };
+
+  // src/library.ts
+  function scoreOf(item) {
+    return parseFloat(String(item.rating));
+  }
+  function shelfKey(item) {
+    return String(item.sort_title || item.title || "").toLowerCase();
+  }
+  function byName(a, b) {
+    const ka = shelfKey(a);
+    const kb = shelfKey(b);
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  }
+  var LibraryModel = class {
+    constructor() {
+      this.items = [];
+      this._genre = "";
+      this._minScore = 0;
+      this._ready = false;
+      this._sort = "name";
+      this.cache = null;
+      this._facets = { genres: [], langs: [] };
+      this.scoreOf = scoreOf;
+    }
+    get all() {
+      return this.items;
+    }
+    get facets() {
+      return this._facets;
+    }
+    get genre() {
+      return this._genre;
+    }
+    get minScore() {
+      return this._minScore;
+    }
+    get ready() {
+      return this._ready;
+    }
+    get sort() {
+      return this._sort;
+    }
+    setItems(items) {
+      this.items = items;
+      this.computeFacets();
+      this.cache = null;
+    }
+    setGenre(genre) {
+      if (genre && this._facets.genres.indexOf(genre) < 0) {
+        genre = "";
+      }
+      if (genre !== this._genre) {
+        this._genre = genre;
+        this.cache = null;
+      }
+    }
+    setMinScore(score) {
+      if (score !== this._minScore) {
+        this._minScore = score;
+        this.cache = null;
+      }
+    }
+    setReady(ready) {
+      if (ready !== this._ready) {
+        this._ready = ready;
+        this.cache = null;
+      }
+    }
+    setSort(sort) {
+      if (sort !== this._sort) {
+        this._sort = sort;
+        this.cache = null;
+      }
+    }
+    clearFilters() {
+      this.setGenre("");
+      this.setMinScore(0);
+      this.setReady(false);
+    }
+    filtersOn() {
+      return !!this._genre || this._minScore > 0 || this._ready;
+    }
+    /** The films the current filter and sort leave on the grid. Memoised. */
+    visible() {
+      if (this.cache !== null) {
+        return this.cache;
+      }
+      const out = [];
+      for (const item of this.items) {
+        if (this.matches(item)) {
+          out.push(item);
+        }
+      }
+      this.sortInPlace(out);
+      this.cache = out;
+      return out;
+    }
+    /** How many films pass an arbitrary predicate, for the filter-sheet counts. */
+    count(predicate) {
+      let n = 0;
+      for (const item of this.items) {
+        if (predicate(item)) {
+          n++;
+        }
+      }
+      return n;
+    }
+    matches(item) {
+      if (item.hidden) {
+        return false;
+      }
+      if (this._genre && (item.genres || []).indexOf(this._genre) < 0) {
+        return false;
+      }
+      if (this._minScore > 0 && !(scoreOf(item) >= this._minScore)) {
+        return false;
+      }
+      if (this._ready && !(item.audio_langs || []).length) {
+        return false;
+      }
+      return true;
+    }
+    sortInPlace(items) {
+      if (this._sort === "name") {
+        return;
+      }
+      const dir = this._sort === "year-asc" ? 1 : -1;
+      items.sort((a, b) => {
+        const ya = parseInt(String(a.year), 10);
+        const yb = parseInt(String(b.year), 10);
+        const na = isNaN(ya);
+        const nb = isNaN(yb);
+        if (na || nb) {
+          return na && nb ? byName(a, b) : na ? 1 : -1;
+        }
+        return ya === yb ? byName(a, b) : (ya - yb) * dir;
+      });
+    }
+    computeFacets() {
+      const genres = /* @__PURE__ */ new Set();
+      const langs = /* @__PURE__ */ new Set();
+      for (const item of this.items) {
+        if (item.genres) {
+          for (const g of item.genres) {
+            genres.add(g);
+          }
+        }
+        if (item.audio_langs) {
+          for (const code of item.audio_langs) {
+            langs.add(code);
+          }
+        }
+      }
+      this._facets = {
+        genres: [...genres].sort(),
+        langs: [...langs].sort()
+      };
+      if (this._genre && this._facets.genres.indexOf(this._genre) < 0) {
+        this._genre = "";
+      }
+    }
+  };
+
+  // src/net.ts
+  var ApiClient = class {
+    constructor(fetchFn) {
+      this.fetchFn = fetchFn;
+    }
+    async status(header) {
+      const init = header ? { headers: { "X-Playstick-Sync": header } } : void 0;
+      const r = await this.fetchFn("/api/status", init);
+      return await r.json();
+    }
+    async library() {
+      const r = await this.fetchFn("/api/library");
+      return await r.json();
+    }
+    async time() {
+      const r = await this.fetchFn("/api/time");
+      return await r.json();
+    }
+    async post(path, body) {
+      const r = await this.fetchFn(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body != null ? body : {})
+      });
+      const data = await r.json();
+      return { ok: r.ok, data };
+    }
+    play(id) {
+      return this.post("/api/play", { id });
+    }
+    pause() {
+      return this.post("/api/pause");
+    }
+    resume() {
+      return this.post("/api/resume");
+    }
+    stop() {
+      return this.post("/api/stop");
+    }
+    volume(delta) {
+      return this.post("/api/volume", { delta });
+    }
+  };
+
+  // src/dom.ts
+  function h(doc, tag, a = {}, kids = []) {
+    const el = doc.createElement(tag);
+    if (a.id !== void 0) {
+      el.id = a.id;
+    }
+    if (a.class !== void 0) {
+      el.className = a.class;
+    }
+    if (a.text !== void 0) {
+      el.textContent = a.text;
+    }
+    if (a.html !== void 0) {
+      el.innerHTML = a.html;
+    }
+    if (a.type !== void 0) {
+      el.type = a.type;
+    }
+    if (a.aria !== void 0) {
+      el.setAttribute("aria-label", a.aria);
+    }
+    if (a.role !== void 0) {
+      el.setAttribute("role", a.role);
+    }
+    if (a.modal) {
+      el.setAttribute("aria-modal", "true");
+    }
+    if (a.hidden !== void 0) {
+      el.hidden = a.hidden;
+    }
+    if (a.alt !== void 0) {
+      el.alt = a.alt;
+    }
+    if (a.onTap) {
+      el.addEventListener("click", a.onTap);
+    }
+    for (const kid of kids) {
+      el.appendChild(kid);
+    }
+    return el;
+  }
+  function grip(doc) {
+    return h(doc, "div", { class: "grip" });
+  }
+  function head(doc, text, id) {
+    return h(doc, "h2", { id, text });
+  }
+  function setText(el, text) {
+    if (el.textContent !== text) {
+      el.textContent = text;
+    }
+  }
+  function toggleClass(el, cls, on) {
+    el.classList.toggle(cls, on);
+  }
+  var Grid = class {
+    constructor(doc, parent, stamp, onPlay, now = Date.now) {
+      this.doc = doc;
+      this.parent = parent;
+      this.stamp = stamp;
+      this.onPlay = onPlay;
+      this.now = now;
+      this.tiles = /* @__PURE__ */ new Map();
+    }
+    /** Bring the grid into line with `items`, keyed by id, minimal moves. */
+    update(items) {
+      const parent = this.parent;
+      if (this.tiles.size > items.length) {
+        const wanted = /* @__PURE__ */ new Set();
+        for (const it of items) {
+          wanted.add(it.id);
+        }
+        for (const [id, tile] of this.tiles) {
+          if (!wanted.has(id)) {
+            tile.root.remove();
+            this.tiles.delete(id);
+          }
+        }
+      }
+      for (let idx = 0; idx < items.length; idx++) {
+        const it = items[idx];
+        let tile = this.tiles.get(it.id);
+        if (!tile) {
+          tile = this.make(it);
+          this.tiles.set(it.id, tile);
+        } else if (tile.title !== it.title) {
+          tile.label.textContent = it.title;
+          tile.title = it.title;
+        }
+        if (it.has_thumb && !tile.hasThumb) {
+          tile.img.src = this.stamp("/api/thumb/" + it.id) + "&t=" + this.now();
+        }
+        tile.hasThumb = !!it.has_thumb;
+        const current = parent.childNodes[idx];
+        if (current !== tile.root) {
+          parent.insertBefore(tile.root, current != null ? current : null);
+        }
+      }
+    }
+    /** Number of live tile nodes, for the churn tests. */
+    get size() {
+      return this.tiles.size;
+    }
+    make(it) {
+      const root = this.doc.createElement("button");
+      root.className = "tile";
+      root.type = "button";
+      const img = this.doc.createElement("img");
+      img.src = this.stamp("/api/thumb/" + it.id);
+      img.alt = "";
+      img.loading = "lazy";
+      const label = this.doc.createElement("span");
+      label.textContent = it.title;
+      root.appendChild(img);
+      root.appendChild(label);
+      const id = it.id;
+      root.addEventListener("click", () => this.onPlay(id));
+      return { root, img, label, title: it.title, hasThumb: !!it.has_thumb };
+    }
+  };
+
+  // src/format.ts
+  function timeLeft(seconds) {
+    seconds = Math.max(0, Math.round(seconds));
+    const h2 = Math.floor(seconds / 3600);
+    const m = Math.round(seconds % 3600 / 60);
+    if (h2 && m) {
+      return `${h2} h ${m} min left`;
+    }
+    if (h2) {
+      return `${h2} h left`;
+    }
+    return `${m} min left`;
+  }
+  function barWidth(position, duration) {
+    if (!(duration > 0)) {
+      return "0";
+    }
+    const pct = Math.max(0, Math.min(100, 100 * position / duration));
+    return pct.toFixed(1) + "%";
+  }
+
+  // src/views.ts
+  var PLAY_GLYPH = "▶";
+  var PAUSE_GLYPH = "❙❙";
+  var BANNER_CSS = `
+#banner {
+  display: none; margin: 12px 0 4px; padding: 14px 16px; border-radius: 14px;
+  background: #2a2317; color: #ffd79a; font-size: 17px; line-height: 1.35;
+}
+#banner.on { display: block; }
+`;
+  var PREPARING_CSS = `
+#preparing { text-align: center; }
+#prepArt {
+  width: min(50vw, 240px); aspect-ratio: 2 / 3; margin: 22px auto 0;
+  border-radius: 14px; background: var(--card); object-fit: cover; display: block;
+}
+#prepTitle {
+  font-size: 24px; font-weight: 700; margin: 18px 8px 6px; line-height: 1.2;
+}
+#prepStep { color: var(--accent); font-size: 19px; min-height: 27px; }
+/* Indeterminate, and that is the honest choice rather than a missing feature.
+   There is no percentage to report: the lamp answers when it answers, and a
+   bar that crept to nine tenths and stopped would be a lie a child can see
+   through -- the second time it happens they stop believing the screen. */
+#prepBar {
+  height: 6px; border-radius: 3px; background: #26262e;
+  margin: 24px 4px 0; overflow: hidden;
+}
+#prepBar i {
+  display: block; height: 100%; width: 38%; border-radius: 3px;
+  background: var(--accent); animation: sweep 1.7s ease-in-out infinite;
+}
+@keyframes sweep {
+  from { transform: translateX(-110%); }
+  to   { transform: translateX(275%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #prepBar i { animation: none; width: 100%; opacity: .45; }
+}
+/* Deliberately not the red STOP. Nothing has gone wrong and nothing is being
+   interrupted -- this is changing your mind, and it should not look like an
+   emergency stop on a film that has not started. */
+#prepCancel {
+  display: block; width: 100%; margin: 32px auto 0; max-width: 420px;
+  min-height: 84px; border-radius: 20px; background: var(--card);
+  color: var(--dim); font-size: 22px; font-weight: 650;
+  transition: transform .08s ease;
+}
+#prepCancel:active { transform: scale(.97); }
+`;
+  var PLAYING_CSS = `
+#playing { text-align: center; }
+#nowTitle {
+  font-size: 26px; font-weight: 700; margin: 26px 8px 4px; line-height: 1.2;
+}
+#nowSub { color: var(--dim); font-size: 17px; margin-bottom: 26px; }
+#bar { height: 6px; border-radius: 3px; background: #26262e; margin: 0 4px 30px; overflow: hidden; }
+#barFill { height: 100%; width: 0; background: var(--accent); transition: width .8s linear; }
+
+#toggle {
+  width: min(46vw, 220px); aspect-ratio: 1; border-radius: 50%;
+  background: var(--accent); color: #06121f;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: min(20vw, 96px); line-height: 1;
+  transition: transform .08s ease;
+}
+#toggle:active { transform: scale(.94); }
+
+#stop {
+  display: block; width: 100%; margin: 34px auto 0; max-width: 420px;
+  min-height: 96px; border-radius: 20px; background: var(--stop);
+  font-size: 26px; font-weight: 700; letter-spacing: .5px;
+}
+#stop:active { transform: scale(.97); }
+
+#volume { display: none; margin: 24px auto 0; max-width: 420px; gap: 14px; }
+#volume.on { display: flex; }
+#volume button {
+  flex: 1; min-height: 72px; border-radius: 18px; background: var(--card);
+  font-size: 32px; font-weight: 700;
+}
+`;
+  var ViewSwitcher = class {
+    constructor(views) {
+      this.views = views;
+      this.current = "library";
+      this.paint();
+    }
+    get shown() {
+      return this.current;
+    }
+    show(name) {
+      if (name === this.current) {
+        return;
+      }
+      this.current = name;
+      this.paint();
+    }
+    paint() {
+      const name = this.current;
+      toggleClass(this.views.library, "on", name === "library");
+      toggleClass(this.views.preparing, "on", name === "preparing");
+      toggleClass(this.views.playing, "on", name === "playing");
+      toggleClass(this.views.filterBtn, "on", name === "library");
+    }
+  };
+  var Banner = class {
+    constructor(doc, now = Date.now) {
+      this.now = now;
+      this.hold = 0;
+      this.root = h(doc, "div", { id: "banner" });
+    }
+    /**
+     * Show a message, or clear it with "". A hold keeps a deliberate message (a
+     * refusal) up for its full time rather than letting the next status poll wipe
+     * it a second later -- the one message that explains why nothing happened must
+     * be readable.
+     */
+    show(text, holdMs = 0) {
+      if (text) {
+        setText(this.root, text);
+        this.root.classList.add("on");
+        if (holdMs) {
+          this.hold = this.now() + holdMs;
+        }
+        return;
+      }
+      if (this.now() < this.hold) {
+        return;
+      }
+      this.root.classList.remove("on");
+    }
+  };
+  var PreparingView = class {
+    constructor(doc, stamp) {
+      this.stamp = stamp;
+      this.artId = "";
+      this.art = h(doc, "img", { id: "prepArt", alt: "" });
+      this.title = h(doc, "div", { id: "prepTitle" });
+      this.step = h(doc, "div", { id: "prepStep" });
+      this.cancel = h(doc, "button", {
+        id: "prepCancel",
+        type: "button",
+        text: "Never mind"
+      });
+      this.root = h(doc, "div", { id: "preparing", class: "view" }, [
+        this.art,
+        this.title,
+        this.step,
+        h(doc, "div", { id: "prepBar" }, [h(doc, "i")]),
+        this.cancel
+      ]);
+    }
+    /** The tap that started a film, drawn before the POST answers so the right
+     * poster appears immediately. */
+    begin(title, id) {
+      setText(this.title, title);
+      this.artId = id;
+      this.art.src = this.stamp("/api/thumb/" + id);
+      setText(this.step, "Getting ready…");
+    }
+    /** A preparing status from the server (the film may have been picked on
+     * another phone, so the title and poster come from the poll). */
+    apply(s) {
+      var _a;
+      if (s.title) {
+        setText(this.title, s.title);
+      }
+      if (s.id && this.artId !== s.id) {
+        this.artId = s.id;
+        this.art.src = this.stamp("/api/thumb/" + s.id);
+      }
+      setText(this.step, ((_a = s.prepare) == null ? void 0 : _a.label) || "Getting ready…");
+    }
+  };
+  var PlayingView = class {
+    constructor(doc) {
+      this.title = h(doc, "div", { id: "nowTitle" });
+      this.sub = h(doc, "div", { id: "nowSub" });
+      this.bar = h(doc, "div", { id: "barFill" });
+      this.toggle = h(doc, "button", {
+        id: "toggle",
+        aria: "Play or pause",
+        html: PAUSE_GLYPH
+      });
+      this.stop = h(doc, "button", { id: "stop", text: "STOP" });
+      this.volDown = h(doc, "button", { id: "volDown", aria: "Quieter", text: "−" });
+      this.volUp = h(doc, "button", { id: "volUp", aria: "Louder", text: "+" });
+      this.volume = h(doc, "div", { id: "volume" }, [this.volDown, this.volUp]);
+      this.root = h(doc, "div", { id: "playing", class: "view" }, [
+        this.title,
+        this.sub,
+        h(doc, "div", { id: "bar" }, [this.bar]),
+        this.toggle,
+        this.stop,
+        this.volume
+      ]);
+    }
+    apply(s) {
+      var _a, _b;
+      const paused = s.state === "paused";
+      if (s.title) {
+        setText(this.title, s.title);
+      }
+      this.toggle.innerHTML = paused ? PLAY_GLYPH : PAUSE_GLYPH;
+      toggleClass(this.volume, "on", !!s.audio);
+      const duration = (_a = s.duration) != null ? _a : 0;
+      const position = (_b = s.position) != null ? _b : 0;
+      if (duration > 0) {
+        this.bar.style.width = barWidth(position, duration);
+        setText(this.sub, paused ? "Paused" : timeLeft(duration - position));
+      } else {
+        setText(this.sub, paused ? "Paused" : "Playing");
+      }
+    }
+  };
+
+  // src/presenter.ts
+  var StatusPresenter = class {
+    constructor(doc, deps) {
+      /** The state the last poll reported, read by the controls to decide what the
+       * play/pause button does. */
+      this.state = "idle";
+      this.banner = new Banner(doc, deps.now);
+      this.preparing = new PreparingView(doc, deps.stamp);
+      this.playing = new PlayingView(doc);
+      this.views = new ViewSwitcher({
+        library: deps.library,
+        preparing: this.preparing.root,
+        playing: this.playing.root,
+        filterBtn: deps.filterBtn
+      });
+      this.grid = deps.grid;
+      this.reload = deps.reload;
+    }
+    apply(s) {
+      var _a;
+      this.state = s.state;
+      this.reload.consider(s.build, s.state);
+      if (s.state === "preparing") {
+        this.views.show("preparing");
+        this.preparing.apply(s);
+        return;
+      }
+      if (s.state === "playing" || s.state === "paused") {
+        this.views.show("playing");
+        this.banner.show(
+          ((_a = s.projector) == null ? void 0 : _a.fault) ? "The movie is playing, but I couldn't reach the projector." : ""
+        );
+        this.playing.apply(s);
+        return;
+      }
+      this.views.show("library");
+      toggleClass(this.grid, "blocked", s.state === "airplay");
+      if (s.notice) {
+        this.banner.show(s.notice);
+      } else if (s.state === "airplay") {
+        this.banner.show(
+          "Someone is using the projector to show their phone. The movies come back when they stop."
+        );
+      } else if (s.state === "unavailable") {
+        this.banner.show("Can't reach the movies right now — the NAS may be off.");
+      } else {
+        this.banner.show("");
+      }
+    }
+  };
+
+  // src/library-view.ts
+  var LIBRARY_CSS = `
+h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .2px; }
+#grid {
+  display: grid; gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+.tile {
+  display: block; width: 100%; text-align: left;
+  border-radius: 16px; overflow: hidden; background: var(--card);
+  transition: transform .08s ease;
+}
+.tile:active { transform: scale(.96); }
+.tile img {
+  display: block; width: 100%; aspect-ratio: 2 / 3; object-fit: cover;
+  background: #202028;
+}
+.tile span {
+  display: block; padding: 10px 10px 12px; font-size: 16px; line-height: 1.25;
+  font-weight: 600;
+  /* Two lines, then ellipsis: a long filename must not push the grid around. */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+#grid.blocked { opacity: .35; pointer-events: none; }
+#empty { color: var(--dim); font-size: 18px; padding: 40px 8px; line-height: 1.5; }
+/* The grid is empty because of a filter, not because the library is. Big,
+   because it is the whole way back: a child who has hidden every film must not
+   have to find the funnel again to undo it. */
+#emptyClear {
+  display: none; margin: 8px auto 0; min-height: 68px; width: 100%;
+  max-width: 420px; border-radius: 18px; background: var(--card);
+  font-size: 19px; font-weight: 650;
+}
+#emptyClear.on { display: block; }
+
+#filterChip {
+  display: none; align-items: center; gap: 10px;
+  margin: 0 4px 12px; padding: 12px 16px; border-radius: 14px;
+  background: var(--card); font-size: 17px; width: 100%; text-align: left;
+}
+#filterChip.on { display: flex; }
+#filterChip .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+#filterChip .x { color: var(--dim); font-size: 20px; }
+`;
+  var LibraryView = class {
+    constructor(doc, model, stamp, onPlay, filterBtn, now = Date.now) {
+      this.model = model;
+      this.filterBtn = filterBtn;
+      this.chipText = "";
+      this.doc = doc;
+      this.gridEl = h(doc, "div", { id: "grid" });
+      this.grid = new Grid(doc, this.gridEl, stamp, onPlay, now);
+      this.empty = h(doc, "div", { id: "empty", hidden: true });
+      this.emptyClear = h(doc, "button", {
+        id: "emptyClear",
+        type: "button",
+        text: "Show everything",
+        onTap: () => this.clearFilters()
+      });
+      this.chip = h(doc, "button", {
+        id: "filterChip",
+        type: "button",
+        onTap: () => this.clearFilters()
+      });
+      this.root = h(doc, "div", { id: "library", class: "view on" }, [
+        h(doc, "h1", { text: "Playstick" }),
+        this.chip,
+        this.gridEl,
+        this.empty,
+        this.emptyClear
+      ]);
+    }
+    render() {
+      const items = this.model.visible();
+      this.grid.update(items);
+      const emptyByFilter = this.model.filtersOn() && this.model.all.length > 0;
+      this.empty.hidden = items.length > 0;
+      if (!items.length) {
+        setText(
+          this.empty,
+          emptyByFilter ? "Nothing matches what you picked." : "No movies found yet."
+        );
+      }
+      toggleClass(this.emptyClear, "on", items.length === 0 && emptyByFilter);
+      this.paintChip();
+    }
+    /** The daemon could not reach the NAS: say so where the grid would be. */
+    unavailable() {
+      this.empty.hidden = false;
+      setText(this.empty, "Can't reach the movies right now.");
+      toggleClass(this.emptyClear, "on", false);
+    }
+    clearFilters() {
+      this.model.clearFilters();
+      this.render();
+    }
+    paintChip() {
+      const on = this.model.filtersOn();
+      toggleClass(this.chip, "on", on);
+      toggleClass(this.filterBtn, "live", on);
+      const text = on ? this.describe() : "";
+      if (text === this.chipText) {
+        return;
+      }
+      this.chipText = text;
+      this.chip.textContent = "";
+      if (!on) {
+        return;
+      }
+      this.chip.appendChild(h(this.doc, "span", { class: "grow", text }));
+      this.chip.appendChild(h(this.doc, "span", { class: "x", html: "✕" }));
+    }
+    describe() {
+      const parts = [];
+      if (this.model.genre) {
+        parts.push(this.model.genre);
+      }
+      if (this.model.minScore > 0) {
+        parts.push(this.model.minScore + "+");
+      }
+      if (this.model.ready) {
+        parts.push("headphones");
+      }
+      return parts.join(" · ");
+    }
+  };
+
+  // src/controls.ts
+  var Controls = class {
+    constructor(buttons, api, deps) {
+      this.api = api;
+      this.deps = deps;
+      this.busyUntil = 0;
+      var _a;
+      this.now = (_a = deps.now) != null ? _a : Date.now;
+      buttons.toggle.addEventListener("click", () => {
+        if (!this.guard()) {
+          return;
+        }
+        const req = this.deps.stateOf() === "paused" ? this.api.resume() : this.api.pause();
+        void req.then((r) => this.applyIfOk(r));
+      });
+      const stop = () => {
+        if (!this.guard()) {
+          return;
+        }
+        this.deps.toLibrary();
+        void this.api.stop().then((r) => this.applyIfOk(r));
+      };
+      buttons.stop.addEventListener("click", stop);
+      buttons.cancel.addEventListener("click", stop);
+      buttons.volDown.addEventListener("click", () => {
+        void this.api.volume(-10);
+      });
+      buttons.volUp.addEventListener("click", () => {
+        void this.api.volume(10);
+      });
+    }
+    guard() {
+      const now = this.now();
+      if (now < this.busyUntil) {
+        return false;
+      }
+      this.busyUntil = now + 800;
+      return true;
+    }
+    applyIfOk(r) {
+      if (r.ok) {
+        this.deps.apply(r.data);
+      }
+    }
+  };
+
+  // src/audio.ts
+  var AudioSession = class {
+    constructor(deps) {
+      this.deps = deps;
+      this.filmId = "";
+      this.tracks = [];
+      this.trackN = null;
+      this.trackOffset = 0;
+      this.phoneAudio = true;
+      this.needGesture = false;
+      const s = deps.storage;
+      this.dest = s.getItem("ps.snd.dest") || "mute";
+      this.lang = s.getItem("ps.snd.lang") || "";
+      this.trimMs = parseInt(s.getItem("ps.snd.trim") || "0", 10) || 0;
+    }
+    get listening() {
+      return this.dest === "device";
+    }
+    get destination() {
+      return this.dest;
+    }
+    get language() {
+      return this.lang;
+    }
+    get trim() {
+      return this.trimMs;
+    }
+    get currentTrack() {
+      return this.trackN;
+    }
+    get availableTracks() {
+      return this.tracks;
+    }
+    get filmReady() {
+      return !!this.filmId;
+    }
+    get phoneAudioEnabled() {
+      return this.phoneAudio;
+    }
+    get awaitingGesture() {
+      return this.needGesture;
+    }
+    get playing() {
+      return this.listening && this.trackN !== null && !this.deps.el.paused;
+    }
+    /** Fold a status poll into the session: film changes, track availability, and
+     * the timeline the correction loop reads. */
+    onStatus(s) {
+      var _a, _b, _c, _d, _e, _f;
+      this.phoneAudio = s.phone_audio !== false;
+      const wasFilm = this.filmId;
+      this.filmId = s.id || "";
+      this.tracks = s.tracks || [];
+      if (this.filmId !== wasFilm) {
+        this.stop();
+      }
+      const playable = this.listening && this.phoneAudio && !!this.filmId && this.tracks.length > 0 && (s.state === "playing" || s.state === "paused");
+      if (!playable) {
+        if (this.trackN !== null) {
+          this.stop();
+        }
+        this.deps.film.set(null);
+        (_b = (_a = this.deps).onChange) == null ? void 0 : _b.call(_a);
+        return;
+      }
+      if (this.trackN === null) {
+        this.load(this.pickTrack());
+      }
+      const tc = s.timecode;
+      if (!tc || typeof tc.tc !== "number") {
+        (_d = (_c = this.deps).onChange) == null ? void 0 : _d.call(_c);
+        return;
+      }
+      if (this.deps.film.set(tc)) {
+        this.deps.sync.replace();
+      }
+      if (this.deps.el.paused && !this.needGesture && tc.rate && this.deps.clock.hasFix()) {
+        this.play();
+      }
+      (_f = (_e = this.deps).onChange) == null ? void 0 : _f.call(_e);
+    }
+    /** One correction tick, driven at SYNC.tick. */
+    correct(now) {
+      const el = this.deps.el;
+      if (!this.listening || el.paused) {
+        this.deps.sync.seekPending = true;
+        return;
+      }
+      if (this.deps.film.rate === 0) {
+        el.pause();
+        this.deps.sync.replace();
+        return;
+      }
+      const want = targetFor(this.deps.film.now(now), this.trackOffset, this.trimMs);
+      if (want === null) {
+        if (this.deps.sync.seekPending) {
+          el.pause();
+        }
+        return;
+      }
+      this.deps.sync.correct(el, now, want, this.deps.clock.ratio);
+    }
+    /** The tap on "This device": the gesture iOS grants the element, so the play
+     * happens inside it. */
+    enableDevice() {
+      this.setDest("device");
+    }
+    setDest(dest) {
+      var _a, _b;
+      this.dest = dest;
+      this.deps.storage.setItem("ps.snd.dest", dest);
+      if (dest === "device") {
+        this.deps.sync.seekPending = true;
+        if (this.filmId && this.tracks.length) {
+          if (this.trackN === null) {
+            this.load(this.pickTrack());
+          }
+          this.play();
+        } else {
+          void this.deps.el.play().then(() => this.deps.el.pause()).catch(() => {
+          });
+        }
+      } else {
+        this.stop();
+      }
+      (_b = (_a = this.deps).onChange) == null ? void 0 : _b.call(_a);
+    }
+    setTrack(track) {
+      var _a, _b;
+      this.lang = track.lang;
+      this.deps.storage.setItem("ps.snd.lang", track.lang);
+      if (!this.listening) {
+        this.setDest("device");
+      }
+      if (track.n !== this.trackN) {
+        this.load(track.n);
+        this.play();
+      }
+      (_b = (_a = this.deps).onChange) == null ? void 0 : _b.call(_a);
+    }
+    /** Remember a language before any film has started. */
+    preferLanguage(code) {
+      var _a, _b;
+      this.lang = code;
+      this.deps.storage.setItem("ps.snd.lang", code);
+      (_b = (_a = this.deps).onChange) == null ? void 0 : _b.call(_a);
+    }
+    nudgeTrim(deltaMs) {
+      var _a, _b;
+      this.trimMs = Math.max(-1e3, Math.min(1e3, this.trimMs + deltaMs));
+      this.deps.storage.setItem("ps.snd.trim", String(this.trimMs));
+      this.deps.sync.seekPending = true;
+      (_b = (_a = this.deps).onChange) == null ? void 0 : _b.call(_a);
+    }
+    /** iOS refused autoplay: the page shows a tap target, and this is its tap. */
+    acceptGesture() {
+      this.needGesture = false;
+      this.deps.sync.seekPending = true;
+      if (this.trackN === null && this.tracks.length) {
+        this.load(this.pickTrack());
+      }
+      this.play();
+    }
+    /** The NAS lost the file under a playing track. */
+    onElementError() {
+      if (!this.listening || this.trackN === null) {
+        return;
+      }
+      this.stop();
+    }
+    pickTrack() {
+      for (const t of this.tracks) {
+        if (this.lang && t.lang === this.lang) {
+          return t.n;
+        }
+      }
+      for (const t of this.tracks) {
+        if (t.default) {
+          return t.n;
+        }
+      }
+      return this.tracks.length ? this.tracks[0].n : 0;
+    }
+    load(n) {
+      const track = this.tracks.find((t) => t.n === n);
+      if (!track || !this.filmId) {
+        return;
+      }
+      this.trackN = n;
+      this.trackOffset = track.offset || 0;
+      this.deps.sync.reset(this.deps.el);
+      this.deps.el.setSrc(this.deps.stamp("/api/audio/" + this.filmId + "/" + n));
+      this.deps.el.load();
+    }
+    play() {
+      void this.deps.el.play().then(() => {
+        var _a, _b;
+        this.needGesture = false;
+        (_b = (_a = this.deps).onChange) == null ? void 0 : _b.call(_a);
+      }).catch(() => {
+        var _a, _b;
+        this.needGesture = true;
+        (_b = (_a = this.deps).onChange) == null ? void 0 : _b.call(_a);
+      });
+    }
+    stop() {
+      this.trackN = null;
+      if (!this.deps.el.paused) {
+        this.deps.el.pause();
+      }
+      if (this.deps.el.getSrc()) {
+        this.deps.el.clearSrc();
+        this.deps.el.load();
+      }
+      this.deps.sync.replace();
+    }
+  };
+
+  // src/tunables.ts
+  var Tunables = class {
+    constructor(sync, clock, timing, onTickChange) {
+      const t = (code, name, label, unit, scale, min, max, step, hint, get, set, onSet) => ({ code, name, label, unit, scale, min, max, step, hint, get, set, def: get(), ...onSet ? { onSet } : {} });
+      this.items = [
+        t(
+          "sl",
+          "seekLimit",
+          "Seek threshold",
+          "ms",
+          1e3,
+          50,
+          3e3,
+          50,
+          "Error that gets a hard cut instead of a nudge. Must stay above what a seek costs (~250 ms) or every seek recreates the error that triggered it.",
+          () => sync.seekLimit,
+          (v) => sync.seekLimit = v
+        ),
+        t(
+          "kp",
+          "kp",
+          "Proportional gain",
+          "ppm/ms",
+          1e3,
+          0,
+          400,
+          5,
+          "Rate commanded per millisecond of error.",
+          () => sync.kp,
+          (v) => sync.kp = v
+        ),
+        t(
+          "ki",
+          "ki",
+          "Integral gain",
+          "ppm/ms/s",
+          1e3,
+          0,
+          20,
+          0.5,
+          "How fast the residual accumulates; the measured ratio does most of this job now.",
+          () => sync.ki,
+          (v) => sync.ki = v
+        ),
+        t(
+          "re",
+          "rateEps",
+          "Write deadband",
+          "ppm",
+          1e6,
+          0,
+          5e3,
+          50,
+          "Rate change too small to be worth writing; every write re-arms the iOS pipeline.",
+          () => sync.rateEps,
+          (v) => sync.rateEps = v
+        ),
+        t(
+          "rl",
+          "rateLimit",
+          "Rate clamp",
+          "ppm",
+          1e6,
+          2e3,
+          5e4,
+          1e3,
+          "Never bend playback further than this.",
+          () => sync.rateLimit,
+          (v) => sync.rateLimit = v
+        ),
+        t(
+          "dl",
+          "driftLimit",
+          "Integrator clamp",
+          "ppm",
+          1e6,
+          50,
+          2e4,
+          50,
+          "How far the integrator alone may bend playback.",
+          () => sync.driftLimit,
+          (v) => sync.driftLimit = v
+        ),
+        t(
+          "we",
+          "writeEvery",
+          "Write spacing",
+          "s",
+          1,
+          0,
+          60,
+          1,
+          "Least time between writes to playbackRate; spacing them is what stops the loop feeding itself.",
+          () => sync.writeEvery,
+          (v) => sync.writeEvery = v
+        ),
+        t(
+          "el",
+          "errLp",
+          "Error smoothing",
+          "%",
+          100,
+          1,
+          100,
+          1,
+          "Weight given to each fresh error sample; 100% is no filter.",
+          () => sync.errLp,
+          (v) => sync.errLp = v
+        ),
+        t(
+          "te",
+          "every",
+          "Clock sample interval",
+          "s",
+          1,
+          1,
+          60,
+          1,
+          "Seconds between /api/time samples once locked.",
+          () => timing.every,
+          (v) => timing.every = v
+        ),
+        t(
+          "oa",
+          "offMaxAge",
+          "Offset shelf life",
+          "s",
+          1,
+          5,
+          300,
+          5,
+          "How old the winning clock sample may be before it is dropped.",
+          () => clock.offMaxAge,
+          (v) => clock.offMaxAge = v
+        ),
+        t(
+          "rw",
+          "ratioSpan",
+          "Ratio fit window",
+          "s",
+          1,
+          30,
+          600,
+          30,
+          "Seconds of clock samples the crystal ratio is fitted through.",
+          () => clock.ratioSpan,
+          (v) => clock.ratioSpan = v
+        ),
+        t(
+          "tk",
+          "tick",
+          "Correction interval",
+          "ms",
+          1e3,
+          50,
+          1e3,
+          50,
+          "How often the loop runs; also the stall window.",
+          () => sync.tick,
+          (v) => sync.tick = v,
+          onTickChange
+        ),
+        t(
+          "st",
+          "stall",
+          "Stall threshold",
+          "ms",
+          1e3,
+          5,
+          500,
+          5,
+          "Shortfall counted as a stall rather than jitter. Telemetry only.",
+          () => sync.stall,
+          (v) => sync.stall = v
+        )
+      ];
+    }
+    decimals(t) {
+      return t.step >= 1 ? 0 : Math.min(3, Math.ceil(-Math.log(t.step) / Math.LN10));
+    }
+    value(t) {
+      return t.get() * t.scale;
+    }
+    text(t) {
+      const s = this.value(t).toFixed(this.decimals(t));
+      return t.unit ? s + " " + t.unit : s;
+    }
+    shippedText(t) {
+      const s = (t.def * t.scale).toFixed(this.decimals(t));
+      return t.unit ? s + " " + t.unit : s;
+    }
+    changed(t) {
+      return t.get() !== t.def;
+    }
+    apply(t, shown) {
+      var _a;
+      let v = Math.round(clamp(shown, t.min, t.max) / t.step) * t.step;
+      v = parseFloat(v.toFixed(this.decimals(t) + 3));
+      t.set(v / t.scale);
+      (_a = t.onSet) == null ? void 0 : _a.call(t);
+    }
+    step(t, direction) {
+      this.apply(t, this.value(t) + direction * t.step);
+    }
+    reset() {
+      var _a;
+      for (const t of this.items) {
+        t.set(t.def);
+        (_a = t.onSet) == null ? void 0 : _a.call(t);
+      }
+    }
+    /** Load overrides from storage, but only when ?debug is on: a number tuned on
+     * one phone must not silently persist into a build that exists nowhere. */
+    load(storage, enabled) {
+      if (!enabled) {
+        return;
+      }
+      let saved = {};
+      try {
+        saved = JSON.parse(storage.getItem("ps.snd.tune") || "{}");
+      } catch (e) {
+        saved = {};
+      }
+      for (const t of this.items) {
+        const v = saved[t.name];
+        if (typeof v === "number" && isFinite(v)) {
+          this.apply(t, v);
+        }
+      }
+    }
+    save(storage) {
+      const saved = {};
+      for (const t of this.items) {
+        if (this.changed(t)) {
+          saved[t.name] = this.value(t);
+        }
+      }
+      try {
+        if (Object.keys(saved).length) {
+          storage.setItem("ps.snd.tune", JSON.stringify(saved));
+        } else {
+          storage.removeItem("ps.snd.tune");
+        }
+      } catch (e) {
+      }
+    }
+    /** Which numbers were NOT the shipped ones, for the journal. Empty on a stock
+     * build, and the difference between a capture readable six weeks later and one
+     * that is not. */
+    digest() {
+      const parts = [];
+      for (const t of this.items) {
+        if (this.changed(t)) {
+          parts.push(t.code + ":" + this.value(t).toFixed(this.decimals(t)));
+        }
+      }
+      return parts.join(",");
+    }
+  };
+
+  // src/telemetry.ts
+  function num(v, places) {
+    return typeof v === "number" && isFinite(v) ? v.toFixed(places) : "";
+  }
+  var Telemetry = class {
+    // signed peak error since the last line
+    constructor(idGen = () => Math.random().toString(16).slice(2, 8)) {
+      this.base = { writes: 0, seeks: 0, waits: 0, buffering: 0 };
+      this.errPeak = 0;
+      this.id = idGen();
+    }
+    /** Fold in a per-tick error sample, so the line reports the worst the poll
+     * interval saw rather than the one instant it happened to look. */
+    recordErrMs(errMs) {
+      if (Math.abs(errMs) > Math.abs(this.errPeak)) {
+        this.errPeak = errMs;
+      }
+    }
+    /** Build the header for this poll and reset the deltas it consumed. */
+    build(s) {
+      const head2 = `v=2;id=${this.id};t=${s.now.toFixed(1)}`;
+      if (!s.listening) {
+        return head2 + ";st=off";
+      }
+      if (!s.hasSrc) {
+        return head2 + ";st=idle";
+      }
+      const line = head2 + ";st=" + (s.paused ? "pause" : "play") + ";hid=" + (s.hidden ? 1 : 0) + ";ct=" + num(s.currentTime, 2) + ";err=" + num(s.errMs, 0) + ";errp=" + num(this.errPeak, 0) + ";rate=" + num(s.ratePpm, 0) + ";ratio=" + num(s.ratioPpm, 0) + ";drift=" + num(s.driftPpm, 0) + ";off=" + num(s.offsetMs, 1) + ";ort=" + num(s.rttMs, 0) + ";ns=" + s.samples + ";ep=" + (s.epoch === null ? "" : s.epoch) + ";w=" + (s.writes - this.base.writes) + ";sk=" + (s.seeks - this.base.seeks) + ";wt=" + (s.waits - this.base.waits) + ";bf=" + (s.buffering - this.base.buffering) + ";tun=" + s.digest;
+      this.base = { writes: s.writes, seeks: s.seeks, waits: s.waits, buffering: s.buffering };
+      this.errPeak = 0;
+      return line;
+    }
+  };
+
+  // src/sheet.ts
+  var SHEET_CSS = `
+#filterBtn, #audioBtn {
+  position: fixed; z-index: 20;
+  top: calc(10px + env(safe-area-inset-top));
+  width: 52px; height: 52px; border-radius: 50%;
+  background: var(--card); color: var(--ink);
+  display: none; align-items: center; justify-content: center;
+}
+#filterBtn { right: 72px; }
+#audioBtn { right: 12px; }
+#filterBtn.on, #audioBtn.on { display: inline-flex; }
+#filterBtn.live, #audioBtn.live { background: var(--accent); color: #06121f; }
+#filterBtn svg { width: 24px; height: 24px; display: block; }
+#audioBtn svg { width: 26px; height: 26px; display: block; }
+
+#sheetScrim {
+  position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.6);
+  display: none;
+}
+#sheetScrim.on { display: block; }
+
+/* Two sheets -- Sound and Filters -- sharing one scrim and one set of rules.
+   Only ever one of them open at a time. */
+.sheet {
+  position: fixed; z-index: 31; left: 0; right: 0; bottom: 0;
+  background: #1b1b21; border-radius: 22px 22px 0 0;
+  padding: 8px 12px calc(18px + env(safe-area-inset-bottom));
+  max-height: 82vh; overflow-y: auto;
+  display: none;
+}
+.sheet.on { display: block; }
+.grip {
+  width: 44px; height: 5px; border-radius: 3px; background: #3a3a45;
+  margin: 8px auto 4px;
+}
+.sheet h2 {
+  font-size: 14px; font-weight: 700; letter-spacing: .8px;
+  text-transform: uppercase; color: var(--dim); margin: 18px 6px 8px;
+}
+/* Rows are big for the same reason the poster tiles are: a child in a dark
+   room is the person using this. */
+.row {
+  display: flex; align-items: center; gap: 14px; width: 100%;
+  min-height: 62px; padding: 0 14px; border-radius: 14px;
+  font-size: 19px; text-align: left;
+}
+.row:active { background: #26262e; }
+.row.sel { background: #26262e; }
+.row .tick { margin-left: auto; color: var(--accent); font-size: 22px; }
+.row .sub { display: block; font-size: 14px; color: var(--dim); margin-top: 2px; }
+.row .grow { flex: 1; min-width: 0; }
+`;
+  var FUNNEL_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>';
+  function row(doc, label, sub, selected, onTap) {
+    const text = h(doc, "span", { class: "grow", text: label });
+    if (sub) {
+      text.appendChild(h(doc, "span", { class: "sub", text: sub }));
+    }
+    const kids = [text];
+    if (selected) {
+      kids.push(h(doc, "span", { class: "tick", html: "✓" }));
+    }
+    return h(
+      doc,
+      "button",
+      { class: selected ? "row sel" : "row", type: "button", onTap },
+      kids
+    );
+  }
+  var LANG_NAMES = {
+    eng: "English",
+    en: "English",
+    fin: "Suomi",
+    fi: "Suomi",
+    swe: "Svenska",
+    sv: "Svenska",
+    nor: "Norsk",
+    no: "Norsk",
+    dan: "Dansk",
+    da: "Dansk",
+    deu: "Deutsch",
+    ger: "Deutsch",
+    de: "Deutsch",
+    fra: "Français",
+    fre: "Français",
+    fr: "Français",
+    spa: "Español",
+    es: "Español",
+    ita: "Italiano",
+    it: "Italiano",
+    nld: "Nederlands",
+    dut: "Nederlands",
+    nl: "Nederlands",
+    pol: "Polski",
+    pl: "Polski",
+    rus: "Русский",
+    ru: "Русский",
+    jpn: "日本語",
+    ja: "日本語",
+    est: "Eesti",
+    et: "Eesti"
+  };
+  function langName(code, title) {
+    if (title) {
+      return title;
+    }
+    return LANG_NAMES[code] || (code && code !== "und" ? code.toUpperCase() : "Sound");
+  }
+  var SheetManager = class {
+    constructor(doc, deps) {
+      this.deps = deps;
+      this.sheet = deps.sound;
+      this.fsheet = deps.filter;
+      this.audioBtn = h(doc, "button", {
+        id: "audioBtn",
+        aria: "Sound",
+        onTap: () => this.showSound(!this.soundOpen)
+      });
+      this.filterBtn = h(doc, "button", {
+        id: "filterBtn",
+        aria: "Filter and sort",
+        html: FUNNEL_ICON,
+        onTap: () => this.showFilter(!this.filterOpen)
+      });
+      this.scrim = h(doc, "div", {
+        id: "sheetScrim",
+        onTap: () => {
+          this.showSound(false);
+          this.showFilter(false);
+        }
+      });
+    }
+    get soundOpen() {
+      return this.sheet.classList.contains("on");
+    }
+    get filterOpen() {
+      return this.fsheet.classList.contains("on");
+    }
+    showSound(on) {
+      toggleClass(this.sheet, "on", on);
+      if (on) {
+        toggleClass(this.fsheet, "on", false);
+      }
+      this.paintScrim();
+      if (on) {
+        this.deps.onSoundOpen();
+      }
+    }
+    showFilter(on) {
+      toggleClass(this.fsheet, "on", on);
+      if (on) {
+        toggleClass(this.sheet, "on", false);
+      }
+      this.paintScrim();
+      if (on) {
+        this.deps.onFilterOpen();
+      }
+    }
+    paintScrim() {
+      toggleClass(this.scrim, "on", this.soundOpen || this.filterOpen);
+    }
+  };
+
+  // src/sound-sheet.ts
+  var SOUND_CSS = `
+#sheetNote {
+  color: var(--dim); font-size: 16px; line-height: 1.45; padding: 6px 14px 2px;
+}
+
+#syncRow { display: none; align-items: center; gap: 12px; padding: 4px 8px; }
+#syncRow.on { display: flex; }
+#syncRow button {
+  width: 76px; min-height: 60px; border-radius: 16px; background: var(--card);
+  font-size: 28px; font-weight: 700;
+}
+#syncVal { flex: 1; text-align: center; font-size: 19px; font-variant-numeric: tabular-nums; }
+#syncHint { color: var(--dim); font-size: 14px; padding: 2px 14px 0; line-height: 1.4; }
+
+/* Shown when iOS refuses to start audio without a fresh tap -- after a reload,
+   or in Low Power Mode. Never a silent failure: somebody is sitting there
+   wearing headphones that are not playing. */
+#tapToListen {
+  position: fixed; z-index: 25; left: 12px; right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom));
+  min-height: 84px; border-radius: 20px; background: var(--accent);
+  color: #06121f; font-size: 22px; font-weight: 700; letter-spacing: .4px;
+  display: none;
+}
+#tapToListen.on { display: block; }
+
+#syncDebug {
+  color: var(--dim); font-size: 13px; padding: 10px 14px 0;
+  font-variant-numeric: tabular-nums; display: none;
+  /* Second line is the rolling counters, so the newline has to survive. */
+  white-space: pre-line; line-height: 1.5;
+}
+#syncDebug.on { display: block; }
+
+/* The controller's constants, editable on the phone that is hearing the
+   problem. Only ever rendered under ?debug -- see paintTune(). */
+#tuneHead, #tuneList, #tuneFoot { display: none; }
+#tuneHead.on, #tuneList.on { display: block; }
+#tuneFoot.on { display: flex; }
+.tune { display: flex; align-items: center; gap: 8px; padding: 8px 14px 0; }
+.tune .tname { flex: 1; font-size: 15px; min-width: 0; }
+.tune .tval {
+  min-width: 104px; text-align: right; font-size: 15px; color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.tune .tval.changed { color: var(--accent); font-weight: 700; }
+.tune button {
+  width: 54px; min-height: 46px; border-radius: 13px; background: var(--card);
+  font-size: 23px; font-weight: 700;
+}
+.thint { color: var(--dim); font-size: 12.5px; line-height: 1.4; padding: 3px 14px 6px; }
+#tuneFoot { gap: 10px; padding: 8px 14px 2px; }
+#tuneFoot button {
+  flex: 1; min-height: 50px; border-radius: 14px; background: var(--card);
+  font-size: 16px;
+}
+#tuneNote { color: var(--dim); font-size: 12.5px; line-height: 1.4; padding: 4px 14px 0; }
+`;
+  var SoundSheet = class {
+    constructor(doc, audio, tunables, deps) {
+      this.audio = audio;
+      this.tunables = tunables;
+      this.deps = deps;
+      this.doc = doc;
+      this.destList = h(doc, "div", { id: "destList" });
+      this.langList = h(doc, "div", { id: "langList" });
+      this.note = h(doc, "div", { id: "sheetNote" });
+      this.syncHead = head(doc, "Sync", "syncHead");
+      this.syncVal = h(doc, "span", { id: "syncVal", text: "0 ms" });
+      this.syncRow = h(doc, "div", { id: "syncRow" }, [
+        h(doc, "button", {
+          id: "syncBack",
+          aria: "Sound earlier",
+          text: "−",
+          onTap: () => this.audio.nudgeTrim(-25)
+        }),
+        this.syncVal,
+        h(doc, "button", {
+          id: "syncFwd",
+          aria: "Sound later",
+          text: "+",
+          onTap: () => this.audio.nudgeTrim(25)
+        })
+      ]);
+      this.syncHint = h(doc, "div", {
+        id: "syncHint",
+        text: "Nudge this if the words land before or after the mouths."
+      });
+      this.syncDebug = h(doc, "div", { id: "syncDebug" });
+      this.tuneHead = head(doc, "Playback parameters", "tuneHead");
+      this.tuneList = h(doc, "div", { id: "tuneList" });
+      this.tuneFoot = h(doc, "div", { id: "tuneFoot" }, [
+        h(doc, "button", {
+          id: "tuneReset",
+          type: "button",
+          text: "Reset to shipped",
+          onTap: () => {
+            this.tunables.reset();
+            this.tunables.save(this.deps.storage);
+            this.paint();
+          }
+        })
+      ]);
+      this.tuneNote = h(doc, "div", { id: "tuneNote" });
+      this.root = h(
+        doc,
+        "div",
+        {
+          id: "sheet",
+          class: "sheet",
+          role: "dialog",
+          modal: true,
+          aria: "Sound"
+        },
+        [
+          grip(doc),
+          head(doc, "Sound"),
+          this.destList,
+          head(doc, "Language"),
+          this.langList,
+          this.note,
+          this.syncHead,
+          this.syncRow,
+          this.syncHint,
+          this.syncDebug,
+          this.tuneHead,
+          this.tuneList,
+          this.tuneFoot,
+          this.tuneNote
+        ]
+      );
+      this.tapToListen = h(doc, "button", {
+        id: "tapToListen",
+        text: "TAP TO LISTEN",
+        onTap: () => {
+          toggleClass(this.tapToListen, "on", false);
+          this.audio.acceptGesture();
+        }
+      });
+    }
+    paint() {
+      var _a;
+      const audio = this.audio;
+      const listening = audio.listening;
+      this.destList.textContent = "";
+      this.destList.appendChild(
+        row(this.doc, "Mute", "", !listening, () => audio.setDest("mute"))
+      );
+      this.destList.appendChild(
+        row(
+          this.doc,
+          "This device",
+          "Headphones on this phone",
+          listening,
+          () => audio.enableDevice()
+        )
+      );
+      this.langList.textContent = "";
+      setText(this.note, "");
+      const tracks = audio.availableTracks;
+      if (!audio.phoneAudioEnabled) {
+        setText(this.note, "Headphone sound is switched off on the player.");
+      } else if (audio.filmReady && tracks.length) {
+        for (const track of tracks) {
+          const sub = ((_a = track.channels) != null ? _a : 0) > 2 ? track.channels + " channels" : "";
+          this.langList.appendChild(
+            row(
+              this.doc,
+              langName(track.lang, track.title),
+              sub,
+              track.n === audio.currentTrack,
+              () => audio.setTrack(track)
+            )
+          );
+        }
+      } else if (audio.filmReady) {
+        setText(
+          this.note,
+          "This film hasn't been prepared for headphones yet. Run playstick-prep.py over the library."
+        );
+      } else if (this.deps.libraryLangs().length) {
+        for (const code of this.deps.libraryLangs()) {
+          this.langList.appendChild(
+            row(
+              this.doc,
+              langName(code),
+              "",
+              code === audio.language,
+              () => audio.preferLanguage(code)
+            )
+          );
+        }
+        setText(this.note, "Pick one now and it will be used when a film starts.");
+      } else {
+        setText(this.note, "Start a film and its languages will appear here.");
+      }
+      const showSync = listening;
+      toggleClass(this.syncRow, "on", showSync);
+      this.syncHead.style.display = showSync ? "" : "none";
+      this.syncHint.style.display = showSync ? "" : "none";
+      setText(this.syncVal, (audio.trim > 0 ? "+" : "") + audio.trim + " ms");
+      toggleClass(this.syncDebug, "on", this.deps.debug);
+      this.paintTune();
+    }
+    paintTune() {
+      const on = this.deps.debug;
+      toggleClass(this.tuneHead, "on", on);
+      toggleClass(this.tuneList, "on", on);
+      toggleClass(this.tuneFoot, "on", on);
+      if (!on) {
+        return;
+      }
+      this.tuneList.textContent = "";
+      let changed = 0;
+      for (const t of this.tunables.items) {
+        const doc = this.doc;
+        this.tuneList.appendChild(
+          h(doc, "div", { class: "tune" }, [
+            this.tuneButton("−", "Decrease " + t.label, () => this.stepTune(t, -1)),
+            h(doc, "span", { class: "tname", text: t.label }),
+            h(doc, "span", {
+              class: this.tunables.changed(t) ? "tval changed" : "tval",
+              text: this.tunables.text(t)
+            }),
+            this.tuneButton("+", "Increase " + t.label, () => this.stepTune(t, 1))
+          ])
+        );
+        this.tuneList.appendChild(
+          h(doc, "div", {
+            class: "thint",
+            text: t.name + " · shipped " + this.tunables.shippedText(t) + " · " + t.hint
+          })
+        );
+        if (this.tunables.changed(t)) {
+          changed++;
+        }
+      }
+      setText(
+        this.tuneNote,
+        changed ? changed + " changed. These apply to this phone only, while ?debug is in the URL." : "Everything is at the shipped value. Changes apply immediately, to this phone only."
+      );
+    }
+    stepTune(t, direction) {
+      this.tunables.step(t, direction);
+      this.tunables.save(this.deps.storage);
+      this.paintTune();
+    }
+    tuneButton(label, aria, onTap) {
+      return h(this.doc, "button", { type: "button", text: label, aria, onTap });
+    }
+  };
+
+  // src/filter-sheet.ts
+  var FILTER_CSS = `
+#fsheetNote { color: var(--dim); font-size: 16px; line-height: 1.45; padding: 6px 14px 2px; }
+#filterClear {
+  display: block; width: 100%; margin: 14px 0 2px; min-height: 56px;
+  border-radius: 14px; background: var(--card); font-size: 17px;
+}
+`;
+  var SORTS = [
+    { code: "name", label: "A to Z" },
+    { code: "year-desc", label: "Newest first" },
+    { code: "year-asc", label: "Oldest first" }
+  ];
+  var SCORES = [
+    { value: 0, label: "Any" },
+    { value: 6, label: "6 and up" },
+    { value: 7, label: "7 and up" },
+    { value: 8, label: "8 and up" }
+  ];
+  var FilterSheet = class {
+    constructor(doc, model, onChange) {
+      this.model = model;
+      this.onChange = onChange;
+      this.doc = doc;
+      this.sortList = h(doc, "div", { id: "sortList" });
+      this.genreHead = head(doc, "Kind", "genreHead");
+      this.genreList = h(doc, "div", { id: "genreList" });
+      this.scoreHead = head(doc, "Score", "scoreHead");
+      this.scoreList = h(doc, "div", { id: "scoreList" });
+      this.readyHead = head(doc, "Headphones", "readyHead");
+      this.readyList = h(doc, "div", { id: "readyList" });
+      this.note = h(doc, "div", { id: "fsheetNote" });
+      this.clear = h(doc, "button", {
+        id: "filterClear",
+        type: "button",
+        text: "Show everything",
+        onTap: () => {
+          this.model.clearFilters();
+          this.apply();
+        }
+      });
+      this.root = h(
+        doc,
+        "div",
+        {
+          id: "fsheet",
+          class: "sheet",
+          role: "dialog",
+          modal: true,
+          aria: "Filter and sort"
+        },
+        [
+          grip(doc),
+          head(doc, "Order"),
+          this.sortList,
+          this.genreHead,
+          this.genreList,
+          this.scoreHead,
+          this.scoreList,
+          this.readyHead,
+          this.readyList,
+          this.note,
+          this.clear
+        ]
+      );
+    }
+    apply() {
+      this.onChange();
+      this.paint();
+    }
+    section(head2, list, show) {
+      head2.style.display = show ? "" : "none";
+      list.style.display = show ? "" : "none";
+    }
+    paint() {
+      const model = this.model;
+      this.sortList.textContent = "";
+      const haveYears = model.count((it) => !isNaN(parseInt(String(it.year), 10))) > 0;
+      for (const s of SORTS) {
+        if (s.code !== "name" && !haveYears) {
+          continue;
+        }
+        this.sortList.appendChild(
+          row(this.doc, s.label, "", model.sort === s.code, () => {
+            model.setSort(s.code);
+            this.apply();
+          })
+        );
+      }
+      this.genreList.textContent = "";
+      const genres = model.facets.genres;
+      this.section(this.genreHead, this.genreList, genres.length > 0);
+      if (genres.length) {
+        this.genreList.appendChild(
+          row(this.doc, "Everything", "", !model.genre, () => {
+            model.setGenre("");
+            this.apply();
+          })
+        );
+        for (const name of genres) {
+          const n = model.count(
+            (item) => (item.genres || []).indexOf(name) >= 0 && (!(model.minScore > 0) || model.scoreOf(item) >= model.minScore) && (!model.ready || (item.audio_langs || []).length > 0)
+          );
+          this.genreList.appendChild(
+            row(this.doc, name, n === 1 ? "1 movie" : n + " movies", model.genre === name, () => {
+              model.setGenre(model.genre === name ? "" : name);
+              this.apply();
+            })
+          );
+        }
+      }
+      this.scoreList.textContent = "";
+      const haveScores = model.count((it) => !isNaN(model.scoreOf(it))) > 0;
+      this.section(this.scoreHead, this.scoreList, haveScores);
+      if (haveScores) {
+        for (const s of SCORES) {
+          this.scoreList.appendChild(
+            row(this.doc, s.label, "", model.minScore === s.value, () => {
+              model.setMinScore(s.value);
+              this.apply();
+            })
+          );
+        }
+      }
+      this.readyList.textContent = "";
+      const haveAudio = model.count((it) => (it.audio_langs || []).length > 0) > 0;
+      this.section(this.readyHead, this.readyList, haveAudio);
+      if (haveAudio) {
+        this.readyList.appendChild(
+          row(this.doc, "All movies", "", !model.ready, () => {
+            model.setReady(false);
+            this.apply();
+          })
+        );
+        this.readyList.appendChild(
+          row(this.doc, "Ready for headphones", "", model.ready, () => {
+            model.setReady(true);
+            this.apply();
+          })
+        );
+      }
+      if (!genres.length && !haveScores && !haveAudio) {
+        setText(
+          this.note,
+          "This library hasn't been prepared yet, so there is nothing to sort or filter by. Run playstick-prep.py over it."
+        );
+      } else {
+        setText(this.note, "");
+      }
+      this.clear.style.display = model.filtersOn() ? "" : "none";
+    }
+  };
+
+  // src/time-driver.ts
+  var TimeDriver = class {
+    constructor(api, clock, cfg, deps) {
+      this.api = api;
+      this.clock = clock;
+      this.cfg = cfg;
+      this.deps = deps;
+      this.nextAt = 0;
+    }
+    /** One round trip, timed and fed to the clock. */
+    sample() {
+      this.nextAt = this.deps.now() + this.cfg.every;
+      const t0 = this.deps.now();
+      return this.api.time().then((d) => {
+        var _a, _b;
+        const t1 = this.deps.now();
+        if (typeof d.now !== "number") {
+          return;
+        }
+        if (this.clock.adoptSession(d.session)) {
+          (_b = (_a = this.deps).onReset) == null ? void 0 : _b.call(_a);
+        }
+        const off = d.now - (t0 + t1) / 2;
+        this.clock.accept(off, t1 - t0, t1);
+      }).catch(() => {
+      });
+    }
+    /** A back-to-back burst, chained through the scheduler. */
+    burst(n) {
+      if (n <= 0) {
+        return;
+      }
+      void this.sample().then(() => {
+        this.deps.schedule(() => this.burst(n - 1), this.cfg.spacing * 1e3);
+      });
+    }
+    /** Driven off the correction tick: re-pick as of now, and sample if due. */
+    tick() {
+      this.clock.tick(this.deps.now());
+      if (this.deps.now() >= this.nextAt) {
+        void this.sample();
+      }
+    }
+  };
+
+  // src/poller.ts
+  function pollDelay(state, hidden) {
+    if (hidden) {
+      return 5e3;
+    }
+    if (state === "playing" || state === "paused" || state === "preparing") {
+      return 1e3;
+    }
+    return 3e3;
+  }
+  var Poller = class {
+    constructor(api, deps) {
+      this.api = api;
+      this.deps = deps;
+      this.timer = null;
+      this.poll = () => {
+        var _a, _b;
+        if (this.timer !== null) {
+          this.deps.cancel(this.timer);
+          this.timer = null;
+        }
+        const sent = this.deps.now();
+        const header = (_b = (_a = this.deps).header) == null ? void 0 : _b.call(_a);
+        this.api.status(header).then((s) => {
+          this.deps.onStatus(s, (this.deps.now() - sent) / 1e3);
+        }).catch(() => {
+          this.deps.onOutage();
+        }).then(() => {
+          const delay = pollDelay(this.deps.stateOf(), this.deps.hidden());
+          this.timer = this.deps.schedule(this.poll, delay);
+        });
+      };
+    }
+  };
+
+  // src/styles.ts
+  var BASE = `
+:root {
+  --bg: #0b0b0d;
+  --card: #17171c;
+  --ink: #f2f2f5;
+  --dim: #9a9aa8;
+  --accent: #4da3ff;
+  --stop: #d8443c;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: var(--bg); color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* A child taps twice, drags, and long-presses. None of that should zoom the
+     page, select text, or flash a grey box. */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none; user-select: none;
+  overscroll-behavior: none;
+}
+button { font: inherit; color: inherit; border: 0; background: none; cursor: pointer; }
+button:disabled { opacity: .45; }
+
+.view { display: none; padding: env(safe-area-inset-top) 12px calc(20px + env(safe-area-inset-bottom)); }
+.view.on { display: block; }
+`;
+  var CSS = [
+    BASE,
+    BANNER_CSS,
+    LIBRARY_CSS,
+    PREPARING_CSS,
+    PLAYING_CSS,
+    SHEET_CSS,
+    SOUND_CSS,
+    FILTER_CSS
+  ].join("\n");
+  function installStyles(doc) {
+    const style = doc.createElement("style");
+    style.textContent = CSS;
+    doc.head.appendChild(style);
+  }
+
+  // src/main.ts
+  function boot() {
+    const doc = document;
+    installStyles(doc);
+    const debug = location.search.indexOf("debug") >= 0;
+    const nowSec = () => performance.now() / 1e3;
+    const stamp = (path) => stamped(path);
+    const clock = new ServerClock(CLOCK);
+    const film = new FilmClock(clock);
+    const sync = new SyncController(SYNC);
+    const model = new LibraryModel();
+    const api = new ApiClient((url, init) => fetch(url, init));
+    const media = new Audio();
+    media.preload = "auto";
+    media.preservesPitch = false;
+    const audioEl = {
+      get currentTime() {
+        return media.currentTime;
+      },
+      set currentTime(v) {
+        media.currentTime = v;
+      },
+      get duration() {
+        return media.duration || 0;
+      },
+      get playbackRate() {
+        return media.playbackRate;
+      },
+      set playbackRate(v) {
+        media.playbackRate = v;
+      },
+      get paused() {
+        return media.paused;
+      },
+      play: () => media.play(),
+      pause: () => media.pause(),
+      load: () => media.load(),
+      getSrc: () => media.getAttribute("src"),
+      setSrc: (s) => media.setAttribute("src", s),
+      clearSrc: () => media.removeAttribute("src")
+    };
+    const reload = new ReloadPolicy({ reload: () => location.reload() });
+    const audio = new AudioSession({
+      el: audioEl,
+      clock,
+      film,
+      sync,
+      stamp,
+      storage: localStorage,
+      now: nowSec,
+      onChange: () => {
+        paintAudioBtn();
+        if (sheets.soundOpen) {
+          soundSheet.paint();
+        }
+      }
+    });
+    const tunables = new Tunables(SYNC, CLOCK, TIMING, () => armTick());
+    tunables.load(localStorage, debug);
+    const telemetry = new Telemetry();
+    const soundSheet = new SoundSheet(doc, audio, tunables, {
+      debug,
+      libraryLangs: () => model.facets.langs,
+      storage: localStorage
+    });
+    const filterSheet = new FilterSheet(doc, model, () => libraryView.render());
+    const sheets = new SheetManager(doc, {
+      sound: soundSheet.root,
+      filter: filterSheet.root,
+      onSoundOpen: () => soundSheet.paint(),
+      onFilterOpen: () => filterSheet.paint()
+    });
+    const libraryView = new LibraryView(doc, model, stamp, (id) => play(id), sheets.filterBtn);
+    const presenter = new StatusPresenter(doc, {
+      reload,
+      stamp,
+      now: Date.now,
+      library: libraryView.root,
+      grid: libraryView.gridEl,
+      filterBtn: sheets.filterBtn
+    });
+    new Controls(
+      {
+        toggle: presenter.playing.toggle,
+        stop: presenter.playing.stop,
+        cancel: presenter.preparing.cancel,
+        volDown: presenter.playing.volDown,
+        volUp: presenter.playing.volUp
+      },
+      api,
+      {
+        stateOf: () => presenter.state,
+        apply: (s) => onStatus(s),
+        toLibrary: () => presenter.views.show("library")
+      }
+    );
+    for (const el of [
+      presenter.banner.root,
+      sheets.audioBtn,
+      sheets.filterBtn,
+      soundSheet.tapToListen,
+      sheets.scrim,
+      soundSheet.root,
+      filterSheet.root,
+      libraryView.root,
+      presenter.preparing.root,
+      presenter.playing.root
+    ]) {
+      doc.body.appendChild(el);
+    }
+    const timeDriver = new TimeDriver(api, clock, TIMING, {
+      now: nowSec,
+      schedule: (fn, ms) => window.setTimeout(fn, ms),
+      onReset: () => sync.replace()
+    });
+    const poller = new Poller(api, {
+      now: () => performance.now(),
+      schedule: (fn, ms) => window.setTimeout(fn, ms),
+      cancel: (id) => window.clearTimeout(id),
+      hidden: () => doc.hidden,
+      stateOf: () => presenter.state,
+      onStatus: (s) => onStatus(s),
+      onOutage: () => {
+        presenter.views.show("library");
+        presenter.banner.show("Connecting to Playstick...…");
+      },
+      header: () => debug ? telemetry.build(snapshot()) : void 0
+    });
+    let libraryFetchedAt = 0;
+    let buffering = 0;
+    let waits = 0;
+    function onStatus(s) {
+      if (s.buffering) {
+        buffering++;
+      }
+      presenter.apply(s);
+      audio.onStatus(s);
+      const onGrid = s.state !== "playing" && s.state !== "paused" && s.state !== "preparing";
+      if (onGrid && Date.now() - libraryFetchedAt > 1e4) {
+        loadLibrary();
+      }
+    }
+    function loadLibrary() {
+      void api.library().then((d) => {
+        libraryFetchedAt = Date.now();
+        model.setItems(d.items);
+        libraryView.render();
+        if (sheets.soundOpen) {
+          soundSheet.paint();
+        }
+        if (sheets.filterOpen) {
+          filterSheet.paint();
+        }
+        if (d.available === false) {
+          libraryView.unavailable();
+        }
+      }).catch(() => {
+      });
+    }
+    function play(id) {
+      const item = model.all.find((i) => i.id === id);
+      if (!item) {
+        return;
+      }
+      presenter.preparing.begin(item.title, id);
+      presenter.views.show("preparing");
+      void api.play(id).then((res) => {
+        if (!res.ok) {
+          presenter.views.show("library");
+          presenter.banner.show(res.data.error || "That didn't work.", 6e3);
+        } else {
+          onStatus(res.data);
+        }
+      }).catch(() => presenter.views.show("library"));
+    }
+    const ICON_ON = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>';
+    const ICON_OFF = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>';
+    const audioBtn = sheets.audioBtn;
+    function paintAudioBtn() {
+      toggleClass(audioBtn, "on", audio.phoneAudioEnabled);
+      toggleClass(audioBtn, "live", audio.playing);
+      audioBtn.innerHTML = audio.listening ? ICON_ON : ICON_OFF;
+    }
+    let tickTimer = null;
+    function armTick() {
+      if (tickTimer !== null) {
+        window.clearInterval(tickTimer);
+      }
+      tickTimer = window.setInterval(() => {
+        timeDriver.tick();
+        audio.correct(nowSec());
+        if (debug) {
+          telemetry.recordErrMs(sync.err * 1e3);
+        }
+      }, SYNC.tick * 1e3);
+    }
+    media.addEventListener("error", () => audio.onElementError());
+    media.addEventListener("waiting", () => waits++);
+    media.addEventListener("stalled", () => waits++);
+    document.addEventListener("visibilitychange", () => {
+      if (doc.hidden) {
+        if (audio.playing) {
+          sync.coast(audioEl, nowSec(), clock.ratio);
+        }
+      } else {
+        timeDriver.burst(TIMING.burst);
+        poller.poll();
+      }
+    });
+    function snapshot() {
+      const srvNow = clock.now(nowSec());
+      const rtt = clock.bestRtt();
+      return {
+        now: nowSec(),
+        listening: audio.listening,
+        hasSrc: !!audioEl.getSrc(),
+        paused: media.paused,
+        hidden: doc.hidden,
+        currentTime: media.currentTime,
+        errMs: sync.err * 1e3,
+        ratePpm: (sync.rate - 1) * 1e6,
+        ratioPpm: clock.ratio * 1e6,
+        driftPpm: sync.integrator * 1e6,
+        offsetMs: srvNow === null ? null : (srvNow - nowSec()) * 1e3,
+        rttMs: rtt === null ? null : rtt * 1e3,
+        samples: clock.samples,
+        epoch: film.epoch,
+        writes: sync.rateWrites,
+        seeks: sync.seeks,
+        waits,
+        buffering,
+        digest: tunables.digest()
+      };
+    }
+    paintAudioBtn();
+    armTick();
+    loadLibrary();
+    timeDriver.burst(TIMING.burst);
+    poller.poll();
+    doc.documentElement.dataset["build"] = BUILD;
+  }
+  boot();
+})();
+</script>
+</body>
+</html>
