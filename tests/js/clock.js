@@ -79,9 +79,47 @@ const tick = (ms) => { state.clock += ms === undefined ? 250 : ms; };
 // A harness that does not charge this lets the controller correct for free,
 // and a loop whose own corrections are the fault it is correcting for looks
 // perfectly stable here while it rails on the device.
-const dac = { rate: 1, quantum: 0, writeCost: 0.043 };
+//
+// `seekCost` is the same argument about the OTHER actuator, and its absence is
+// how the 2026-08-12 fault reached a listener. Writing currentTime does not
+// move the play head and carry on: AVPlayer tears the render pipeline down,
+// re-reads across CIFS and starts it again, and for about 250 ms the element's
+// clock does not advance while the film does. Modelled as a STALL rather than
+// as discarded audio, which is the difference between it and writeCost -- the
+// capture shows `lag` at a median 164 ms AFTER a seek, and sndCorrect() clears
+// sndPrevAt on the seek branch precisely so the jump itself is not counted.
+// Section 12 is what this exists for.
+// ...and it is a DISTRIBUTION, not a number, which turns out to be the whole
+// mechanism. These are the deciles of `lag` from the 2026-08-12 capture -- the
+// element's own clock shortfall, the one telemetry field that measures the
+// symptom rather than a suspected cause. Nine seeks in ten cost about 164 ms
+// and do not re-trip a 250 ms threshold; one in ten costs about 250 ms and
+// does. A constant cost cannot reproduce the device at all: it settles at zero
+// seeks below the threshold and collapses to one every tick above it, and the
+// capture sat at 1.43/s, which is neither. The fault lives in the OVERLAP
+// between the cost distribution and the threshold, and that is why a single
+// margin argued from a single measured number was never going to hold.
+const SEEK_COST_DECILES =
+  [0.152, 0.158, 0.160, 0.164, 0.164, 0.167, 0.170, 0.249, 0.251, 0.257];
+const SEEK_COST_MEDIAN = 0.164;
+
+const dac = { rate: 1, quantum: 0, writeCost: 0.043, seekCost: 0 };
 let ctTrue = 0;
 let lastRate = 1;
+// Deterministic, because a harness whose verdict moves between runs is not a
+// harness. dac.seekCost sets the MEDIAN and the measured shape scales with it.
+let seekSeed = 1;
+function drawSeekCost() {
+  if (!dac.seekCost) { return 0; }
+  seekSeed = (seekSeed * 1103515245 + 12345) & 0x7fffffff;
+  return SEEK_COST_DECILES[seekSeed % SEEK_COST_DECILES.length]
+    * (dac.seekCost / SEEK_COST_MEDIAN);
+}
+// Seconds of wall time the element still owes before its clock moves again.
+let stallDebt = 0;
+// ...and how much of that has been paid, which is audio a listener did not
+// hear. The one number section 12 is ultimately about.
+let stalledTotal = 0;
 
 function quantise(t) {
   return dac.quantum ? Math.floor(t / dac.quantum) * dac.quantum : t;
@@ -94,6 +132,7 @@ function tickPlaying(ms) {
   // A currentTime that is not where this left it is the page having seeked.
   if (Math.abs(P.snd.currentTime - quantise(ctTrue)) > 1e-9) {
     ctTrue = P.snd.currentTime;
+    stallDebt += drawSeekCost();
   }
   // The plant pays for being re-commanded. Read the ELEMENT rather than
   // sndRateSet: that variable is what the page believes it asked for, and a
@@ -105,7 +144,12 @@ function tickPlaying(ms) {
   }
   state.clock += dt;
   if (!P.snd.paused) {
-    ctTrue += (dt / 1000) * P.snd.playbackRate * dac.rate;
+    // Wall time the element spent re-arming buys no film.
+    const secs = dt / 1000;
+    const stalled = Math.min(stallDebt, secs);
+    stallDebt -= stalled;
+    stalledTotal += stalled;
+    ctTrue += (secs - stalled) * P.snd.playbackRate * dac.rate;
   }
   P.snd.currentTime = quantise(ctTrue);
 }
@@ -143,6 +187,14 @@ function reset() {
   // of them would move numbers that were argued out one at a time, which is a
   // separate decision from adding the coverage. Section 11 turns it on.
   dac.writeCost = 0;
+  // ...and the same for the seek, for the same reason: sections 1, 4 and 5
+  // assert that a placement costs exactly one seek and lands within a
+  // millisecond, which is a statement about where the page AIMS. What the seek
+  // then costs is section 12's subject.
+  dac.seekCost = 0;
+  stallDebt = 0;
+  stalledTotal = 0;
+  seekSeed = 1;
   ctTrue = 0;
   lastRate = 1;
   epoch += 1;
@@ -590,5 +642,104 @@ check("a desync just under the seek threshold still closes inside the "
   + "recovery section 0 promises", closed,
   "err=" + (P.sndErr * 1000).toFixed(0) + "ms after "
     + (budget * P.TICK / 1000).toFixed(0) + "s of slew");
+
+// --- 12. the 2026-08-12 capture: a seek that recreates its own trigger ------
+
+// The journal, in one paragraph. 224 telemetry lines off one iPhone, and the
+// page was hard-seeking 1.43 times a SECOND -- 305 of them in 214 s -- with
+// `lag` a median 164 ms and about 15% of the audio never reaching the
+// listener. Buffer headroom sat at a median 419 s and mpv never once reported
+// paused-for-cache, so nothing was starved: the loop was cutting the sound to
+// pieces entirely on its own.
+//
+// The mechanism is one line of arithmetic. SEEK_LIMIT was 250 ms and a seek
+// costs about 250 ms, so a seek taken to fix a 250 ms error lands the element
+// 250 ms late -- which is the error that triggered it. The condition, the twin
+// of the one section 11 writes down for writes:
+//
+//     seekCost >= SEEK_LIMIT   =>   every seek guarantees the next one
+//
+// The `err` distribution in the capture is the fingerprint: 43 samples at
+// 50-99 ms (just after a cut), 68 at 300-349 (about to take one), and NOTHING
+// in the 150-199 band, which the error only ever crosses on its way back out.
+//
+// The fix is not a bigger threshold -- SEEK_LIMIT/RATE_LIMIT is already at the
+// 15 s section 0 allows, so there is no room to raise it. It is to stop aiming
+// at the wrong place: a seek whose cost is known should land where the film
+// WILL be when the pipeline finishes re-arming, not where it was when the
+// decision was taken.
+//
+// !! THIS SECTION DOES NOT YET REPRODUCE THE CAPTURE, AND SO DOES NOT YET
+// !! GUARD ANYTHING. It passes against the UNFIXED page. Read it as the plant
+// !! work and the scenario, not as a regression test.
+//
+// What is missing is a second stall source. The capture ran at 2.68 stalls a
+// second against 1.51 seeks -- 1.17/s that no seek accounts for, on 91% of its
+// lines -- while the element fired only 18 `waiting`/`stalled` events in the
+// whole 214 s, so they were silent. Seeks alone therefore cannot sustain the
+// loop: charged for seeks and nothing else, the plant takes one cut and
+// converges, which is what happens below. On the device the error walked from
+// -95 ms back past -335 ms in about 0.75 s, a divergence of ~320 ms/s that a
+// playbackRate clamped at 2% cannot produce and only lost time can.
+//
+// tests/js/sweep.js settles which of the two it is, and the answer is not the
+// comfortable one: NO seek cost reproduces the capture. The plant is bistable
+// on exactly SEEK_LIMIT -- 0.00 seeks/s below it, 4.00/s above, nothing
+// between, and the device sat at 1.43. An intermediate rate needs the error to
+// GROW between seeks, and only lost time grows it while the command is
+// speeding up. So the seeking is an amplifier on a background stall process,
+// not the generator of one, and the clean sl:500 stretch agrees rather than
+// refutes: it ran 0.78 stalls/s of its own.
+//
+// The residual question -- whether that background process is itself a RIPPLE
+// from each seek (a re-read across CIFS landing in later ticks) or independent
+// of the seeking -- is not decidable from this capture. Settling it is the
+// calibration probe's first job, and it is now on the critical path. Do not
+// tune the numbers here until it is settled: inventing a second stall source
+// to make this section go red would be precisely the armchair mistake that set
+// SEEK_LIMIT wrong in the first place.
+function soakSeeking(ticks) {
+  const seeks0 = P.sndSeeks;
+  const stalled0 = stalledTotal;
+  let worst = 0;
+  for (let i = 0; i < ticks; i++) {
+    if (i % 4 === 0) { P.audioStatus(status()); }
+    P.timeTick();
+    tickPlaying();
+    P.sndCorrect();
+    if (i > 40 && Math.abs(P.sndErr) > worst) { worst = Math.abs(P.sndErr); }
+  }
+  const secs = ticks * P.TICK / 1000;
+  return { seeks: P.sndSeeks - seeks0, secs: secs, worst: worst,
+           lost: (stalledTotal - stalled0) / secs };
+}
+
+// An ordinary phone, with the plant charging for BOTH actuators, opening a
+// film a second and a quarter behind -- which is where the capture starts
+// (err=-1249 ms on its first playing line).
+reset();
+lockClock();
+dac.writeCost = 0.043;
+dac.seekCost = SEEK_COST_MEDIAN;      // the whole point of this section
+dac.rate = 1 - 60e-6;
+dac.quantum = 0.0213;
+P.audioStatus(status());
+tickPlaying();
+P.sndCorrect();                       // the opening placement
+ctTrue -= 1.25;                       // ...and the capture's opening error
+P.snd.currentTime = quantise(ctTrue);
+const cut = soakSeeking(1200);        // five minutes
+
+check("a seek aims past what it is about to cost, so it does not recreate "
+  + "the error that triggered it",
+  cut.seeks / cut.secs < 0.05,
+  (cut.seeks / cut.secs).toFixed(2) + " seeks/s over " + cut.secs.toFixed(0)
+    + "s, against 1.43 on the device");
+check("...so the listener keeps the audio a seek storm was throwing away",
+  cut.lost < 0.01,
+  (cut.lost * 100).toFixed(1) + "% of the film lost to re-arming, against "
+    + "~15% in the capture");
+check("...and the sound still lands inside the lag the eye tolerates",
+  cut.worst < 0.125, "worst=" + (cut.worst * 1000).toFixed(0) + "ms");
 
 done();

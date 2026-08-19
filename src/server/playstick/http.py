@@ -140,6 +140,10 @@ class Handler(BaseHTTPRequestHandler):
     library = None      # set on the server before serve_forever
     thumbs = None
     player = None
+    # The parsed request body for the POST in flight, or None between requests.
+    # Cached so _body() can be called from more than one place -- and, above
+    # all, so do_POST can drain it whatever the route decides. See do_POST.
+    _posted = None
     # Asked about state, and about starting and stopping a film. The player is
     # still here because pause, volume and the status numbers come straight
     # from mpv and have nothing to do with the projector.
@@ -186,20 +190,26 @@ class Handler(BaseHTTPRequestHandler):
                    {"Cache-Control": "no-store"})
 
     def _body(self):
+        if self._posted is not None:
+            return self._posted
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
-            return {}
+            self._posted = {}
+            return self._posted
         if not length:
-            return {}
+            self._posted = {}
+            return self._posted
         try:
             data = json.loads(self.rfile.read(length))
         except ValueError:
-            return {}
+            self._posted = {}
+            return self._posted
         # Parsed, but not an object: a bare list or number would reach .get()
         # and take the connection down with an AttributeError that no caller
         # sees. Same answer as unparseable -- there is nothing in it.
-        return data if isinstance(data, dict) else {}
+        self._posted = data if isinstance(data, dict) else {}
+        return self._posted
 
     # -- state shared by /api/status and /api/library
 
@@ -255,6 +265,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):                               # noqa: N802 - stdlib API
         path = urlparse(self.path).path
+        # Read the body up front, whatever the route below decides to do with
+        # it. protocol_version is HTTP/1.1, so the socket stays open, and a
+        # body left unread is parsed as the head of the NEXT request line --
+        # "{}POST /api/resume" -> 501. Only the routes that take an argument
+        # used to read it, so pause/resume/stop desynced the connection for a
+        # browser that reuses it (the test client opens a fresh one each time,
+        # which is why this hid). _body() caches, so the routes that do want it
+        # get the same parsed dict back.
+        self._posted = None
+        self._body()
         if not self._allowed():
             return self._json({"error": "not on the local network"}, 403)
         if path == "/api/play":

@@ -71,9 +71,9 @@ services:
       # is bound to an inode, and an editor that writes a replacement and
       # renames it over the original leaves the container holding the old one
       # until it is restarted. A directory mount resolves names on each open.
-      - ./roles/player/files/playstick:/usr/local/lib/playstick:ro
-      - ./roles/player/files/playstick-ui.html:/usr/local/share/playstick/ui.html:ro
-      - ./roles/player/files/playstick-web.py:/usr/local/bin/playstick-web.py:ro
+      - ./src/server/playstick:/usr/local/lib/playstick:ro
+      - ./src/player/dist/playstick-ui.html:/usr/local/share/playstick/ui.html:ro
+      - ./src/server/playstick-web.py:/usr/local/bin/playstick-web.py:ro
       # playstick-prep.py runs on the DEVELOPER machine, never on the stick,
       # and this container is the closest thing to one that also has the
       # library mounted -- ffmpeg is already here for the sample generator. It

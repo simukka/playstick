@@ -24,7 +24,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "scripts", "playstick-prep.py")
-DAEMON = os.path.join(ROOT, "roles", "player", "files", "playstick", "library.py")
+DAEMON = os.path.join(ROOT, "src", "server", "playstick", "library.py")
 
 # The hyphen in the filename keeps it out of `import`, which is the right name
 # for a command and the wrong one for a module.

@@ -144,7 +144,7 @@
     # here is dead weight that still shadows nothing and imports cleanly.
     - name: Install the player package
       ansible.builtin.copy:
-        src: playstick/
+        src: "{{ playbook_dir }}/src/server/playstick/"
         dest: /usr/local/lib/playstick/
         owner: root
         group: root
@@ -164,7 +164,7 @@
     # nothing and imports cleanly.
     - name: List the modules this release ships
       vars:
-        player_pkg_src: "{{ role_path }}/files/playstick"
+        player_pkg_src: "{{ playbook_dir }}/src/server/playstick"
       ansible.builtin.set_fact:
         player_shipped: >-
           {{ (lookup('ansible.builtin.fileglob',
@@ -215,7 +215,7 @@
 
     - name: Install the player daemon
       ansible.builtin.copy:
-        src: playstick-web.py
+        src: "{{ playbook_dir }}/src/server/playstick-web.py"
         dest: /usr/local/bin/playstick-web.py
         owner: root
         group: root
@@ -224,7 +224,7 @@
 
     - name: Install the web UI
       ansible.builtin.copy:
-        src: playstick-ui.html
+        src: "{{ playbook_dir }}/src/player/dist/playstick-ui.html"
         dest: /usr/local/share/playstick/ui.html
         owner: root
         group: root
