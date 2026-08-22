@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Entrypoint for the GUI development container -- see Dockerfile.gui.
 #
-# Two jobs: put something in the library worth looking at, then hand over to
-# the same daemon the appliance runs, unmodified.
+# Three jobs: write the settings the daemon will read, put something in the
+# library worth looking at, then hand over to the same daemon the appliance
+# runs, unmodified.
 #
 # The generated films are deliberately named the way a real collection is,
 # because most of what the library code does is undo those names: clean_title()
@@ -11,13 +12,135 @@
 # the behaviour it is there to show.
 set -euo pipefail
 
-LIBRARY="${PLAYSTICK_LIBRARY:-/srv/movies}"
-THUMBS="${PLAYSTICK_THUMB_DIR:-/var/cache/playstick/thumbs}"
+LIBRARY=/srv/movies
+THUMBS=/var/cache/playstick/thumbs
 CLIP_SECONDS="${PLAYSTICK_GUI_CLIP_SECONDS:-45}"
+SETTINGS="${PLAYSTICK_SETTINGS:-/etc/playstick/settings.toml}"
+
+# PLAYSTICK_GUI_NAS is "host" or "host:port". Split here rather than in the
+# heredoc: an unset value there would render `probe_port =` with nothing after
+# it, which is not a TOML syntax error the daemon reports -- it falls back to
+# every default at once and the deviations below silently stop applying.
+GUI_NAS="${PLAYSTICK_GUI_NAS:-}"
+NAS_HOST="${GUI_NAS%%:*}"
+NAS_PORT="${GUI_NAS##*:}"
+if [ -z "$NAS_PORT" ] || [ "$NAS_PORT" = "$GUI_NAS" ]; then
+  NAS_PORT=445
+fi
 
 # /run/playstick holds the mpv IPC socket and the two flag files. On the device
 # systemd makes it with RuntimeDirectory=; here nothing does.
-mkdir -p /run/playstick "$THUMBS" "$LIBRARY"
+mkdir -p /run/playstick "$THUMBS" "$LIBRARY" "$(dirname "$SETTINGS")"
+
+# --- the settings ---------------------------------------------------------
+# The same file the appliance gets from roles/player/templates/settings.toml.j2,
+# written here from the handful of knobs a developer turns. Only the DEVIATIONS
+# from the device are commented; everything absent takes config.py's own
+# default, which is the point of writing a partial file -- a value nobody
+# overrides is exercised exactly as it ships.
+#
+# The knobs, all optional, all documented in the Makefile:
+#   PLAYSTICK_GUI_PROJECTOR        "fake" (default), "" for the NullProjector
+#   PLAYSTICK_GUI_PROJECTOR_IDLE   minutes before the lamp goes out (2)
+#   PLAYSTICK_GUI_NAS              host[:port] to probe, for the wake button
+#   PLAYSTICK_GUI_NAS_MAC          MAC to aim the magic packet at
+cat > "$SETTINGS" <<TOML
+[server]
+port = 80
+ui_file = "/usr/local/share/playstick/ui.html"
+# player_allow_networks is deliberately empty: the Docker bridge is inside
+# 172.16.0.0/12 and would pass the real list anyway, so enforcing it here would
+# only ever reject the host and teach nothing.
+allow_networks = []
+
+[library]
+path = "$LIBRARY"
+extensions = [".mkv", ".mp4", ".m4v", ".avi", ".mov", ".m2ts", ".ts"]
+skip_pattern = 'sample|trailer|extras?\b|behind[ ._-]the[ ._-]scenes'
+# The generated clips are a few MB each; the device's 100 MB floor -- which is
+# what removes samples and extras there for free -- would hide the entire
+# library. The skip regex above is left to do that job alone, so it gets
+# exercised.
+min_size_mb = 0
+scan_depth = 2
+# 300 s on the device, where a rescan means stat-ing every file over CIFS.
+# Nothing is remote here, and adding a file and waiting five minutes to see it
+# is not a development cycle.
+scan_interval = 30
+
+[nas]
+# Empty by default: power reads "unknown" and the page behaves exactly as it
+# does with no NAS, which is the shipped state. Point PLAYSTICK_GUI_NAS at a
+# port nothing is listening on -- "127.0.0.1:9999" -- to drive the whole
+# unreachable-library path, banner and button included, on a laptop.
+host = "$NAS_HOST"
+probe_port = $NAS_PORT
+mac = "${PLAYSTICK_GUI_NAS_MAC:-00:11:32:aa:bb:cc}"
+# Seconds, not the device's minute-scale values: the point here is to watch the
+# banner change while looking at it.
+probe_interval = 5
+probe_interval_down = 3
+probe_interval_waking = 2
+wake_window = 20
+wake_cooldown = 5
+# Nothing in a container is going to reset-failed a mount unit that does not
+# exist. Naming it explicitly stops the daemon shelling out to systemd-escape
+# to derive one it will then fail to use.
+mount_unit = "playstick-gui-none.mount"
+
+[thumbs]
+dir = "$THUMBS"
+# Identical to the unit's: poster extraction is one part of this that a
+# container reproduces exactly.
+args = ["--no-config", "--really-quiet", "--frames=1", "--aid=no", "--sid=no",
+        "--hwdec=no", "--vf=scale=320:-2", "--vo=image",
+        "--vo-image-format=jpg", "--vo-image-jpeg-quality=80"]
+
+[mpv]
+binary = "/usr/bin/mpv"
+socket = "/run/playstick/mpv.sock"
+# mpv's DRM backend wants a VT for console switching and there is none. Empty
+# disables it; the daemon logs the absence and carries on.
+tty = ""
+# The device's argv minus the display: --vo=drm, --drm-device, --drm-connector,
+# --drm-mode and --hwdec have no meaning in a container. Everything that shapes
+# the daemon's view of mpv is kept, and --idle=no / --keep-open=no are as
+# load-bearing here as there -- mpv exiting at end of file is how the daemon
+# learns the film is over. --really-quiet is dropped so mpv's complaints reach
+# \`docker compose logs\`.
+args = ["--no-config", "--vo=null", "--ao=null", "--hwdec=no", "--profile=fast",
+        "--video-sync=audio", "--framedrop=vo", "--interpolation=no",
+        "--osd-level=0", "--no-osc", "--input-terminal=no", "--idle=no",
+        "--keep-open=no", "--sub-auto=fuzzy", "--cache=yes",
+        "--demuxer-max-bytes=48MiB", "--demuxer-max-back-bytes=16MiB",
+        "--cache-on-disk=no"]
+
+[display]
+busy_file = "/run/playstick/playing"
+restore_file = "/run/playstick/restore-airplay"
+airplay_unit = "uxplay-kms.service"
+# The port the interlock watches. Nothing listens on it until you run
+# \`fake-airplay\`, which is the point -- see scripts/gui-fake-airplay.py.
+airplay_port = 7000
+# Films play silently on the device (player_audio: false), which also hides the
+# page's volume controls. Switched on here so that half of the UI can be looked
+# at; set has_audio = false to see the layout as it currently ships.
+has_audio = true
+
+[projector]
+# A projector made of arithmetic, so the preparing view can be looked at and its
+# wording argued about on a laptop. "fake" warms up in three seconds instead of
+# forty and honours the two rules the sequence is built around: standby accepts
+# nothing but PON, and the lamp is not lit the instant PON returns.
+#
+# Set PLAYSTICK_GUI_PROJECTOR= (empty) to get the NullProjector instead, which
+# is what the appliance ships with and the path that must never stop a film.
+model = "${PLAYSTICK_GUI_PROJECTOR-fake}"
+input = "HD3"
+# Minutes. Short enough to watch the lamp go out over a cup of tea.
+idle_minutes = ${PLAYSTICK_GUI_PROJECTOR_IDLE:-2}
+tick_seconds = 5
+TOML
 
 clip() {  # <path relative to the library> <lavfi video source>
   local out="$LIBRARY/$1" src="$2"
@@ -82,8 +205,8 @@ generate() {
     -f lavfi -i "gradients=size=400x600" -frames:v 1 \
     "$LIBRARY/Test Pattern Two/poster.jpg"
 
-  # Does NOT appear in the grid: PLAYSTICK_SKIP_PATTERN. On the device the
-  # size filter catches these first and for free, but PLAYSTICK_MIN_SIZE_MB is
+  # Does NOT appear in the grid: [library] skip_pattern. On the device the
+  # size filter catches these first and for free, but min_size_mb is
   # 0 here -- every clip above is a few MB -- so the regex is doing it alone.
   clip "Colour.Bars.2019.sample.mkv" testsrc
 
@@ -93,7 +216,7 @@ generate() {
   clip "Archive/Boxed Set/Third.Level.2020.mkv" testsrc
 
   # Three deep, and this one does not: the walk stops descending at
-  # PLAYSTICK_SCAN_DEPTH. Worth generating rather than describing, because
+  # [library] scan_depth. Worth generating rather than describing, because
   # "my film is missing" is otherwise indistinguishable from a bug.
   clip "Archive/Boxed Set/Disc One/Fourth.Level.2020.mkv" testsrc
 

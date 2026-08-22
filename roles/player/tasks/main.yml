@@ -231,6 +231,32 @@
         mode: "0644"
       register: player_ui
 
+    # Every setting the daemon has, in one file. The unit above carries only
+    # PLAYSTICK_SETTINGS now, so this is what a knob change actually rewrites --
+    # and `--check --diff` on it is the whole review of a configuration change.
+    #
+    # 0640 rather than 0644: it carries the NAS's address and MAC. The directory
+    # already exists at 0750 because the nas role puts the CIFS credentials
+    # there, but the player role must not depend on that role having run --
+    # nas_enabled may be false while the player is still installed against a
+    # local library.
+    - name: Create the configuration directory
+      ansible.builtin.file:
+        path: /etc/playstick
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Install the player settings
+      ansible.builtin.template:
+        src: settings.toml.j2
+        dest: /etc/playstick/settings.toml
+        owner: root
+        group: root
+        mode: "0640"
+      register: player_settings
+
     - name: Install the player unit
       ansible.builtin.template:
         src: playstick-web.service.j2
@@ -276,6 +302,7 @@
         name: playstick-web.service
         state: restarted
       when: player_script is changed or player_ui is changed or player_unit is changed
+            or player_settings is changed
             or player_package is changed or player_pruned is changed
 
     # The port is omitted at 80 rather than printed as ":80" -- this line is

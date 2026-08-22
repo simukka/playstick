@@ -8,11 +8,12 @@ the routing, the JSON shapes and the byte-serving are the shipped code.
 
 TWO THINGS TO KNOW BEFORE ADDING A TEST
 
-The daemon reads its whole configuration from the environment ONCE, at import
-of playstick.config. So this module sets that environment before it imports
-anything from the package, and test modules must reach the package through the
-names re-exported here rather than importing it themselves -- an import that
-beats this one to the punch would bake in the ambient environment instead.
+The daemon reads its whole configuration ONCE, at import of playstick.config,
+from the TOML file PLAYSTICK_SETTINGS names. So this module writes that file
+and sets that variable before it imports anything from the package, and test
+modules must reach the package through the names re-exported here rather than
+importing it themselves -- an import that beats this one to the punch would
+read /etc/playstick/settings.toml, or nothing, instead.
 
 Because config is read once, and because http.py binds its constants with
 `from .config import ...`, changing one for a single test means patching the
@@ -37,10 +38,29 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(ROOT, "src", "server")
 # The served page is the built bundle, committed under src/player/dist. It is
-# the daemon's real input (config.py's PLAYSTICK_UI), so the HTTP tests exercise
+# the daemon's real input (config.py's UI_FILE, i.e. [server] ui_file), so the
+# HTTP tests exercise
 # what ships rather than a hand-written stand-in. Rebuild with src/player's
 # `npm run build` after a UI change.
 UI_HTML = os.path.join(ROOT, "src", "player", "dist", "playstick-ui.html")
+
+def _toml(tables):
+    """The three lines of TOML this harness needs, without a writer dependency.
+
+    tomllib reads and does not write, and the alternative -- tomli-w -- would be
+    a third-party package in a suite whose whole claim is that the daemon has
+    none. json.dumps is enough because TOML's basic strings, integers, floats,
+    booleans and flat arrays are spelled exactly as JSON spells them, which is
+    the same property settings.toml.j2 leans on to render the real file.
+    """
+    out = []
+    for name, table in tables.items():
+        out.append("[%s]" % name)
+        for key, value in table.items():
+            out.append("%s = %s" % (key, json.dumps(value)))
+        out.append("")
+    return "\n".join(out)
+
 
 # Scratch for the two directories the daemon really touches: the poster cache
 # (Thumbs.cached_path resolves against it, and _api_thumb reads it directly)
@@ -48,29 +68,57 @@ UI_HTML = os.path.join(ROOT, "src", "player", "dist", "playstick-ui.html")
 TMP = tempfile.mkdtemp(prefix="playstick-tests-")
 atexit.register(shutil.rmtree, TMP, ignore_errors=True)
 
-os.environ.update({
-    "PLAYSTICK_UI": UI_HTML,
-    "PLAYSTICK_LIBRARY": os.path.join(TMP, "movies"),
-    # Set-but-empty means "ignore any index", which is the distinction
-    # config.py is careful about. Nothing here scans a library anyway.
-    "PLAYSTICK_INDEX": "",
-    "PLAYSTICK_THUMB_DIR": os.path.join(TMP, "thumbs"),
-    "PLAYSTICK_BUSY_FILE": os.path.join(TMP, "playing"),
-    "PLAYSTICK_RESTORE_FILE": os.path.join(TMP, "restore-airplay"),
-    "PLAYSTICK_ALLOW_NETWORKS": "",
-    "PLAYSTICK_AUDIO": "0",                 # the projector has no speakers
-    "PLAYSTICK_PHONE_AUDIO": "1",
-    # Pacing off by default so the suite is not sleeping through it. The one
-    # test that is ABOUT the pacing patches it back on at a rate of its own.
-    "PLAYSTICK_PHONE_AUDIO_KBPS": "0",
-    "PLAYSTICK_PHONE_AUDIO_BURST": "0",
-    "PLAYSTICK_PHONE_AUDIO_STREAMS": "6",
-    # Empty means airplay_active() answers False without shelling out to ss,
-    # so the interlock is a patch point rather than a dependency on iproute2.
-    "PLAYSTICK_AIRPLAY_PORT": "",
-})
-os.makedirs(os.environ["PLAYSTICK_THUMB_DIR"], exist_ok=True)
-os.makedirs(os.environ["PLAYSTICK_LIBRARY"], exist_ok=True)
+# The settings the daemon will read, written where nothing outside this run can
+# see them. Everything not named here takes config.py's own default, which is
+# the point of writing a partial file: a test that cares about a value sets it,
+# and a value nobody sets is exercised at the default that ships.
+SETTINGS = os.path.join(TMP, "settings.toml")
+LIBRARY_DIR = os.path.join(TMP, "movies")
+THUMB_DIR = os.path.join(TMP, "thumbs")
+
+with open(SETTINGS, "w") as _handle:
+    _handle.write(_toml({
+        "server": {
+            "ui_file": UI_HTML,
+            # Empty disables the CIDR check, so the tests reach the routes
+            # rather than the 403 in front of them. test_http_api puts it back
+            # for the tests that are about the check itself.
+            "allow_networks": [],
+        },
+        "library": {
+            "path": LIBRARY_DIR,
+            # Set-but-empty means "ignore any index", which is the distinction
+            # config.py is careful about. Nothing here scans a library anyway.
+            "index_file": "",
+        },
+        "thumbs": {"dir": THUMB_DIR},
+        "display": {
+            "busy_file": os.path.join(TMP, "playing"),
+            "restore_file": os.path.join(TMP, "restore-airplay"),
+            "has_audio": False,             # the projector has no speakers
+            # Empty means airplay_active() answers False without shelling out
+            # to ss, so the interlock is a patch point rather than a dependency
+            # on iproute2.
+            "airplay_port": "",
+        },
+        "phone_audio": {
+            "enabled": True,
+            # Pacing off by default so the suite is not sleeping through it.
+            # The one test that is ABOUT the pacing patches it back on at a
+            # rate of its own.
+            "kbps": 0,
+            "burst_seconds": 0,
+            "max_streams": 6,
+        },
+        # No host means NasWatcher.run returns immediately and power is
+        # "unknown", so nothing in the suite opens a socket to a real NAS.
+        # test_nas builds its own watcher with the host it wants.
+        "nas": {"host": ""},
+    }))
+
+os.environ["PLAYSTICK_SETTINGS"] = SETTINGS
+os.makedirs(THUMB_DIR, exist_ok=True)
+os.makedirs(LIBRARY_DIR, exist_ok=True)
 
 if SERVER not in sys.path:
     sys.path.insert(0, SERVER)
@@ -94,6 +142,30 @@ from playstick.projector import serial_io   # noqa: E402
 
 
 # -- the fakes
+
+
+class FakeNas:
+    """NasWatcher's two-method surface, plus a record of what was asked.
+
+    The real one opens sockets on a timer; nothing in the HTTP suite wants
+    that, and a test that is about the watcher itself builds a real one against
+    a loopback listener (see test_nas). Here the point is only that the handler
+    reports what it is told and refuses what it is refused.
+    """
+
+    def __init__(self, power="on", can_wake=False):
+        self.power = power
+        self.can_wake = can_wake
+        # What wake() should answer next, and how many times it was called.
+        self.reply = (True, "")
+        self.wakes = 0
+
+    def snapshot(self):
+        return {"power": self.power, "can_wake": self.can_wake}
+
+    def wake(self):
+        self.wakes += 1
+        return self.reply
 
 
 class FakeLibrary:
@@ -384,8 +456,10 @@ class ApiTest(unittest.TestCase):
         self.player = FakePlayer()
         self.projectionist = FakeProjectionist(self.player)
         self.thumbs = FakeThumbs()
+        self.nas = FakeNas()
         handler = type("TestHandler", (api.Handler,), {
             "library": self.library,
+            "nas": self.nas,
             "player": self.player,
             "projectionist": self.projectionist,
             "thumbs": self.thumbs,

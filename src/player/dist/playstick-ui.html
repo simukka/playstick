@@ -586,6 +586,11 @@
     volume(delta) {
       return this.post("/api/volume", { delta });
     }
+    /** Takes no body: there is one NAS and its address is a setting on the
+     * daemon, not something this page may name. */
+    wakeNas() {
+      return this.post("/api/nas/wake");
+    }
   };
 
   // src/dom.ts
@@ -739,6 +744,20 @@
   background: #2a2317; color: #ffd79a; font-size: 17px; line-height: 1.35;
 }
 #banner.on { display: block; }
+/* Sized like the other things a child taps rather than like a link in a
+   sentence: this is the whole remedy for an evening with no films, and it is
+   pressed by whoever is holding the phone, standing up, in the dark. */
+#bannerAct {
+  display: none; width: 100%; margin: 12px 0 2px; min-height: 64px;
+  border-radius: 14px; background: var(--accent); color: #06121f;
+  font-size: 20px; font-weight: 650;
+  transition: transform .08s ease;
+}
+#bannerAct.on { display: block; }
+#bannerAct:active { transform: scale(.97); }
+/* The message and the button are separate elements so that setText() can keep
+   its no-churn contract on the text while the button comes and goes. */
+#bannerMsg { display: block; }
 `;
   var PREPARING_CSS = `
 #preparing { text-align: center; }
@@ -840,17 +859,33 @@
     constructor(doc, now = Date.now) {
       this.now = now;
       this.hold = 0;
-      this.root = h(doc, "div", { id: "banner" });
+      this.tap = null;
+      this.msg = h(doc, "span", { id: "bannerMsg" });
+      this.act = h(doc, "button", {
+        id: "bannerAct",
+        type: "button",
+        onTap: () => {
+          var _a;
+          return (_a = this.tap) == null ? void 0 : _a.call(this);
+        }
+      });
+      this.root = h(doc, "div", { id: "banner" }, [this.msg, this.act]);
     }
     /**
      * Show a message, or clear it with "". A hold keeps a deliberate message (a
      * refusal) up for its full time rather than letting the next status poll wipe
      * it a second later -- the one message that explains why nothing happened must
      * be readable.
+     *
+     * An action turns the message into an offer. Passing none clears any previous
+     * one, so a banner cannot keep a button belonging to a situation that has
+     * passed -- which for the NAS button would mean offering to switch on a
+     * machine that is already running.
      */
-    show(text, holdMs = 0) {
+    show(text, holdMs = 0, action) {
       if (text) {
-        setText(this.root, text);
+        setText(this.msg, text);
+        this.setAction(action);
         this.root.classList.add("on");
         if (holdMs) {
           this.hold = this.now() + holdMs;
@@ -860,7 +895,15 @@
       if (this.now() < this.hold) {
         return;
       }
+      this.setAction(void 0);
       this.root.classList.remove("on");
+    }
+    setAction(action) {
+      this.tap = action ? action.onTap : null;
+      if (action) {
+        setText(this.act, action.label);
+      }
+      toggleClass(this.act, "on", !!action);
     }
   };
   var PreparingView = class {
@@ -964,6 +1007,7 @@
       });
       this.grid = deps.grid;
       this.reload = deps.reload;
+      this.wakeNas = deps.wakeNas;
     }
     apply(s) {
       var _a;
@@ -991,10 +1035,41 @@
           "Someone is using the projector to show their phone. The movies come back when they stop."
         );
       } else if (s.state === "unavailable") {
-        this.banner.show("Can't reach the movies right now — the NAS may be off.");
+        this.unreachable(s);
       } else {
         this.banner.show("");
       }
+    }
+    /**
+     * The films cannot be reached. Three different sentences, because they ask
+     * for three different things from whoever is holding the phone.
+     *
+     * The old one said "the NAS may be off" and stopped there: accurate, and
+     * useless, because it named the fix and offered no way to apply it. Somebody
+     * had to walk to the NAS and press its button. When the daemon can tell that
+     * the machine really is off AND knows how to wake it, the same sentence gets
+     * the button under it.
+     *
+     * The fallback is the important branch rather than the tidy one: a daemon
+     * from before this existed sends no `nas` field at all, and a NAS whose MAC
+     * was never configured reports can_wake false. Both must land on the message
+     * the page has always shown rather than on a button that does nothing.
+     */
+    unreachable(s) {
+      var _a, _b;
+      if (((_a = s.nas) == null ? void 0 : _a.power) === "waking") {
+        this.banner.show("Waking the NAS up — this takes a minute.");
+        return;
+      }
+      if (((_b = s.nas) == null ? void 0 : _b.power) === "off" && s.nas.can_wake && this.wakeNas) {
+        this.banner.show(
+          "Can't reach the movies — the NAS is off.",
+          0,
+          { label: "Turn it on", onTap: this.wakeNas }
+        );
+        return;
+      }
+      this.banner.show("Can't reach the movies right now — the NAS may be off.");
     }
   };
 
@@ -2452,13 +2527,29 @@ button:disabled { opacity: .45; }
       onFilterOpen: () => filterSheet.paint()
     });
     const libraryView = new LibraryView(doc, model, stamp, (id) => play(id), sheets.filterBtn);
+    let nasBusyUntil = 0;
+    const wakeNas = () => {
+      const now = Date.now();
+      if (now < nasBusyUntil) {
+        return;
+      }
+      nasBusyUntil = now + 800;
+      void api.wakeNas().then((r) => {
+        if (r.ok) {
+          presenter.apply(r.data);
+        } else if (r.data.error) {
+          presenter.banner.show(r.data.error, 6e3);
+        }
+      });
+    };
     const presenter = new StatusPresenter(doc, {
       reload,
       stamp,
       now: Date.now,
       library: libraryView.root,
       grid: libraryView.gridEl,
-      filterBtn: sheets.filterBtn
+      filterBtn: sheets.filterBtn,
+      wakeNas
     });
     new Controls(
       {

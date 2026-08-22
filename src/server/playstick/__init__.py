@@ -49,5 +49,18 @@ were already proved to sit under the library root by Library._under_root. The
 only files it can name are the ones playstick-prep.py wrote. No string a client
 sends is ever joined onto a filesystem path.
 
-Configuration is entirely environmental -- see playstick-web.service.
+THE SECOND ENDPOINT THAT REACHES OFF THIS BOX
+
+/api/nas/wake sends a wake-on-LAN packet, which is the only thing this daemon
+does that touches a machine other than itself. It is narrow in the same way and
+for the same reason as the audio route: it takes no body at all. There is one
+NAS, its address and MAC are settings, and no string a client sends reaches the
+socket -- a client cannot name a host to wake any more than it can name a file
+to play. What it can do is cause a packet to be sent, so the watcher rate-limits
+that on its own account rather than trusting six phones to agree.
+
+Configuration is one file -- /etc/playstick/settings.toml, named by
+PLAYSTICK_SETTINGS, which is the only environment variable this package reads.
+See config.py for what it holds and group_vars/all.yml for why each value is
+what it is.
 """

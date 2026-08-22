@@ -42,6 +42,17 @@ export interface Projector {
   fault: string;
 }
 
+/** The machine the films live on. Shaped like Projector deliberately: the page
+ * should not need a second vocabulary for a second device. */
+export interface Nas {
+  /** "on" | "off" | "waking" | "unknown". "unknown" means no NAS is configured
+   * -- or none has been probed yet -- and the page says nothing extra. */
+  power: string;
+  /** Whether this daemon could switch it on if asked. False when no MAC is
+   * configured, so the page never offers an action that cannot work. */
+  can_wake: boolean;
+}
+
 export type PlayerState =
   | "idle"
   | "preparing"
@@ -68,6 +79,9 @@ export interface Status {
   notice?: string;
   timecode?: Timecode | null;
   projector?: Projector;
+  /** Absent on a daemon from before wake-on-LAN existed, which is why the
+   * presenter falls back to the plain sentence rather than assuming. */
+  nas?: Nas;
 }
 
 export interface LibraryReply {

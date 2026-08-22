@@ -6,7 +6,7 @@ container, so the AirPlay interlock can be exercised without an iPhone.
 
 The daemon never asks "is UxPlay running" -- there is no UxPlay here and there
 would be no answer. It asks `ss` for an established connection with a source
-port of PLAYSTICK_AIRPLAY_PORT, because uxplay-kms holds the DRM node from
+port of [display] airplay_port, because uxplay-kms holds the DRM node from
 service start to shutdown and so can never distinguish idle from mirroring.
 That question has the same answer whatever is on the other end of the socket,
 which is the whole reason this file can be eleven lines of stdlib.

@@ -138,6 +138,8 @@ class Handler(BaseHTTPRequestHandler):
     timeout = 30
 
     library = None      # set on the server before serve_forever
+    # Whether the NAS is awake, and the one thing that can be done about it.
+    nas = None
     thumbs = None
     player = None
     # The parsed request body for the POST in flight, or None between requests.
@@ -300,6 +302,8 @@ class Handler(BaseHTTPRequestHandler):
                 delta = 0
             self.player.nudge_volume(delta)
             return self._api_status()
+        if path == "/api/nas/wake":
+            return self._api_nas_wake()
         if path == "/api/rescan":
             self.library.request_rescan()
             return self._json({"ok": True})
@@ -360,6 +364,26 @@ class Handler(BaseHTTPRequestHandler):
             ],
         }
         self._json(payload)
+
+    def _api_nas_wake(self):
+        """Switch the machine the films live on back on.
+
+        Takes no body: there is exactly one NAS and its address is a setting,
+        not something a client may name. That is the same rule /api/play
+        follows with film paths, applied to a host -- no string a client sends
+        reaches the socket.
+
+        Answers with the status payload on success, which is the convention
+        every other control POST here follows, so the phone repaints from the
+        response instead of waiting up to three seconds for the next poll. A
+        refusal is a 409 with a sentence the page shows verbatim; the cooldown
+        that produces most of them lives in the watcher rather than here,
+        because there is more than one phone.
+        """
+        ok, reason = self.nas.wake()
+        if not ok:
+            return self._json({"error": reason}, 409)
+        return self._api_status()
 
     def _api_admin_item(self):
         """One film's metadata, edited from the desktop admin view.
@@ -617,6 +641,15 @@ class Handler(BaseHTTPRequestHandler):
             # last of those, and only while a film is playing: a fault while
             # nothing is on screen is not yet anybody's problem.
             "projector": self.projectionist.projector_status(),
+            # Whether the machine the films live on is switched on, and
+            # whether this daemon could switch it on if asked. The page only
+            # draws it when the state is already "unavailable", where it
+            # turns a sentence about the NAS being off into a button.
+            #
+            # Additive, and the state field above is deliberately NOT changed
+            # to match: "unavailable" still means "no library", so a page
+            # cached from before this existed keeps working exactly as it did.
+            "nas": self.nas.snapshot(),
         })
 
     def _api_audio(self, ident, track):

@@ -62,4 +62,9 @@ export class ApiClient {
   volume(delta: number): Promise<PostResult> {
     return this.post("/api/volume", { delta });
   }
+  /** Takes no body: there is one NAS and its address is a setting on the
+   * daemon, not something this page may name. */
+  wakeNas(): Promise<PostResult> {
+    return this.post("/api/nas/wake");
+  }
 }

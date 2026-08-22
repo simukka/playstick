@@ -117,6 +117,32 @@ function boot(): void {
   });
 
   const libraryView = new LibraryView(doc, model, stamp, (id) => play(id), sheets.filterBtn);
+
+  // The one control that is not a playback button, so it is not the Controls'
+  // business -- but it wants the same double-tap lock, for the same reason:
+  // children press twice, and the daemon answers a second packet with a
+  // refusal the page would then have to explain. The daemon has a cooldown of
+  // its own for the six-phones case; this one is about one thumb.
+  let nasBusyUntil = 0;
+  const wakeNas = (): void => {
+    const now = Date.now();
+    if (now < nasBusyUntil) {
+      return;
+    }
+    nasBusyUntil = now + 800;
+    void api.wakeNas().then((r) => {
+      if (r.ok) {
+        // The status the POST returned, so the banner flips to "waking" now
+        // rather than up to three seconds from now. Somebody is watching it.
+        presenter.apply(r.data as unknown as Status);
+      } else if (r.data.error) {
+        // Held, because it is the only account of why nothing happened and the
+        // next poll is a second away.
+        presenter.banner.show(r.data.error, 6000);
+      }
+    });
+  };
+
   const presenter = new StatusPresenter(doc, {
     reload,
     stamp,
@@ -124,6 +150,7 @@ function boot(): void {
     library: libraryView.root,
     grid: libraryView.gridEl,
     filterBtn: sheets.filterBtn,
+    wakeNas,
   });
 
   new Controls(

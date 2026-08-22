@@ -350,6 +350,7 @@ place is a control that produces tears.
 nas_server: "10.0.1.5"
 nas_share: "movies"      # the exported share NAME. A Synology's /volume1/movies
                          # is exported as //nas/movies -- the last component alone.
+nas_mac: "00:11:32:aa:bb:cc"   # optional; see "Waking the NAS" below
 
 # host_vars/vivostick/vault.yml -- encrypted, and that path is load-bearing
 nas_username: "kyle"
@@ -362,6 +363,52 @@ address. Both are `host_vars`, and *that* path is the load-bearing part: `vivost
 shadows `group_vars/all.yml`. `vault.yml` also overrides `local.yml` where both define
 the same variable — lexical load order — so keep each variable in one file. The full
 command sequence is in [docs/install.md](docs/install.md#4-secrets-the-vault).
+
+### Waking the NAS
+
+The share is mounted on demand, so a NAS that is switched off is not a boot problem — it
+is an evening problem. The page used to say
+
+> Can't reach the movies right now — the NAS may be off.
+
+which is accurate and useless: it names the fix and offers no way to apply it, so somebody
+has to walk to the NAS and press its button. Set `nas_mac` and the same sentence gets a
+**Turn it on** button under it, and the daemon sends the wake-on-LAN packet itself.
+
+```bash
+ping -c1 10.0.1.5 && arp -n 10.0.1.5      # or DSM -> Control Panel -> Network
+```
+
+**Wake-on-LAN has to be enabled on the NAS too**, and nothing here can check that. On a
+Synology it is Control Panel → Hardware & Power → *Enable WOL on LAN 1*. With it off the
+symptom is a packet `tcpdump -ni any udp port 9` can watch leave the stick and a NAS that
+stays dark.
+
+How the daemon decides the NAS is off is worth knowing, because it is not the library
+scan. It opens a TCP connection to port **445** on a timer — SMB rather than ICMP, because
+a Synology answers ping well before `smbd` is listening, and a green light that promised
+films which are not there yet would make the button look broken the first time it worked.
+The cadence follows what is at stake: every 60 s while the NAS is up, every 10 s while it
+is down, every 5 s in the three minutes after somebody taps, which is the only time anyone
+is actually watching the screen.
+
+When it comes back the daemon clears any failed state on the `.mount` unit and asks the
+library to rescan immediately, rather than leaving the grid empty until the next scheduled
+scan up to five minutes later — which, to whoever pressed the button, is indistinguishable
+from the button not having worked.
+
+Everything degrades to the old behaviour rather than to a broken one. No `nas_mac`, a
+`nas_mac` that is not a MAC, no `nas_server`, or a page cached from before the feature
+existed: all of them get the sentence and no button. The state field in `/api/status` is
+deliberately unchanged — `unavailable` still means "no library" — and the NAS detail
+arrives in a new `nas` object beside `projector`, so an older page ignores it.
+
+To see the whole path on a laptop with no NAS anywhere near it, point the dev GUI at a
+port nothing is listening on:
+
+```bash
+PLAYSTICK_GUI_NAS=127.0.0.1:9999 make gui
+```
 
 ### Preparing the library first
 
@@ -1186,16 +1233,20 @@ makes this project hard. A container has no DRM node, no tty1, no VA-API and no
 systemd, so `--vo=drm`, `--drm-mode`, the DRM-master arbitration against
 `uxplay-kms.service` and every number under [Results](#results-so-far) stay
 device-only questions. mpv runs `--vo=null` here: the film is decoded and paced
-in real time and nothing is drawn. Two deviations from the unit are deliberate
-and worth knowing before trusting what you see — `PLAYSTICK_MIN_SIZE_MB=0`,
-because the generated clips are a few MB against the device's 100 MB floor, and
-`PLAYSTICK_AUDIO=1`, because the page hides its volume controls otherwise and
-they would never be looked at. Set it to `0` to see the layout as it ships.
+in real time and nothing is drawn.
+
+The container writes its own `/etc/playstick/settings.toml` at startup — see the
+heredoc in `scripts/gui-entrypoint.sh`, where every deviation from the appliance
+is commented next to the value that causes it. Two are worth knowing before
+trusting what you see: `min_size_mb = 0`, because the generated clips are a few
+MB against the device's 100 MB floor and would otherwise all be hidden, and
+`has_audio = true`, because the page hides its volume controls otherwise and they
+would never be looked at.
 
 ### Tests
 
 ```bash
-python3 -m unittest discover -s tests            # ~355 tests, about 12 seconds
+python3 -m unittest discover -s tests            # ~428 tests, about 12 seconds
 ./actl 'python3 -m unittest discover -s tests'   # the same, in the control node
 ```
 
@@ -1526,7 +1577,33 @@ console font and blanking timeout it changed are not restored — `setfont` with
 
 ## Tunables
 
-All in `group_vars/all.yml`.
+**All of them, in `group_vars/all.yml`.** That is now literally true rather than nearly
+true: the four `roles/*/defaults/main.yml` files that used to hold most of them are gone,
+and the roles carry no defaults at all. Below it the chain is mechanical —
+
+```
+group_vars/all.yml                          <- change a value here
+  -> roles/player/templates/settings.toml.j2
+    -> /etc/playstick/settings.toml          on the device
+      -> src/server/playstick/config.py
+```
+
+The daemon reads that one TOML file at import and nothing else; `PLAYSTICK_SETTINGS`,
+which names it, is the only environment variable left in the package. It replaced about
+forty-five `Environment=` lines in `playstick-web.service.j2`, which is where every knob
+used to be spelled out a third time. `--check --diff` on that file is the whole review of
+a configuration change.
+
+Three tiers, and the boundary is not stylistic:
+
+| file | holds | in git |
+|---|---|---|
+| `group_vars/all.yml` | how the appliance behaves. The same for everyone | yes |
+| `host_vars/vivostick/local.yml` | facts about one LAN: addresses, the login, the share name, the NAS's MAC | no |
+| `host_vars/vivostick/vault.yml` | secrets | no, and encrypted |
+
+A directory named `group_vars/all/` **shadows** `group_vars/all.yml` outright, taking
+every tunable below out of play at once. Do not create one.
 
 | variable | default | what it does |
 |---|---|---|
@@ -1555,6 +1632,10 @@ All in `group_vars/all.yml`.
 | `nas_server` / `nas_share` | `""` / `""` | The CIFS movie library. Set these in `host_vars/vivostick/local.yml`, not here. Both empty skips the role entirely. `nas_share` is the share **name**, not the server-side path |
 | `nas_mount_point` | `/srv/movies` | Where the share appears; the unit names are derived from it |
 | `nas_username` / `nas_password` | `""` | Vault these. Empty username mounts as guest |
+| `nas_mac` | `""` | The NAS's MAC, so the page can offer to switch it on when it is off. `host_vars`, not here. Empty keeps the sentence and drops the button — see [Waking the NAS](#waking-the-nas) |
+| `nas_probe_port` | `445` | What "is the NAS awake" means. SMB rather than ICMP: a Synology answers ping well before `smbd` is listening |
+| `nas_probe_interval` / `_down` / `_waking` | `60` / `10` / `5` | Seconds between probes when it is up, when it is down, and in the minute after somebody taps the button |
+| `nas_wake_cooldown` / `nas_wake_window` | `60` / `180` | Least seconds between packets, and how long the page says "waking" before offering the button again |
 | `player_vo` / `player_hwdec` | `drm` / `no` | Unproven pair — see [Movies from the NAS](#movies-from-the-nas) |
 | `player_audio` | `false` | `--ao=null`. **Films play silently** until HDMI audio is probed |
 | `player_enabled` / `player_port` | `true` / `80` | The web UI. Below 1024 needs `player_user: root`, which is the default |
@@ -1568,8 +1649,8 @@ All in `group_vars/all.yml`.
 | `player_projector_wake_on_airplay` | `true` | Whether mirroring may strike the lamp as well as a film |
 | `player_projector_airplay_wake_ticks` | `2` | Consecutive confirmed ticks first. Raise this if the projector ever switches itself on unbidden |
 
-The rest live in `roles/nas/defaults/main.yml` and `roles/player/defaults/main.yml`, the way
-`idle_*` and `trim_*` already do.
+The rest are in the same file, under the same `# --- section ---` headers, each with the
+reasoning next to it. There is nowhere else to look.
 
 ### On `drm_force_mode`
 

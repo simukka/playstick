@@ -18,6 +18,20 @@ export const BANNER_CSS = `
   background: #2a2317; color: #ffd79a; font-size: 17px; line-height: 1.35;
 }
 #banner.on { display: block; }
+/* Sized like the other things a child taps rather than like a link in a
+   sentence: this is the whole remedy for an evening with no films, and it is
+   pressed by whoever is holding the phone, standing up, in the dark. */
+#bannerAct {
+  display: none; width: 100%; margin: 12px 0 2px; min-height: 64px;
+  border-radius: 14px; background: var(--accent); color: #06121f;
+  font-size: 20px; font-weight: 650;
+  transition: transform .08s ease;
+}
+#bannerAct.on { display: block; }
+#bannerAct:active { transform: scale(.97); }
+/* The message and the button are separate elements so that setText() can keep
+   its no-churn contract on the text while the button comes and goes. */
+#bannerMsg { display: block; }
 `;
 
 /* A cold lamp takes the better part of a minute to strike, and for that minute
@@ -137,15 +151,34 @@ export class ViewSwitcher {
   }
 }
 
+/** An offer attached to a message: one label, one thing to do. Optional, and
+ * absent for every banner that only reports. */
+export interface BannerAction {
+  label: string;
+  onTap: () => void;
+}
+
 export class Banner {
   readonly root: HTMLElement;
+  private readonly msg: HTMLElement;
+  private readonly act: HTMLElement;
   private hold = 0;
+  private tap: (() => void) | null = null;
 
   constructor(
     doc: Document,
     private readonly now: () => number = Date.now,
   ) {
-    this.root = h(doc, "div", { id: "banner" });
+    this.msg = h(doc, "span", { id: "bannerMsg" });
+    // Built once and hidden, not created per message: the listener is attached
+    // here and reads through the mutable `tap` below, so a banner that changes
+    // what it offers does not leak a listener per poll.
+    this.act = h(doc, "button", {
+      id: "bannerAct",
+      type: "button",
+      onTap: () => this.tap?.(),
+    });
+    this.root = h(doc, "div", { id: "banner" }, [this.msg, this.act]);
   }
 
   /**
@@ -153,10 +186,16 @@ export class Banner {
    * refusal) up for its full time rather than letting the next status poll wipe
    * it a second later -- the one message that explains why nothing happened must
    * be readable.
+   *
+   * An action turns the message into an offer. Passing none clears any previous
+   * one, so a banner cannot keep a button belonging to a situation that has
+   * passed -- which for the NAS button would mean offering to switch on a
+   * machine that is already running.
    */
-  show(text: string, holdMs = 0): void {
+  show(text: string, holdMs = 0, action?: BannerAction): void {
     if (text) {
-      setText(this.root, text);
+      setText(this.msg, text);
+      this.setAction(action);
       this.root.classList.add("on");
       if (holdMs) {
         this.hold = this.now() + holdMs;
@@ -166,7 +205,16 @@ export class Banner {
     if (this.now() < this.hold) {
       return;
     }
+    this.setAction(undefined);
     this.root.classList.remove("on");
+  }
+
+  private setAction(action?: BannerAction): void {
+    this.tap = action ? action.onTap : null;
+    if (action) {
+      setText(this.act, action.label);
+    }
+    toggleClass(this.act, "on", !!action);
   }
 }
 

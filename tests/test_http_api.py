@@ -897,6 +897,79 @@ class Controls(ApiTest):
                 self.assertNotFound(self.fetch(path))
 
 
+class Nas(ApiTest):
+    """The button under "Can't reach the movies right now".
+
+    The watcher itself is tested in test_nas.py against real sockets; what is
+    checked here is only the join -- that the state reaches the page, that the
+    tap reaches the watcher, and that a refusal arrives as something the page
+    can show a child.
+    """
+
+    def test_the_status_carries_the_nas_alongside_the_projector(self):
+        self.nas.power = "off"
+        self.nas.can_wake = True
+        body = self.assertJson(self.fetch("/api/status"))
+        self.assertEqual(body["nas"], {"power": "off", "can_wake": True})
+
+    def test_the_state_field_is_left_alone(self):
+        """Deliberately NOT widened to a "nas-off" state. "unavailable" still
+        means "no library", so a page cached from before this existed keeps
+        working exactly as it did -- the same additive rule every field in this
+        payload has followed."""
+        self.library.available = False
+        self.nas.power = "off"
+        self.assertEqual(self.assertJson(self.fetch("/api/status"))["state"],
+                         "unavailable")
+
+    def test_a_tap_reaches_the_watcher_and_answers_with_the_new_status(self):
+        """The convention every other control POST here follows: the phone
+        repaints from the response rather than waiting up to three seconds for
+        the next poll."""
+        self.nas.power = "off"
+        self.nas.can_wake = True
+        # What the real watcher does on a successful wake: the window it opens
+        # is what makes power read "waking" on the very next snapshot.
+        sent = self.nas.wake
+
+        def wake():
+            self.nas.power = "waking"
+            return sent()
+
+        self.nas.wake = wake
+        body = self.assertJson(self.fetch("/api/nas/wake", method="POST"))
+        self.assertEqual(self.nas.wakes, 1)
+        self.assertEqual(body["nas"]["power"], "waking")
+        # A full status, not an acknowledgement.
+        self.assertIn("state", body)
+
+    def test_a_refusal_is_a_409_with_a_sentence_the_page_shows(self):
+        self.nas.reply = (False, "Already waking it up — give it a minute.")
+        res = self.fetch("/api/nas/wake", method="POST")
+        self.assertEqual(self.assertJson(res, 409)["error"],
+                         "Already waking it up — give it a minute.")
+        self.assertEqual(self.nas.wakes, 1)
+
+    def test_it_takes_no_body(self):
+        """There is one NAS and its address is a setting, not something a
+        client may name -- the same rule /api/play follows with film paths."""
+        res = self.fetch("/api/nas/wake", method="POST",
+                         body={"host": "10.0.0.1", "mac": "ff:ff:ff:ff:ff:ff"})
+        self.assertEqual(res.status, 200)
+        self.assertEqual(self.nas.wakes, 1)
+
+    def test_it_refuses_GET(self):
+        self.assertNotFound(self.fetch("/api/nas/wake"))
+
+    def test_it_is_behind_the_network_check(self):
+        """Waking a machine is exactly the kind of thing that should not be
+        reachable from off the LAN."""
+        with patched(ALLOW_NETWORKS=[ipaddress.ip_network("10.99.0.0/16")]):
+            res = self.fetch("/api/nas/wake", method="POST")
+        self.assertEqual(res.status, 403)
+        self.assertEqual(self.nas.wakes, 0)
+
+
 class Thumbs(ApiTest):
     def test_an_unknown_film_has_no_poster(self):
         self.assertNotFound(self.fetch("/api/thumb/" + OTHER))

@@ -64,4 +64,19 @@ describe("ApiClient control posts", () => {
     await api.volume(-10);
     expect(JSON.parse(calls[2]!.init!.body!)).toEqual({ delta: -10 });
   });
+
+  it("wakes the NAS with an empty body and surfaces a refusal", async () => {
+    /* No host and no MAC on the wire: there is one NAS and its address is a
+       setting on the daemon, not something this page may name. */
+    const { calls, api } = client(() => ({
+      ok: false,
+      body: { error: "Already waking it up — give it a minute." },
+    }));
+    const res = await api.wakeNas();
+    expect(calls[0]!.url).toBe("/api/nas/wake");
+    expect(calls[0]!.init!.method).toBe("POST");
+    expect(JSON.parse(calls[0]!.init!.body!)).toEqual({});
+    expect(res.ok).toBe(false);
+    expect(res.data.error).toBe("Already waking it up — give it a minute.");
+  });
 });

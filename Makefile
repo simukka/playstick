@@ -31,6 +31,14 @@ help:
 	@echo ""
 	@echo "Override the published port with PLAYSTICK_GUI_PORT, and the library"
 	@echo "with PLAYSTICK_GUI_LIBRARY=/path/to/movies."
+	@echo ""
+	@echo "The gui container writes /etc/playstick/settings.toml at startup"
+	@echo "from these; see scripts/gui-entrypoint.sh for what each one changes:"
+	@echo "  PLAYSTICK_GUI_PROJECTOR=       NullProjector instead of the fake"
+	@echo "  PLAYSTICK_GUI_PROJECTOR_IDLE=7 minutes before the lamp goes out"
+	@echo "  PLAYSTICK_GUI_NAS=127.0.0.1:9999"
+	@echo "                                 a dead port, to see the whole"
+	@echo "                                 'the NAS is off' path and its button"
 
 # Auto-installed on first use of any node target; delete node_modules or run
 # `make install` to refresh.

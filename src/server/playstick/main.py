@@ -11,6 +11,7 @@ from .config import (
     THUMB_DIR, log
 )
 from .library import Library
+from .nas import NasWatcher
 from .thumbs import Thumbs
 from .player import Player
 from .projectionist import Projectionist
@@ -23,6 +24,11 @@ def main():
         os.makedirs(THUMB_DIR, exist_ok=True)
 
     library = Library()
+    # The library so the watcher can ask for a rescan the moment the NAS
+    # answers again: without it the grid stays empty until the next
+    # scheduled scan, which to whoever pressed the button looks exactly
+    # like the button not having worked.
+    nas = NasWatcher(library=library)
     player = Player()
     # Nothing is opened here: the serial port is opened on the first command,
     # so a projector that is unplugged at boot cannot delay the web UI coming
@@ -51,8 +57,12 @@ def main():
     threading.Thread(target=thumbs.run, args=(stopping,), daemon=True).start()
     threading.Thread(target=projectionist.run, args=(stopping,),
                      daemon=True).start()
+    # Returns immediately when no NAS is configured, so this costs an
+    # unconfigured install one thread that exits.
+    threading.Thread(target=nas.run, args=(stopping,), daemon=True).start()
 
     Handler.library = library
+    Handler.nas = nas
     Handler.thumbs = thumbs
     Handler.player = player
     Handler.projectionist = projectionist

@@ -21,6 +21,9 @@ export interface PresenterDeps {
   grid: HTMLElement;
   /** The funnel, built by SheetManager: only the grid may show it. */
   filterBtn: HTMLElement;
+  /** Tapped when the banner offers to switch the NAS on. Absent in the tests
+   * that do not care, and then the offer is simply never made. */
+  wakeNas?: () => void;
 }
 
 export class StatusPresenter {
@@ -30,6 +33,7 @@ export class StatusPresenter {
   readonly playing: PlayingView;
   private readonly grid: HTMLElement;
   private readonly reload: ReloadPolicy;
+  private readonly wakeNas?: () => void;
 
   /** The state the last poll reported, read by the controls to decide what the
    * play/pause button does. */
@@ -47,6 +51,7 @@ export class StatusPresenter {
     });
     this.grid = deps.grid;
     this.reload = deps.reload;
+    this.wakeNas = deps.wakeNas;
   }
 
   apply(s: Status): void {
@@ -86,9 +91,42 @@ export class StatusPresenter {
           "The movies come back when they stop.",
       );
     } else if (s.state === "unavailable") {
-      this.banner.show("Can't reach the movies right now \u2014 the NAS may be off.");
+      this.unreachable(s);
     } else {
       this.banner.show("");
     }
+  }
+
+  /**
+   * The films cannot be reached. Three different sentences, because they ask
+   * for three different things from whoever is holding the phone.
+   *
+   * The old one said "the NAS may be off" and stopped there: accurate, and
+   * useless, because it named the fix and offered no way to apply it. Somebody
+   * had to walk to the NAS and press its button. When the daemon can tell that
+   * the machine really is off AND knows how to wake it, the same sentence gets
+   * the button under it.
+   *
+   * The fallback is the important branch rather than the tidy one: a daemon
+   * from before this existed sends no `nas` field at all, and a NAS whose MAC
+   * was never configured reports can_wake false. Both must land on the message
+   * the page has always shown rather than on a button that does nothing.
+   */
+  private unreachable(s: Status): void {
+    if (s.nas?.power === "waking") {
+      // No button: it has just been pressed, and offering it again would invite
+      // a second tap the daemon is only going to refuse.
+      this.banner.show("Waking the NAS up \u2014 this takes a minute.");
+      return;
+    }
+    if (s.nas?.power === "off" && s.nas.can_wake && this.wakeNas) {
+      this.banner.show(
+        "Can't reach the movies \u2014 the NAS is off.",
+        0,
+        { label: "Turn it on", onTap: this.wakeNas },
+      );
+      return;
+    }
+    this.banner.show("Can't reach the movies right now \u2014 the NAS may be off.");
   }
 }

@@ -134,6 +134,7 @@ ansible_user: <user>            # login user with sudo
 
 nas_server: "10.0.1.5"          # optional, section 5
 nas_share: "movies"
+nas_mac: "00:11:32:aa:bb:cc"    # optional; lets the web UI switch the NAS on
 ```
 
 Three files, three jobs, and the split is worth holding onto:
@@ -271,6 +272,7 @@ uxplay_output_path: kms          # kms | cage | none -- which receiver runs
 uxplay_advert_name: Projector    # what iOS shows in the AirPlay list
 nas_server: "10.0.1.5"           # both empty skips the movie library entirely
 nas_share: "movies"              # the SHARE NAME, not /volume1/movies -- see below
+nas_mac: ""                      # set it and the page can switch the NAS on
 player_audio: false              # films play SILENTLY until HDMI audio is probed
 player_projector_model: ""       # "" leaves the screen to be switched on by hand
 ```
@@ -296,6 +298,13 @@ Three of those have consequences worth knowing before the run rather than after:
   `dmesg`, and `volume1/video` asks for a share called `volume1` and returns
   `mount error(2): No such file or directory`. `smbclient -L <nas> -U <user>` lists the
   real names.
+- **`nas_mac` is optional and empty by default.** With it set, a page that cannot reach
+  the films offers a button that sends a wake-on-LAN packet instead of only reporting the
+  problem. Two things it needs beyond the address: the value has to be six hex octets, and
+  the role asserts on that rather than letting a typo become a packet nothing answers; and
+  wake-on-LAN has to be enabled on the NAS itself (Synology: Control Panel → Hardware &
+  Power → *Enable WOL on LAN 1*), which nothing here can check. Find the MAC with
+  `ping -c1 <nas_server>` followed by `arp -n <nas_server>`.
 - **`player_projector_model` is empty**, so nothing touches the projector and somebody
   switches the screen on by hand, exactly as before. Turning it on is a two-step job and
   the order matters: provision once with it empty, then run
