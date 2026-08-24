@@ -686,7 +686,7 @@ that must never stop a film playing.
 
 #### Adding another projector
 
-A file in `roles/player/files/playstick/projector/` and a line in its `MODELS`. Nothing
+A file in `src/server/playstick/projector/` and a line in its `MODELS`. Nothing
 else in the daemon names a model, an input code or a baud rate. `base.py` is the whole
 interface — `power_state`, `power_on`, `power_off`, `set_input`, `current_input` — and
 `serial_io.py` is reusable by anything that frames commands between two bytes.
@@ -1064,9 +1064,9 @@ somebody was watching should not be the thing that ends it.
 
 The hash is computed from the file on disk and cached against its mtime and
 size, which costs one `stat` per poll and gets the dev container the same
-behaviour for free: edit `roles/player/files/playstick-ui.html`, and every
-browser pointed at `docker compose up gui` reloads itself. That is the shipped
-mechanism, exercised every time anybody touches the page.
+behaviour for free: rebuild the page (`cd src/player && ./dx npm run build`),
+and every browser pointed at `docker compose up gui` reloads itself. That is the
+shipped mechanism, exercised every time anybody touches the page.
 
 **The same stamp busts the posters and the soundtracks.** There is no third
 asset to worry about — no CDN, no web fonts, no external images, one file — but
@@ -1142,13 +1142,14 @@ The container serves on port 80 exactly as the device does; only the *published*
 8080, because a host port below 1024 is refused under rootless Docker. Override with
 `PLAYSTICK_GUI_PORT`.
 
-The daemon and the page are bind-mounted from `roles/player/files/`, and the
-daemon re-reads `ui.html` on every request: edit the HTML, reload the browser.
-Python changes need `docker compose restart gui`.
+The daemon and the page are bind-mounted — the daemon from `src/server/` and the
+built page from `src/player/dist/` — and the daemon re-reads `ui.html` on every
+request: rebuild the page (`cd src/player && ./dx npm run build`) and reload the
+browser. Python changes need `docker compose restart gui`.
 
-The daemon itself is the `playstick/` package next to `playstick-web.py`, which
-is only an entry point — it prefers a `playstick/` sitting beside it, so a
-clone runs without being installed:
+The daemon itself is the `playstick/` package next to `playstick-web.py` under
+`src/server/`, which is only an entry point — it prefers a `playstick/` sitting
+beside it, so a clone runs without being installed:
 
 | module | what is in it |
 | --- | --- |
@@ -1243,42 +1244,39 @@ everything else that shares that id — another film's encode, a poster, a
 subtitle, a half-written `.part`, a `--force` run that failed — left exactly
 where it was.
 
-The page has its own, kept separate because they need node:
+The page is TypeScript under `src/player/`, built into one self-contained
+`dist/playstick-ui.html`, and has its own test and benchmark suite that needs
+node:
 
 ```bash
-./tests/js/run.sh          # uses local node, or node:22-alpine if there is none
+cd src/player
+./dx npm test              # vitest: every module's unit tests
+./dx npm run bench         # vitest bench: the mobile hot-path budgets
+./dx npm run build         # bundle -> dist/playstick-ui.html (committed)
 ```
 
-`tests/js/page.js` loads the real `playstick-ui.html` script under a stub DOM
-where **time is a variable the driver holds**, which is the only way a
-controller is testable at all. It also holds the network: a route can be given
-a round trip and a one-sided delay, so an estimate built out of timing is
-tested against a truth the driver knows exactly.
+`./dx` runs the toolchain in `node:22` when there is no local node, the same
+fallback as the Python control node. Each module carries **both** a `*.test.ts`
+and a `*.bench.ts`, and the controllers take their clock, network, storage and
+audio element as injected seams — so **time is a variable the test holds**,
+which is the only way a controller is testable at all, and a route can be given
+a round trip and a one-sided delay so an estimate built out of timing is tested
+against a truth the test knows exactly.
 
-`time.js` is the clock offset — that the quickest exchange wins and a congested
-one cannot walk the estimate off the truth, that a 40 ppm crystal is recovered
-through a network jittering by 60 ms, that an offset nobody refreshed goes
-quiet rather than stale while the ratio it helped measure survives, and that a
-daemon which restarted is noticed rather than absorbed. `clock.js` is the
-timecode: audio starting on the first poll, a stopped timeline parking the
-element where the daemon says rather than where it drifted to, a discontinuity
-costing one seek and not a clock model, and a phone whose DAC is 60 ppm off
-being found by the integrator that the measurement cannot reach inside for. It
-still replays the opening of the 2026-08-02 capture — the same reading, taken
-1.19 s before it was sent, must land the element within 10 ms where the old
-model put it 1180 ms late. `telemetry.js` is mostly negatives: a stall detector
-that counts a seek, a deliberate slowdown or iOS's frame quantisation as a
-dropout does not report a fault, it manufactures one, in the log the next fix
-gets argued from. `tune.js` covers the debug sheet's parameter controls,
-including the taps going through the handlers the page really attached.
-`library.js` is the grid's filters, and holds the things that decide what a
-child can see: A to Z is byte-identical to the unfiltered order the server sent,
-a film with no year is last in *both* year orders, no combination can leave the
-grid empty without a way back out, and a poster arriving mid-scan lands on its
-own tile rather than on whichever one shares its index. `preparing.js` is the
-view a child watches while a lamp warms up, `admin.js` the curator's editor, and
-`build.js` the reload after a deploy — mostly the moments it must *not* pick,
-since a reload drops the audio element out of somebody's ears.
+`clock.ts` is the offset and the crystal ratio — the quickest exchange wins and
+a congested one cannot walk the estimate off the truth, a drifting offset is
+fitted to a slope rather than chased, and a daemon that restarted resets rather
+than being absorbed. `timecode.ts` and `sync.ts` are the audio: where the film
+is on this phone's clock, a stopped timeline parking the element, a
+discontinuity costing one seek and not a clock model, the two write gates that
+keep the loop from feeding on its own 43 ms writes, and a phone whose DAC is off
+by tens of ppm being closed without a seek. `library.ts` is the grid's filters
+— A to Z byte-identical to the order the server sent, a film with no year last
+in *both* year orders, no combination leaving the grid empty without a way back
+— and `dom.ts` is the keyed reconciler, which moves nothing on an unchanged poll
+and lands a poster arriving mid-scan on its own tile. The views, the presenter,
+the two sheets, the poll loop and the debug telemetry each have their own file;
+the benchmarks assert the per-tick and per-poll paths stay allocation-free.
 
 ## Results so far
 

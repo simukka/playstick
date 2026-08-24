@@ -1,0 +1,5 @@
+# Node toolchain runs in Docker (node:22); its output is not committed.
+node_modules/
+
+# dist/ IS committed on purpose: the device is offline and Ansible/Docker ship
+# the built page as a static file. See build.mjs.

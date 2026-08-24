@@ -123,6 +123,24 @@ class Routing(ApiTest):
         after = self.fetch("/api/status", conn=conn)
         self.assertEqual(self.assertJson(after)["state"], "idle")
 
+    def test_a_body_less_post_drains_its_body_for_the_next_request(self):
+        """pause/resume/stop take no argument, and the routes that DO take one
+        were the only ones reading the body. Under HTTP/1.1 keep-alive that
+        left the "{}" the page sends on the wire, and the next request line
+        parsed as "{}POST /api/resume" -> 501 Unsupported method ('{}POST').
+        A browser reuses the connection; the test client has to be told to,
+        which is why the suite -- one fresh connection per fetch -- never saw
+        it.
+        """
+        conn = self.connect()
+        first = self.fetch("/api/pause", method="POST", body={}, conn=conn)
+        self.assertEqual(first.status, 200)
+        second = self.fetch("/api/resume", method="POST", body={}, conn=conn)
+        self.assertEqual(second.status, 200)
+        self.assertEqual(self.assertJson(second)["state"], "idle")
+        third = self.fetch("/api/stop", method="POST", body={}, conn=conn)
+        self.assertEqual(third.status, 200)
+
 
 class Build(ApiTest):
     """Which build the page is, and how a phone finds out it is not that one.

@@ -35,8 +35,12 @@ from unittest import mock
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FILES = os.path.join(ROOT, "roles", "player", "files")
-UI_HTML = os.path.join(FILES, "playstick-ui.html")
+SERVER = os.path.join(ROOT, "src", "server")
+# The served page is the built bundle, committed under src/player/dist. It is
+# the daemon's real input (config.py's PLAYSTICK_UI), so the HTTP tests exercise
+# what ships rather than a hand-written stand-in. Rebuild with src/player's
+# `npm run build` after a UI change.
+UI_HTML = os.path.join(ROOT, "src", "player", "dist", "playstick-ui.html")
 
 # Scratch for the two directories the daemon really touches: the poster cache
 # (Thumbs.cached_path resolves against it, and _api_thumb reads it directly)
@@ -68,10 +72,10 @@ os.environ.update({
 os.makedirs(os.environ["PLAYSTICK_THUMB_DIR"], exist_ok=True)
 os.makedirs(os.environ["PLAYSTICK_LIBRARY"], exist_ok=True)
 
-if FILES not in sys.path:
-    sys.path.insert(0, FILES)
+if SERVER not in sys.path:
+    sys.path.insert(0, SERVER)
 
-# Not a micro-optimisation. roles/player/files/playstick/ is the src of an
+# Not a micro-optimisation. src/server/playstick/ is the src of an
 # Ansible copy, and that task ships the directory whole -- so a __pycache__ the
 # test run left behind is bytecode from a developer's Python transferred onto a
 # device with 32 GB of eMMC and a different interpreter. Git ignores it and

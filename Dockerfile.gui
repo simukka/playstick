@@ -4,9 +4,9 @@
 #
 # This is a second image with a different job from the Dockerfile next to it:
 # that one is the Ansible control node, this one runs the thing Ansible would
-# have installed. It exists so that roles/player/files/{playstick-web,
-# playstick-ui.html} can be iterated on without a VivoStick, a projector or a
-# NAS in the loop.
+# have installed. It exists so that the daemon under src/server/ and the built
+# page under src/player/dist/ can be iterated on without a VivoStick, a
+# projector or a NAS in the loop.
 #
 # WHAT IT TESTS FAITHFULLY
 #
@@ -39,9 +39,9 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY roles/player/files/playstick/ /usr/local/lib/playstick/
-COPY roles/player/files/playstick-web.py /usr/local/bin/playstick-web.py
-COPY roles/player/files/playstick-ui.html /usr/local/share/playstick/ui.html
+COPY src/server/playstick/ /usr/local/lib/playstick/
+COPY src/server/playstick-web.py /usr/local/bin/playstick-web.py
+COPY src/player/dist/playstick-ui.html /usr/local/share/playstick/ui.html
 COPY scripts/gui-entrypoint.sh /usr/local/bin/playstick-gui-entrypoint
 COPY scripts/gui-fake-airplay.py /usr/local/bin/fake-airplay
 RUN chmod 0755 /usr/local/bin/playstick-gui-entrypoint \
