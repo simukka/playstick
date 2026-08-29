@@ -142,6 +142,28 @@ class DeviceClient:
                              raw=data, content_type=content_type,
                              timeout=max(self.timeout, 30.0))
 
+    def thumb_bytes(self, film_id):
+        """One poster's bytes off the device, or b"" if it has none.
+
+        Deliberately NOT through _request, which parses JSON: this is the one
+        response on the daemon that is an image. A film with no poster answers
+        with the placeholder SVG rather than a 404 -- the grid never waits --
+        and an SVG is not a poster, so it is filtered here rather than being
+        cached and drawn as a grey letter.
+        """
+        req = urllib.request.Request(self._url("/api/thumb/%s" % film_id),
+                                     headers={"Accept": "image/jpeg, image/png"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                kind = (resp.headers.get("Content-Type") or "").lower()
+                if "svg" in kind:
+                    return b""
+                return resp.read()
+        except urllib.error.HTTPError:
+            return b""
+        except (urllib.error.URLError, OSError) as exc:
+            raise DeviceError("GET /api/thumb/%s: %s" % (film_id, exc)) from exc
+
     def clear_thumb(self, film_id):
         """Forget a poster, so the device extracts a frame instead. The way to
         undo a wrong one: a sync deliberately leaves posters alone, so nothing

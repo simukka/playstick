@@ -136,7 +136,9 @@ class MetadataEditor(QWidget):
             self._hidden.setChecked(False)
             self._match_label.setText("")
             return
-        self._heading.setText(movie.get("source_rel") or movie.get("title") or "")
+        self._heading.setText("%s%s" % (
+            movie.get("source_rel") or movie.get("title") or "",
+            self._where(movie)))
         self._title.setText(str(movie.get("title") or ""))
         self._sort_title.setText(str(movie.get("sort_title") or ""))
         self._year.setText(str(movie.get("year") or ""))
@@ -148,6 +150,23 @@ class MetadataEditor(QWidget):
         self._query.setText(str(movie.get("title") or ""))
         self._query_year.setText(str(movie.get("year") or ""))
         self._update_match_label()
+
+    @staticmethod
+    def _where(movie):
+        """Whether the stick has this film, said before somebody edits it.
+
+        A film prepared here but never synced cannot take an edit on the device
+        -- there is no row to attach one to -- and the least helpful moment to
+        discover that is after pressing Save. The edit is still worth making:
+        it goes into the overrides file and the next prep run and sync carry it
+        over, which is what the sentence says.
+        """
+        if movie.get("unsynced"):
+            return "   [not on the stick yet -- Device tab, Sync library]"
+        edited = movie.get("device_overrides") or {}
+        if edited:
+            return "   [edited on the stick: %s]" % ", ".join(sorted(edited))
+        return ""
 
     def _update_match_label(self):
         if self._pending_tmdb_id:
@@ -223,6 +242,12 @@ class MetadataEditor(QWidget):
         """
         url = self._settings.device_url
         if not url:
+            return
+        # A film the stick has never been told about has no row to hang an
+        # override on, and the daemon rightly answers 404. That is not a fault
+        # and must not be reported as one: the edit is recorded here and the
+        # sync will carry it. The heading already said so.
+        if self._movie and self._movie.get("unsynced"):
             return
         try:
             DeviceClient(url).admin_item(film_id, fields)

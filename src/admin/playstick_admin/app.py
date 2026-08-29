@@ -1,4 +1,12 @@
-"""The main window: four tabs, a menu, and the wiring between them."""
+"""The main window: four tabs, a menu, and the wiring between them.
+
+The tabs are steps in an order, and the order is the thing to know: Prepare
+makes films on this machine, Library shows what the stick is holding and edits
+it, Device carries the first onto the second. Nothing reaches the stick without
+that third step -- the daemon has its own database and reads no index -- which
+is why a sync finishing refreshes the Library tab and an edit saved there
+refreshes the Device tab.
+"""
 
 from PySide6.QtWidgets import QMainWindow, QMessageBox, QTabWidget
 
@@ -52,7 +60,7 @@ class MainWindow(QMainWindow):
         # the stick actually knowing about it.
         self._device.libraryChanged.connect(self._library.reload)
         # An edit saved in the Library tab is also sent to the device, so the
-        # Device tab's film list is stale afterwards.
+        # Device tab's summary of what the stick holds is stale afterwards.
         self._library.savedOverride.connect(self._device.refresh_library)
         # Correcting a film and asking to re-prepare hands off to the Prepare tab.
         self._library.reprepareRequested.connect(self._on_reprepare)

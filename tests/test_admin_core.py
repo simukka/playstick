@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.join(ROOT, "src", "prep"))
 
 from playstick_admin.core import overrides as ov          # noqa: E402
 from playstick_admin.core import library_model             # noqa: E402
+from playstick_admin.core import posters                   # noqa: E402
 from playstick_admin.core import sync                      # noqa: E402
 from playstick_admin.core.device_client import DeviceClient, DeviceError  # noqa: E402
 import playstick_prep as prep                              # noqa: E402
@@ -97,12 +98,19 @@ class Device:
     films = []          # what GET /api/admin/library answers with
     synced = []         # bodies POSTed to /api/admin/films
     thumbs = []         # (film_id, bytes) PUT to /api/admin/thumb/<id>
+    thumb_gets = []     # film ids fetched from /api/thumb/<id>
+    # What /api/thumb/<id> hands back. The daemon answers a film with no poster
+    # with the placeholder SVG rather than a 404 -- the grid never waits -- so
+    # a test can put that here and check it is not mistaken for a poster.
+    serves = (b"\xff\xd8\xffposter", "image/jpeg")
 
     @classmethod
     def reset(cls, films=()):
         cls.films = list(films)
         cls.synced = []
         cls.thumbs = []
+        cls.thumb_gets = []
+        cls.serves = (b"\xff\xd8\xffposter", "image/jpeg")
 
 
 class _StubHandler(BaseHTTPRequestHandler):
@@ -126,6 +134,14 @@ class _StubHandler(BaseHTTPRequestHandler):
             self._send({"state": "idle", "title": ""})
         elif self.path == "/api/admin/library":
             self._send({"films": Device.films, "library": "/srv/movies"})
+        elif self.path.startswith("/api/thumb/"):
+            Device.thumb_gets.append(self.path.rsplit("/", 1)[-1])
+            data, kind = Device.serves
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         else:
             self._send({})
 
@@ -314,6 +330,195 @@ class SyncPull(unittest.TestCase):
         Device.films = [{"id": "a" * 16, "overrides": {}}]
         self.assertEqual(sync.pull_overrides(self.client, self.dir), 0)
         self.assertEqual(ov.load(self.dir), {})
+
+
+class MergedMovies(unittest.TestCase):
+    """Which of the two places a film's fields come from.
+
+    The device holds the film table and the edits; the index on this machine
+    holds what only a prep run knows. Getting the precedence wrong here is the
+    kind of bug that shows a title somebody fixed weeks ago.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="playstick-merge-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def write_index(self, movies):
+        with open(os.path.join(self.dir, "playstick-library.json"), "w") as f:
+            json.dump({"schema": 1, "movies": movies}, f)
+
+    def test_with_no_device_it_is_the_index_and_the_local_overrides(self):
+        """The fallback, and it is not a nicety: preparing a library is most of
+        a day and must not require the stick to be plugged in."""
+        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
+                           "title": "Hook", "year": 1991}])
+        ov.set_entry(self.dir, "a" * 16, title="Hook (1991)")
+        movies = library_model.merged_movies(self.dir)
+        self.assertEqual(len(movies), 1)
+        self.assertEqual(movies[0]["title"], "Hook (1991)")
+        self.assertEqual(movies[0]["source"], "index")
+        self.assertTrue(movies[0]["has_override"])
+
+    def test_the_device_wins_over_the_index(self):
+        """What the stick says a film is called is what a child is looking at.
+        An index that still has the old title is the stale one."""
+        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
+                           "title": "Red Hook Summer", "year": 2012}])
+        movies = library_model.merged_movies(self.dir, [
+            {"id": "a" * 16, "source_rel": "Hook/Hook.mkv", "title": "Hook",
+             "year": 1991, "overrides": {"title": "Hook"}, "thumb_etag": ""}])
+        self.assertEqual(movies[0]["title"], "Hook")
+        self.assertEqual(movies[0]["year"], 1991)
+        self.assertEqual(movies[0]["source"], "device")
+
+    def test_prep_facts_survive_underneath(self):
+        """The device has no column for a verify note or a match score, and a
+        merge that dropped them would empty the Notes column."""
+        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
+                           "title": "Hook", "notes": ["short by 3s"],
+                           "tmdb_score": 0.91, "width": 1280}])
+        movies = library_model.merged_movies(self.dir, [
+            {"id": "a" * 16, "source_rel": "Hook/Hook.mkv", "title": "Hook",
+             "overrides": {}, "thumb_etag": ""}])
+        self.assertEqual(movies[0]["notes"], ["short by 3s"])
+        self.assertEqual(movies[0]["tmdb_score"], 0.91)
+        self.assertEqual(movies[0]["width"], 1280)
+
+    def test_a_film_the_stick_has_never_heard_of_is_shown_and_marked(self):
+        """The single most useful thing this tab can say: it is prepared here
+        and it is not over there, which means the sync has not been run."""
+        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
+                           "title": "Hook"},
+                          {"id": "b" * 16, "source_rel": "Ponyo/Ponyo.mkv",
+                           "title": "Ponyo"}])
+        movies = library_model.merged_movies(self.dir, [
+            {"id": "a" * 16, "source_rel": "Hook/Hook.mkv", "title": "Hook",
+             "overrides": {}, "thumb_etag": ""}])
+        by_title = {m["title"]: m for m in movies}
+        self.assertTrue(by_title["Ponyo"]["unsynced"])
+        self.assertFalse(by_title["Hook"].get("unsynced"))
+
+    def test_the_edited_title_is_the_one_shown(self):
+        """/api/admin/library reports the base row and its edits separately --
+        deliberately, so this app can tell a chosen title from a derived one --
+        which means the join is this module's job.
+
+        Skipping it reads as a film marked "edited" still showing the title the
+        edit replaced. That is convincing enough to survive being looked at,
+        and it is what this assertion is here to stop.
+        """
+        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
+                           "title": "Red Hook Summer"}])
+        movies = library_model.merged_movies(self.dir, [
+            {"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
+             "title": "Red Hook Summer", "year": 2012,
+             "overrides": {"title": "Hook", "year": 1991}, "thumb_etag": ""}])
+        self.assertEqual(movies[0]["title"], "Hook")
+        self.assertEqual(movies[0]["year"], 1991)
+        # ...and the base is still reachable, because writing the edit back
+        # into the preparer's overrides file needs to know which is which.
+        self.assertEqual(movies[0]["device_overrides"],
+                         {"title": "Hook", "year": 1991})
+
+    def test_an_edit_made_elsewhere_still_reads_as_an_edit(self):
+        """has_override comes from the DEVICE's answer, not this machine's
+        overrides file -- an edit made from another copy of this app is still
+        an edit, and the star in the title column should say so."""
+        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
+                           "title": "Hook"}])
+        movies = library_model.merged_movies(self.dir, [
+            {"id": "a" * 16, "source_rel": "Hook/Hook.mkv", "title": "Fixed",
+             "overrides": {"title": "Fixed"}, "thumb_etag": ""}])
+        self.assertTrue(movies[0]["has_override"])
+        self.assertEqual(movies[0]["device_overrides"], {"title": "Fixed"})
+
+    def test_a_pinned_tmdb_match_comes_from_the_local_file(self):
+        """The device stores tmdb_id as a plain column from the sync and has no
+        notion of one having been CHOSEN. That distinction is this app's, so it
+        has to survive being shown device rows."""
+        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
+                           "title": "Hook"}])
+        ov.set_entry(self.dir, "a" * 16, tmdb_id=2493)
+        movies = library_model.merged_movies(self.dir, [
+            {"id": "a" * 16, "source_rel": "Hook/Hook.mkv", "title": "Hook",
+             "overrides": {}, "thumb_etag": ""}])
+        self.assertEqual(movies[0]["override_tmdb_id"], 2493)
+
+    def test_an_empty_device_with_a_prepared_index_shows_everything_unsynced(self):
+        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
+                           "title": "Hook"}])
+        movies = library_model.merged_movies(self.dir, [])
+        self.assertEqual(len(movies), 1)
+        self.assertTrue(movies[0]["unsynced"])
+
+
+class PosterCache(unittest.TestCase):
+    """Posters fetched off the device, kept by etag."""
+
+    def setUp(self):
+        Device.reset()
+        self.dir = tempfile.mkdtemp(prefix="playstick-cache-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        # posters.cache_dir() reads the environment on every call, so pointing
+        # it at scratch needs no patching of the module.
+        old = os.environ.get("XDG_CACHE_HOME")
+        os.environ["XDG_CACHE_HOME"] = self.dir
+        self.addCleanup(lambda: os.environ.__setitem__("XDG_CACHE_HOME", old)
+                        if old is not None
+                        else os.environ.pop("XDG_CACHE_HOME", None))
+        self.client = DeviceClient(BASE)
+
+    def test_a_poster_is_fetched_once_and_then_served_from_disk(self):
+        """The point of the whole arrangement: the second time the tab is
+        opened it makes no requests at all."""
+        path = posters.fetch(self.client, "a" * 16, "etag1")
+        self.assertEqual(open(path, "rb").read(), b"\xff\xd8\xffposter")
+        self.assertEqual(Device.thumb_gets, ["a" * 16])
+        again = posters.fetch(self.client, "a" * 16, "etag1")
+        self.assertEqual(again, path)
+        self.assertEqual(Device.thumb_gets, ["a" * 16])       # not asked twice
+
+    def test_a_changed_poster_has_a_different_key(self):
+        """Keyed by etag rather than film id, so nothing has to be invalidated
+        and a stale file cannot be served."""
+        first = posters.fetch(self.client, "a" * 16, "etag1")
+        Device.serves = (b"\xff\xd8\xffdifferent", "image/jpeg")
+        second = posters.fetch(self.client, "a" * 16, "etag2")
+        self.assertNotEqual(first, second)
+        self.assertEqual(open(second, "rb").read(), b"\xff\xd8\xffdifferent")
+
+    def test_the_placeholder_is_not_mistaken_for_a_poster(self):
+        """A film with no poster gets the daemon's SVG rather than a 404 -- the
+        grid never waits. An SVG is not a poster and must not be cached as one,
+        or the row would show a grey letter forever."""
+        Device.serves = (b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+                         "image/svg+xml")
+        self.assertIsNone(posters.fetch(self.client, "a" * 16, "etag1"))
+
+    def test_no_etag_is_never_fetched(self):
+        """A film the device says it has no poster for. Asking anyway would be
+        one wasted request per unpostered film on every refresh."""
+        self.assertIsNone(posters.cached(""))
+        self.assertEqual(Device.thumb_gets, [])
+
+    def test_sweep_leaves_a_small_cache_alone(self):
+        """Deleting one still in use costs a refetch; keeping a stale one costs
+        a few kilobytes. Below the limit the trade is obvious."""
+        posters.fetch(self.client, "a" * 16, "etag1")
+        self.assertEqual(posters.sweep(set()), 0)
+        self.assertIsNotNone(posters.cached("etag1"))
+
+    def test_sweep_drops_what_nothing_refers_to_once_it_is_large(self):
+        for i in range(5):
+            posters.store("etag%d" % i, b"\xff\xd8\xffx")
+        self.assertEqual(posters.sweep({"etag0"}, limit=2), 4)
+        self.assertIsNotNone(posters.cached("etag0"))
+        self.assertIsNone(posters.cached("etag3"))
+
+    def test_a_missing_cache_directory_is_not_an_error(self):
+        """sweep runs on every reload, including the first one ever."""
+        self.assertEqual(posters.sweep({"a"}), 0)
 
 
 if __name__ == "__main__":
