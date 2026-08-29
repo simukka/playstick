@@ -10,17 +10,16 @@ class _SearchJob(QObject):
     failed = Signal(str)
     finished = Signal()
 
-    def __init__(self, key, output_dir, language, query, year):
+    def __init__(self, key, language, query, year):
         super().__init__()
         self._key = key
-        self._output_dir = output_dir
         self._language = language
         self._query = query
         self._year = year
 
     def run(self):
         try:
-            client = TmdbSearch(self._key, self._output_dir, self._language)
+            client = TmdbSearch(self._key, self._language)
             rows = client.search(self._query, self._year)
         except TmdbError as exc:
             self.failed.emit(str(exc))
@@ -32,10 +31,10 @@ class _SearchJob(QObject):
             self.finished.emit()
 
 
-def start_search(key, output_dir, language, query, year):
+def start_search(key, language, query, year):
     """Returns (job, thread); connect job.results/job.failed then thread.start()."""
     thread = QThread()
-    job = _SearchJob(key, output_dir, language, query, year)
+    job = _SearchJob(key, language, query, year)
     job.moveToThread(thread)
     thread.started.connect(job.run)
     job.finished.connect(thread.quit)

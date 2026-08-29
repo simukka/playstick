@@ -18,6 +18,7 @@ playstick-admin = "playstick_admin.__main__:main"
 [tool.setuptools]
 packages = [
     "playstick_admin",
+    "playstick_admin.bridges",
     "playstick_admin.core",
     "playstick_admin.views",
 ]

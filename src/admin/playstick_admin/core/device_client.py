@@ -134,6 +134,18 @@ class DeviceClient:
                               "reconcile": bool(reconcile)},
                              timeout=max(self.timeout, 60.0))
 
+    def delete_films(self, ids):
+        """Take named films off the device.
+
+        Deliberately NOT sync_films(reconcile=True) with the survivors, which
+        would be the same instruction phrased as "everything except these" --
+        and would therefore also delete every film on the stick this machine
+        does not know about. Removing one film should not be able to empty a
+        library.
+        """
+        return self._request("/api/admin/films/delete", "POST",
+                             {"ids": list(ids)})
+
     def put_thumb(self, film_id, data, content_type="image/jpeg"):
         """One poster's bytes. The daemon stores them in its database and
         serves them from there, so this is what makes a poster survive a

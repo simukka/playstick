@@ -1,9 +1,32 @@
 """Persistent application settings, backed by QSettings.
 
-Everything a run needs that is not in the library itself: where the source
-films are, where prepared output goes, how to reach the stick, and the optional
-TMDb key. Stored per-user by Qt in the platform's native location.
+Everything a run needs that is not in the admin database: where the share is,
+where films are prepared before they reach it, how to reach the stick, and the
+optional TMDb key. Stored per-user by Qt in the platform's native location.
+
+WHAT REPLACED `source_library` AND `output_dir`, AND WHY
+
+There used to be one source directory and one output directory, and the output
+defaulted to the source -- which was coherent while the only films this app
+could see were the ones already on the share it wrote back to.
+
+The host sees more than that. Sources are many and they live in the admin
+database now, because a source is a thing with a scan history and a set of
+films, not a string. What is left here is the one path that is genuinely
+configuration rather than data: `nas_root`, the share as this machine mounts it.
+
+`nas_root` is the frame of reference for everything sent to the stick. The stick
+mounts the same share read-only at /srv/movies and resolves every path it is
+given against that, refusing anything that lands outside. So every path in a
+push is relative to this directory, and pointing it somewhere else invalidates
+the whole database at once -- which is why core.identity.guard_nas_root exists
+and why this module keeps the old keys around only long enough to import from.
+
+`staging_dir` is where a film is prepared before it moves. Local disk on
+purpose: an encode is hours of small writes and the mount is the slow part.
 """
+
+import os
 
 from PySide6.QtCore import QSettings
 
@@ -11,6 +34,11 @@ from . import paths
 
 ORG = "playstick"
 APP = "admin"
+
+# Bumped when the keys below change shape, so migrate() runs once rather than
+# on every launch. It is not a schema version -- QSettings has no schema -- it
+# is a record of which one-way conversions have already happened.
+SETTINGS_VERSION = 1
 
 
 class Settings:
@@ -25,28 +53,53 @@ class Settings:
         self._s.setValue(key, value)
         self._s.sync()
 
-    # The library the preparer reads (the source films).
+    # --- the share ---------------------------------------------------------
+
     @property
-    def source_library(self):
-        return str(self._get("source_library", ""))
+    def nas_root(self):
+        """The share, as it is mounted on THIS machine.
 
-    @source_library.setter
-    def source_library(self, value):
-        self._set("source_library", value)
+        Writable here and read-only on the stick, which is the asymmetry the
+        whole arrangement rests on: this is the machine that puts films there.
+        """
+        return str(self._get("nas_root", ""))
 
-    # Where the index and .playstick/ are written. Empty means "the library".
+    @nas_root.setter
+    def nas_root(self, value):
+        self._set("nas_root", value)
+
+    def nas_root_problem(self):
+        """Why this share cannot be used, or None.
+
+        Checked at the point somebody sets it rather than at the point a job
+        fails, because a read-only mount here produces a working scan, a working
+        encode, and then a failure at the last step -- an hour later, every
+        time. That is the same shape of invisible fault as the overrides file
+        that lived on a read-only mount and silently lost every correction.
+        """
+        root = self.nas_root
+        if not root:
+            return "Set the NAS root: the share, as it is mounted on this machine."
+        root = os.path.expanduser(root)
+        if not os.path.isdir(root):
+            return "%s is not a directory." % root
+        if not os.access(root, os.W_OK):
+            return ("%s is not writable. The stick mounts the share read-only, "
+                    "but this machine is the one that puts films on it." % root)
+        return None
+
+    # --- where films are made before they get there ------------------------
+
     @property
-    def output_dir(self):
-        return str(self._get("output_dir", ""))
+    def staging_dir(self):
+        return str(self._get("staging_dir", "")) or paths.default_staging()
 
-    @output_dir.setter
-    def output_dir(self, value):
-        self._set("output_dir", value)
+    @staging_dir.setter
+    def staging_dir(self, value):
+        self._set("staging_dir", value)
 
-    def effective_output(self):
-        return self.output_dir or self.source_library
+    # --- the stick ---------------------------------------------------------
 
-    # Base URL of the running daemon on the stick, e.g. http://vivostick.local
     @property
     def device_url(self):
         return str(self._get("device_url", "")).rstrip("/")
@@ -54,6 +107,8 @@ class Settings:
     @device_url.setter
     def device_url(self, value):
         self._set("device_url", value)
+
+    # --- metadata ----------------------------------------------------------
 
     @property
     def tmdb_key(self):
@@ -70,6 +125,8 @@ class Settings:
     @tmdb_language.setter
     def tmdb_language(self, value):
         self._set("tmdb_language", value)
+
+    # --- tools -------------------------------------------------------------
 
     @property
     def ffmpeg(self):
@@ -95,7 +152,10 @@ class Settings:
     def repo_root(self, value):
         self._set("repo_root", value)
 
-    # Extra flags appended to every preparer run, as a single string.
+    # Extra flags applied to every preparation, as a single string. Still the
+    # preparer's own argv vocabulary -- "--transcode never --verify probe" --
+    # even though there is no longer a command line to append it to: it is
+    # shlex.split and handed to prep.parse_args, which is the same parser.
     @property
     def prep_extra_args(self):
         return str(self._get("prep_extra_args", ""))
@@ -103,3 +163,40 @@ class Settings:
     @prep_extra_args.setter
     def prep_extra_args(self, value):
         self._set("prep_extra_args", value)
+
+    # --- what the old settings said ----------------------------------------
+    #
+    # Read-only, and read by exactly one thing: core.import_legacy, which turns
+    # a library prepared under the old arrangement into rows in the admin
+    # database. Kept rather than deleted because the conversion needs to know
+    # where to look, and a user who upgrades six months from now needs it as
+    # much as one who upgrades today.
+
+    @property
+    def legacy_source_library(self):
+        return str(self._get("source_library", ""))
+
+    @property
+    def legacy_output_dir(self):
+        return str(self._get("output_dir", ""))
+
+    def legacy_output(self):
+        return self.legacy_output_dir or self.legacy_source_library
+
+    def migrate(self):
+        """One-way conversion of the old keys. Returns True if it did anything.
+
+        Only the paths move here. The films, the corrections and the probe
+        cache are a database import and belong in core.import_legacy, which
+        this makes possible by working out which directory to import from.
+        """
+        if int(self._get("settings_version", 0) or 0) >= SETTINGS_VERSION:
+            return False
+        legacy = self.legacy_output()
+        if legacy and not self.nas_root:
+            # The old output directory IS the share: it is where the preparer
+            # wrote and where the stick read. Defaulting to it is also what
+            # keeps every existing film's id -- see core.identity.
+            self.nas_root = legacy
+        self._set("settings_version", SETTINGS_VERSION)
+        return True

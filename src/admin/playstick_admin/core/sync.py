@@ -1,172 +1,258 @@
-"""Push a prepared library into the device's database, and pull its edits back.
+"""Telling the stick about a film, and asking it what it has been told.
 
-WHERE THIS SITS
+WHERE THIS SITS NOW
 
-The preparer runs here and writes an index plus a tree of media next to the
-films. The device keeps its own library in SQLite and does not read that index
--- it cannot, the share it would read it from is mounted read-only and the
-device is not the machine that made it. So something has to carry one to the
-other, and this is it.
+It used to be one button. The preparer worked a whole library, wrote an index
+onto the share, and this read that index and carried it over in one request --
+a step you ran when the hours of ffmpeg had finished.
 
-Two directions, and they carry different things:
+Films arrive one at a time now. A preparation finishes, its artifacts land on
+the share, the admin database records them, and this sends that one film. The
+daemon has always supported it: `reconcile` is what a full library push sets,
+and without it /api/admin/films is an upsert of exactly what was sent. What is
+new is that the payload is built from the admin database rather than from a
+file on the share, because there is no longer a file on the share.
 
-  push()  the film table -- titles, years, genres, and the library-relative
-          paths of the film, its re-encode, its subtitles and its per-language
-          audio -- plus the poster bytes for films whose poster the device does
-          not already have.
+WHY A FILM MAY BE PREPARED AND NOT PUSHED, AND WHY THAT IS NOT AN ERROR
 
-  pull_overrides()  the metadata edits somebody made ON the device, written
-          back into playstick-overrides.json so the next prep run honours them.
+A queue that runs for an evening will usually outlast somebody's patience with
+leaving the stick switched on. A film whose push failed is still prepared, still
+on the share, and still in the database with `pushed_at` unset -- `push_pending`
+is the whole recovery, and it costs no ffmpeg. Treating an unreachable stick as
+a failed preparation would mean re-encoding a film because a box in another room
+was asleep.
 
-That second one is what makes the device the single home for an edit. It used
-to be two homes: a title corrected in the Library tab went into that file and
-was invisible to the device until the next prep run, and one corrected in the
-Device tab went into a file on the device in a different schema and was
-invisible to the preparer forever. Now an edit is made in one place, and this
-carries it to the other before a run that would otherwise overwrite it.
+RECONCILE IS FOR REPAIR AND NOTHING ELSE
 
-WHY POSTERS ARE COMPARED BY ETAG
-
-A prepared library is a few hundred films, and their posters are the only large
-thing in the payload. The device reports sha1(bytes)[:16] for each poster it
-holds; this hashes the local file the same way and uploads only where they
-differ. A re-sync of an unchanged library is therefore one POST and no images
-at all, which is the difference between a button that feels instant and one
-nobody presses twice.
+`push_all(reconcile=True)` deletes films the batch does not mention. That is
+right after a re-provision, when the stick is empty and this database is the
+truth. It is wrong as a way to remove one film, because it would also delete
+anything on the stick this database happens not to know about -- which is what
+`remove_one` exists for.
 """
 
-import hashlib
-import os
+import time
 
 from .. import paths
+from . import prepared
 
 paths.ensure_prep_on_path()
 import playstick_prep as prep  # noqa: E402
 
-from . import library_model  # noqa: E402
-from . import overrides as overrides_mod  # noqa: E402
 from .device_client import DeviceError  # noqa: E402
 
+# The daemon refuses a batch larger than this outright. A library that big
+# cannot be chunked, because reconcile deletes what a batch does not mention
+# and the last chunk would delete every earlier one.
+SYNC_MAX = 5000
 
-def poster_etag_of(data):
-    """The identity the device computes for these bytes.
 
-    Must stay in step with thumbs.etag_for() on the daemon: the two are
-    comparing answers across a network, and a difference in how they are
-    derived would mean every poster uploaded on every sync, forever, with
-    nothing reporting anything wrong.
+def film_payload(db, ident):
+    """One film in the shape POST /api/admin/films wants, or None.
+
+    Assembled into the INDEX shape and then handed to prep.device_film rather
+    than written out directly. That indirection is deliberate: device_film is
+    where the payload's key names are decided, and a second hand-written copy
+    of them here would agree until somebody renamed one.
     """
-    return hashlib.sha1(data).hexdigest()[:16]
+    row = prepared.get(db, ident)
+    if row is None:
+        return None
+    kids = prepared.children(db, ident)
+    return prep.device_film({
+        "id": ident,
+        "source_rel": row["source_rel"],
+        # device_film reads the film to PLAY out of "rel", which is what
+        # build_index calls it.
+        "rel": row["media_rel"],
+        "title": row["title"],
+        "sort_title": row["sort_title"],
+        "year": row["year"],
+        "rating": row["rating"],
+        "plot": row["plot"],
+        "duration": row["duration"],
+        "width": row["width"],
+        "height": row["height"],
+        "vcodec": row["vcodec"],
+        "acodec": row["acodec"],
+        "tmdb_id": row["tmdb_id"],
+        "hidden": bool(row["hidden"]),
+        "genres": kids["genres"],
+        "subtitles": kids["subtitles"],
+        "audio": [{"n": t["n"], "rel": t["rel"], "lang": t["lang"],
+                   "title": t["title"], "channels": t["channels"],
+                   "default": bool(t["is_default"]), "offset": t["offset"]}
+                  for t in kids["audio"]],
+    })
 
 
-def poster_etag(path):
-    """The same, for a file. "" when it cannot be read, which makes it differ
-    from every real etag and so falls back to trying the upload."""
-    try:
-        with open(path, "rb") as handle:
-            return poster_etag_of(handle.read())
-    except OSError:
-        return ""
+def push_one(client, db, ident, progress=None):
+    """Send one film and its poster. Returns a dict, or raises DeviceError.
 
-
-def push(client, output_dir, reconcile=True, progress=None):
-    """Send the whole prepared library to the device.
-
-    `progress` is an optional callable taking one sentence, so the Qt layer can
-    say what is happening without this module importing any of it.
-
-    Returns a dict: {"written", "removed", "posters", "skipped"}. Raises
-    DeviceError if the device is not answering -- the caller shows that; there
-    is nothing sensible to do about it here.
-
-    `reconcile` deletes films the device has and this push does not mention,
-    which is what a full library sync means. Turn it off to correct one film
-    without the device concluding the other ninety-nine were deleted.
+    The film first and the poster second, never the other way round: a poster
+    is foreign-keyed to its film on the device, so uploading one for a film it
+    has not been told about is a 404 rather than a row.
     """
     def say(text):
         if progress:
             progress(text)
 
-    index = library_model.load_index(output_dir)
-    if not index:
-        raise DeviceError("There is no index at %s yet -- run the preparer "
-                          "first." % output_dir)
-    films = prep.device_films(index)
+    row = prepared.get(db, ident)
+    payload = film_payload(db, ident)
+    if payload is None:
+        raise DeviceError("%s has not been prepared here." % ident)
+    # Whether the stick has ever been told about this film, read BEFORE the
+    # push marks it. It is what decides if the poster needs comparing at all.
+    is_new = row["pushed_at"] is None
+
+    say("telling the stick about %s..." % payload["title"])
+    client.sync_films([payload], reconcile=False)
+
+    uploaded = _push_poster(client, db, ident, say, is_new)
+    prepared.mark_pushed(db, ident)
+    return {"id": ident, "title": payload["title"], "poster": uploaded}
+
+
+def _push_poster(client, db, ident, say, is_new):
+    """Upload this film's poster, unless the device already has these bytes.
+
+    The comparison is what keeps a RE-push cheap: the device names each poster
+    by sha1(bytes)[:16] and so does prepared.etag_of, so an unchanged poster is
+    one small read and no image data at all.
+
+    It is skipped entirely for a film the stick has never been told about,
+    which is the ordinary case here -- every film a queue prepares is new. The
+    only way to ask the daemon what posters it holds is to ask for the whole
+    film table, so checking would mean fetching a five-hundred-row payload once
+    per film to be told each time that it has no poster for a film it heard
+    about a second ago.
+    """
+    row = prepared.poster(db, ident)
+    if row is None:
+        return False
+    if not is_new:
+        try:
+            have = {f["id"]: f.get("thumb_etag") or ""
+                    for f in client.admin_library().get("films") or []}
+        except DeviceError:
+            # The film is up; the poster is a picture. Worth another go later
+            # rather than failing a push that has already done the important
+            # half.
+            return False
+        if have.get(ident) == row["etag"]:
+            return False
+    say("uploading the poster...")
+    client.put_thumb(ident, row["bytes"], row["mime"])
+    return True
+
+
+def push_pending(client, db, progress=None):
+    """Every film that is prepared and that the stick has not been told about.
+
+    The ordinary case is a queue that finished while the stick was switched
+    off. Nothing here re-prepares anything.
+    """
+    def say(text):
+        if progress:
+            progress(text)
+
+    rows = prepared.unpushed(db)
+    sent, failed = [], []
+    for number, row in enumerate(rows, 1):
+        say("[%d/%d] %s" % (number, len(rows), row["title"]))
+        try:
+            push_one(client, db, row["item_id"])
+        except DeviceError as exc:
+            failed.append((row["title"], str(exc)))
+        else:
+            sent.append(row["title"])
+    return {"sent": len(sent), "failed": failed}
+
+
+def push_all(client, db, reconcile=True, progress=None):
+    """The whole library, in one request. For after a re-provision.
+
+    One request because the daemon writes it as one transaction: a sync that
+    fails halfway leaves the library that was there rather than half of a new
+    one. Posters follow, and only where the bytes differ.
+    """
+    def say(text):
+        if progress:
+            progress(text)
+
+    films, ids = [], []
+    for row in prepared.all_prepared(db):
+        payload = film_payload(db, row["item_id"])
+        if payload is not None:
+            films.append(payload)
+            ids.append(row["item_id"])
+    if len(films) > SYNC_MAX:
+        raise DeviceError(
+            "%d films is more than the stick accepts in one request (%d), and "
+            "a library push cannot be split -- reconcile would delete every "
+            "batch but the last." % (len(films), SYNC_MAX))
+
     say("sending %d film(s)..." % len(films))
     result = client.sync_films(films, reconcile=reconcile)
 
-    # The posters, after the films and never before: a poster is foreign-keyed
-    # to its film, so uploading one for a film the device has not been told
-    # about yet is a 404 rather than a row.
     say("checking posters...")
-    have = {row["id"]: row.get("thumb_etag") or ""
-            for row in client.admin_library().get("films") or []}
-    uploaded, skipped = 0, 0
-    for movie in index.get("movies") or []:
-        path = prep.poster_path(output_dir, movie)
-        if not path:
-            continue
-        local = poster_etag(path)
-        if not local or local == have.get(movie["id"]):
+    have = {f["id"]: f.get("thumb_etag") or ""
+            for f in client.admin_library().get("films") or []}
+    uploaded = skipped = 0
+    now = time.time()
+    for ident in ids:
+        row = prepared.poster(db, ident)
+        if row is None or have.get(ident) == row["etag"]:
             skipped += 1
-            continue
-        with open(path, "rb") as handle:
-            client.put_thumb(movie["id"], handle.read())
-        uploaded += 1
-        say("poster %d: %s" % (uploaded, movie.get("title") or movie["id"]))
+        else:
+            client.put_thumb(ident, row["bytes"], row["mime"])
+            uploaded += 1
+            say("poster %d of %d" % (uploaded, len(ids)))
+        prepared.mark_pushed(db, ident, now)
 
-    return {
-        "written": result.get("written", 0),
-        "removed": result.get("removed", 0),
-        "posters": uploaded,
-        "skipped": skipped,
-    }
+    return {"written": result.get("written", 0),
+            "removed": result.get("removed", 0),
+            "posters": uploaded, "skipped": skipped}
 
 
-def pull_overrides(client, output_dir):
-    """Write the device's metadata edits into the preparer's overrides file.
+def remove_one(client, db, ident):
+    """Take one film off the stick.
 
-    Called before a prep run. Without it the run would derive a title from the
-    filename again and push it back over the one somebody fixed on the device
-    -- the edit would survive on the device only until the next sync, which is
+    A targeted delete rather than push_all(reconcile=True), which would also
+    delete every film on the stick this database happens not to know about --
+    a second admin machine's work, or anything synced before this database
+    existed. That is a great deal of somebody's evening to lose to a tidy-up.
+    """
+    client.delete_films([ident])
+
+
+def pull_overrides(client, db):
+    """Copy the stick's metadata edits into the admin database.
+
+    Called before a preparation. Without it a run would derive a title from the
+    filename again and push it back over the one somebody fixed from the sofa --
+    the edit would survive on the stick only until the next push, which is
     exactly the failure the old two-file arrangement had.
 
-    Merges rather than replaces: `tmdb_id` and `note` are the admin app's own
-    fields, the device knows nothing about them, and a pull must not be what
-    loses a hand-picked TMDb match.
+    Merges rather than replaces. A field the device has no override on is a
+    field nobody corrected THERE, which is not the same as one somebody
+    cleared -- and `tmdb_id` in particular is this app's own idea, which the
+    device has no column for and must never be what loses.
 
     Returns the number of films whose entry changed.
     """
     device = client.admin_library().get("films") or []
-    local = overrides_mod.load(output_dir)
     changed = 0
     for row in device:
         edits = row.get("overrides") or {}
-        entry = dict(local.get(row["id"]) or {})
-        before = dict(entry)
-        # Only the fields the device actually has an edit for. A field it has
-        # no override on is a field nobody corrected there, which is not the
-        # same as one somebody cleared -- and clearing it here would delete a
-        # pin made in this app.
-        for key in overrides_mod.SCALAR_FIELDS + overrides_mod.FLAG_FIELDS:
-            if key in edits:
-                entry[key] = edits[key]
-        if not entry.get("source_rel") and row.get("source_rel"):
-            entry["source_rel"] = row["source_rel"]
-        if entry != before:
-            local[row["id"]] = entry
-            changed += 1
-    if changed:
-        overrides_mod.save(output_dir, local)
+        if not edits:
+            continue
+        ident = row.get("id")
+        before = prepared.overrides(db, ident)
+        wanted = {k: v for k, v in edits.items()
+                  if k in prepared.SCALAR_FIELDS + prepared.FLAG_FIELDS}
+        if all(before.get(k) == v for k, v in wanted.items()):
+            continue
+        prepared.set_override(db, ident, **wanted)
+        changed += 1
     return changed
-
-
-def new_films(source_library, output_dir):
-    """Films on the share that nothing has prepared yet. Straight through to
-    library_model so the Prepare tab and a sync agree about what "new" is."""
-    return library_model.scan_new(source_library, output_dir)
-
-
-def output_has_index(output_dir):
-    return bool(output_dir) and os.path.isfile(
-        os.path.join(output_dir, library_model.INDEX_NAME))

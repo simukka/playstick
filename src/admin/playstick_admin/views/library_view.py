@@ -1,16 +1,31 @@
-"""The library tab: what the stick is actually showing, and the editor for it.
+"""The library tab: what the stick is holding, and the editor for it.
 
-It used to be a view of the prepared index on this machine. It is a view of the
-DEVICE now, because that is where the library lives -- the index here is one
-step in making a film, and the row on the stick is the film as a child sees it.
-The two differ in ways worth seeing: a title corrected from another machine, a
-frame the device extracted for a film nothing here has a poster for, and above
-all a film prepared here that no sync has carried over yet.
+ONLY THE STICK, NOW
 
-With no device configured -- or one that is switched off -- it falls back to the
-index alone and says so in the status line. Preparing a library is most of a day
-and must not require the stick to be plugged in.
+It used to fall back to a prepared index on this machine when the device was not
+answering, and to list films prepared here that no sync had carried over as "not
+synced". Both of those went with the index. A film reaches the admin database
+and the stick in the same job now, so "prepared here but not over there" is a
+job that failed, and the Prepare tab is where a failed job lives.
+
+So this asks the device, and when the device is not there the table is empty and
+says why. That is a deliberate loss of a fallback: the tab's question is what a
+child would see on the grid, and only the stick can answer it. What is prepared
+on this machine is the Prepare tab's business.
+
+The admin database is still read, for the handful of facts only a preparation
+knows -- the encode's dimensions, the TMDb confidence, what the verifier
+complained about. None of those is on the device because none of them is
+anything the device does.
+
+TAKING A FILM BACK OUT
+
+This is where a removal starts, because this is the list of what is IN. It goes
+in one direction: off the stick, off the share, and back to "available" in the
+Prepare tab, where it can be added again.
 """
+
+import json
 
 from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QSize,
                             QSortFilterProxyModel, Qt, Signal)
@@ -23,10 +38,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView,
 from . import format as fmt
 from .metadata_editor import MetadataEditor
 from ..bridges import net_worker, poster_worker
-from ..core import library_model, posters
+from ..core import device_library, pipeline, posters, prepared
 from ..core.device_client import DeviceClient, DeviceError
 
-COLUMNS = ["Title", "Year", "Rating", "Genres", "Match", "On the stick", "Notes"]
+COLUMNS = ["Title", "Year", "Rating", "Genres", "Match", "Poster", "Notes"]
 
 
 class MoviesModel(QAbstractTableModel):
@@ -105,19 +120,19 @@ class MoviesModel(QAbstractTableModel):
             if col == 4:
                 return fmt.match_str(movie)
             if col == 5:
-                # What this column answers changed with the library. It used to
-                # mean "has a prep run done the work", which nobody was asking:
-                # the Prepare tab already lists what is waiting. The open
-                # question now is whether the stick has this film at all.
-                if movie.get("unsynced"):
-                    return "not synced"
-                if movie.get("source") != "device":
-                    return "yes" if movie.get("prepared") else "no"
+                # Every row here is on the stick -- that is what this tab is
+                # now -- so the open question is what it looks like on the grid.
                 if movie.get("hidden"):
                     return "hidden"
                 return "yes" if movie.get("thumb_etag") else "no poster"
             if col == 6:
                 notes = movie.get("notes") or []
+                if isinstance(notes, str):
+                    # From the admin database, where it is stored as JSON.
+                    try:
+                        notes = json.loads(notes)
+                    except ValueError:
+                        return notes
                 return "; ".join(notes) if isinstance(notes, list) else str(notes)
         if role == Qt.ToolTipRole:
             return movie.get("plot") or movie.get("source_rel") or ""
@@ -132,8 +147,13 @@ class LibraryTab(QWidget):
     # title somebody just changed.
     savedOverride = Signal()
 
-    def __init__(self, settings, parent=None):
+    # A film was taken out of the library, so the Prepare tab should offer it
+    # again.
+    removedFilm = Signal()
+
+    def __init__(self, db, settings, parent=None):
         super().__init__(parent)
+        self._db = db
         self._settings = settings
         self._model = MoviesModel()
         self._proxy = QSortFilterProxyModel(self)
@@ -179,7 +199,7 @@ class LibraryTab(QWidget):
         self._table.selectionModel().selectionChanged.connect(self._on_select)
         splitter.addWidget(self._table)
 
-        self._editor = MetadataEditor(self._settings)
+        self._editor = MetadataEditor(self._db, self._settings)
         self._editor.savedOverride.connect(self.reload)
         self._editor.savedOverride.connect(self.savedOverride)
         self._editor.reprepareRequested.connect(self.reprepareRequested)
@@ -195,7 +215,7 @@ class LibraryTab(QWidget):
         thread.finished.connect(lambda: self._threads.discard(thread))
 
     def reload(self):
-        """Ask the device what it holds, then draw. Falls back to the index.
+        """Ask the device what it holds, then draw.
 
         The device call is on a worker thread: a stick that is switched off
         takes the client's whole timeout to say so, and a window frozen for
@@ -211,20 +231,31 @@ class LibraryTab(QWidget):
         thread.start()
 
     def _draw(self, device_films, error):
-        output = self._settings.effective_output()
-        movies = library_model.merged_movies(output, device_films) if output else []
-        self._model.set_movies(movies)
-
         if device_films is None:
-            where = ("the stick did not answer (%s) -- showing what is prepared "
-                     "here" % error) if error else "no device set"
-            self._count.setText("%d film(s), %s" % (len(movies), where))
-        else:
-            waiting = sum(1 for m in movies if m.get("unsynced"))
-            note = ", %d not synced" % waiting if waiting else ""
-            self._count.setText("%d film(s) on the stick%s"
-                                % (len(movies) - waiting, note))
-            self._load_posters(device_films)
+            # Empty, and honest about why. This tab answers "what would a child
+            # see on the grid", and that is not a question this machine can
+            # answer on the stick's behalf -- what is prepared HERE is the
+            # Prepare tab's business.
+            self._model.set_movies([])
+            waiting = len(prepared.unpushed(self._db))
+            note = (" %d film(s) here are prepared and waiting for it."
+                    % waiting) if waiting else ""
+            self._count.setText(
+                ("The stick did not answer (%s)." % error if error
+                 else "No device URL set -- File, Settings.") + note)
+            return
+
+        local = {row["item_id"]: row for row in prepared.all_prepared(self._db)}
+        movies = device_library.device_movies(device_films, local)
+        self._model.set_movies(movies)
+        unknown = sum(1 for m in movies if not m["in_admin_db"])
+        # A film the stick has that this database does not: synced before this
+        # database existed, or by another machine. Worth naming rather than
+        # hiding, because it is also a film "Remove from library" can only half
+        # remove -- there are no artifact paths here to delete.
+        note = (", %d this machine did not prepare" % unknown) if unknown else ""
+        self._count.setText("%d film(s) on the stick%s" % (len(movies), note))
+        self._load_posters(device_films)
 
     def _load_posters(self, device_films):
         """Pull down the posters the device holds, in the background.
@@ -267,14 +298,18 @@ class LibraryTab(QWidget):
             return
         menu = QMenu(self)
         clear = menu.addAction("Forget the poster on the stick")
-        # Only for a film the stick actually has one for. A sync deliberately
+        # Only for a film the stick actually has one for. A push deliberately
         # leaves posters alone -- so it cannot discard one somebody uploaded --
         # which means this is the only way to say "that one was wrong".
         clear.setEnabled(bool(movie.get("thumb_etag"))
                          and bool(self._settings.device_url))
+        menu.addSeparator()
+        remove = menu.addAction("Remove from library...")
         chosen = menu.exec(self._table.viewport().mapToGlobal(point))
         if chosen is clear:
             self._clear_poster(movie)
+        elif chosen is remove:
+            self._remove(movie)
 
     def _clear_poster(self, movie):
         try:
@@ -283,3 +318,46 @@ class LibraryTab(QWidget):
             QMessageBox.warning(self, "The stick did not answer", str(exc))
             return
         self.reload()
+
+    def _remove(self, movie):
+        """Take a film out of the library: off the stick, off the share, and
+        back to `available` in the Prepare tab.
+
+        Confirmed, and the confirmation says what will actually be deleted,
+        because two different things are called "removing a film" and only one
+        of them is reversible by pressing a button. The original the film was
+        made from is never touched -- only what preparing it created.
+        """
+        title = movie.get("title") or movie["id"]
+        if not movie.get("in_admin_db"):
+            answer = QMessageBox.question(
+                self, "Remove %s?" % title,
+                "This machine did not prepare %s, so it does not know which "
+                "files on the share belong to it.\n\nIt can be taken off the "
+                "stick, but its encode, audio and subtitles will be left "
+                "behind. Carry on?" % title)
+            if answer != QMessageBox.Yes:
+                return
+        else:
+            answer = QMessageBox.question(
+                self, "Remove %s?" % title,
+                "Take %s off the stick and delete what preparing it made on "
+                "the share.\n\nThe original film is not touched, and it can "
+                "be added again from the Prepare tab." % title)
+            if answer != QMessageBox.Yes:
+                return
+
+        job, thread = net_worker.call(
+            lambda: pipeline.remove(self._db, movie["id"], self._settings,
+                                    self._client()))
+        job.done.connect(self._on_removed)
+        job.failed.connect(
+            lambda msg: QMessageBox.warning(self, "Could not remove it", msg))
+        self._track(thread)
+        thread.start()
+
+    def _on_removed(self, result):
+        self._count.setText("Removed -- %s freed from the share."
+                            % fmt.human_size(result.get("bytes", 0)))
+        self.reload()
+        self.removedFilm.emit()

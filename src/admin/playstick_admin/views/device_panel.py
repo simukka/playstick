@@ -3,12 +3,23 @@
 Status is polled on a timer; every call runs on a worker thread so an
 unreachable stick shows "offline" instead of freezing the window.
 
-THIS TAB IS HOW FILMS GET ONTO THE DEVICE. It used to be a remote control with
-a metadata form bolted on, because the library reached the stick by itself --
-the preparer wrote an index onto the share and the daemon read it. The daemon
-has its own database now and reads nothing from the share but the films
-themselves, so "Sync library to device" is the step that was previously
-invisible, and without it a freshly provisioned stick shows an empty grid.
+THIS TAB IS NOT HOW FILMS GET ONTO THE DEVICE ANY MORE. It was, briefly: the
+preparer worked a whole library and this carried the result over in one press.
+Films now reach the stick one at a time, as each preparation finishes, from the
+Prepare tab -- which is where somebody is already watching.
+
+What is left here is recovery, and there are exactly two kinds.
+
+"Push what is waiting" is the ordinary one. A queue that runs for an evening
+will outlast anybody's patience for leaving the stick switched on, and a film
+whose push failed is still prepared and still on the share. This sends those,
+and costs no ffmpeg.
+
+"Re-send everything" is for a stick that has been re-provisioned and has an
+empty database. It reconciles, which means it also deletes films the stick has
+that this machine does not know about -- another admin machine's work, or
+anything synced before this database existed. That is the right thing after a
+rebuild and the wrong thing at almost any other moment, so it asks first.
 
 There was a second metadata editor here, a combo box and six fields writing to
 /api/admin/item. It is gone. The Library tab edits the device directly now --
@@ -22,7 +33,7 @@ from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
-from ..core import sync
+from ..core import prepared, sync
 from ..core.device_client import DeviceClient
 from ..bridges import net_worker
 
@@ -32,8 +43,9 @@ class DeviceTab(QWidget):
     # its films and posters from the device -- is out of date.
     libraryChanged = Signal()
 
-    def __init__(self, settings, parent=None):
+    def __init__(self, db, settings, parent=None):
         super().__init__(parent)
+        self._db = db
         self._settings = settings
         self._threads = set()
         self._build()
@@ -80,26 +92,36 @@ class DeviceTab(QWidget):
         library = QGroupBox("Library")
         box = QVBoxLayout(library)
         note = QLabel(
-            "The stick keeps its library in its own database. A sync sends the "
-            "prepared film table and uploads only the posters whose bytes it "
-            "does not already have.")
+            "Films reach the stick from the Prepare tab, one at a time, as "
+            "each one finishes. What is here is for when that did not get "
+            "through -- usually because the stick was switched off.")
         note.setWordWrap(True)
         box.addWidget(note)
         self._library_status = QLabel("")
         self._library_status.setWordWrap(True)
         box.addWidget(self._library_status)
         row = QHBoxLayout()
-        self._sync_btn = QPushButton("Sync library to device")
-        self._sync_btn.clicked.connect(self._sync_library)
+        self._push_btn = QPushButton("Push what is waiting")
+        self._push_btn.setToolTip(
+            "Send every film that is prepared here and that the stick has not "
+            "been told about. No ffmpeg: these are already made.")
+        self._push_btn.clicked.connect(self._push_pending)
+        self._sync_btn = QPushButton("Re-send everything...")
+        self._sync_btn.setToolTip(
+            "For a stick that has been re-provisioned and has an empty "
+            "database. Also removes films the stick has that this machine "
+            "does not know about.")
+        self._sync_btn.clicked.connect(self._resend_everything)
         pull = QPushButton("Pull edits from the stick")
         pull.setToolTip(
-            "Copy the stick's metadata edits into the preparer's overrides "
-            "file, so the next prep run does not overwrite them. A prep run "
-            "does this on its own; this is for doing it early.")
+            "Copy the stick's metadata edits into this machine's library, so "
+            "the next preparation does not overwrite them. A preparation does "
+            "this on its own; this is for doing it early.")
         pull.clicked.connect(self._pull_overrides)
         row.addStretch(1)
         row.addWidget(pull)
         row.addWidget(self._sync_btn)
+        row.addWidget(self._push_btn)
         box.addLayout(row)
         outer.addWidget(library)
         outer.addStretch(1)
@@ -166,29 +188,71 @@ class DeviceTab(QWidget):
         films = reply.get("films") or []
         edited = sum(1 for f in films if f.get("overrides"))
         postered = sum(1 for f in films if f.get("thumb_etag"))
+        waiting = len(prepared.unpushed(self._db))
+        self._push_btn.setEnabled(bool(waiting))
+        note = (" %d prepared here and waiting." % waiting) if waiting else ""
         if not films:
             self._library_status.setText(
-                "The stick has no films. Sync one over -- until then its grid "
-                "is empty, and no amount of waiting fills it.")
+                "The stick has no films. There is no walk that would find "
+                "them: an empty database is an empty grid, and the fix is a "
+                "button rather than patience." + note)
             return
         self._library_status.setText(
-            "%d film(s) on the stick, %d with a poster, %d edited."
-            % (len(films), postered, edited))
+            "%d film(s) on the stick, %d with a poster, %d edited.%s"
+            % (len(films), postered, edited, note))
 
-    def _sync_library(self):
-        """Push the prepared library. On a worker thread, because a first sync
-        of a few hundred films with their posters is seconds, not milliseconds,
-        and a frozen window during it looks exactly like a crash."""
-        if not self._settings.device_url:
-            QMessageBox.information(self, "No device", "Set the device URL first.")
+    def _push_pending(self):
+        """Send the films that are prepared and waiting.
+
+        On a worker thread, because a queue that ran overnight against a stick
+        that was off can be a hundred films with their posters -- seconds, not
+        milliseconds, and a frozen window during it looks exactly like a crash.
+        """
+        if not self._require_device():
             return
-        output = self._settings.effective_output()
-        if not output:
-            QMessageBox.information(self, "No output",
-                                    "Set the source library first.")
+        self._push_btn.setEnabled(False)
+
+        def done(result):
+            self._push_btn.setEnabled(True)
+            text = "Sent %d film(s)." % result["sent"]
+            if result["failed"]:
+                text += " %d did not go: %s" % (
+                    len(result["failed"]), result["failed"][0][1])
+            self._library_status.setText(text)
+            self.refresh_library()
+            self.libraryChanged.emit()
+
+        job, thread = net_worker.call_with_progress(
+            lambda say: sync.push_pending(self._client(), self._db, say))
+        job.done.connect(done)
+        job.failed.connect(lambda msg: (
+            self._push_btn.setEnabled(True),
+            self._library_status.setText("Could not push: %s" % msg)))
+        job.progress.connect(self._library_status.setText)
+        self._track(thread)
+        thread.start()
+
+    def _resend_everything(self):
+        """The whole library in one request, reconciled.
+
+        Asks first, because `reconcile` also deletes films the stick has that
+        this machine does not know about. After a re-provision that is the
+        whole point; at any other moment it is a way to lose another machine's
+        work with one press and no visible sign afterwards.
+        """
+        if not self._require_device():
+            return
+        answer = QMessageBox.question(
+            self, "Re-send the whole library?",
+            "This sends every film this machine has prepared, and REMOVES any "
+            "film the stick has that this machine does not know about -- "
+            "another admin machine's work, or anything synced before this "
+            "machine's library existed.\n\nIt is meant for a stick that has "
+            "just been re-provisioned. Carry on?")
+        if answer != QMessageBox.Yes:
             return
         self._sync_btn.setEnabled(False)
-        self._library_status.setText("Syncing...")
+        self._library_status.setText("Re-sending...")
 
         def done(result):
             self._sync_btn.setEnabled(True)
@@ -202,27 +266,24 @@ class DeviceTab(QWidget):
 
         def failed(msg):
             self._sync_btn.setEnabled(True)
-            self._library_status.setText("Sync failed: %s" % msg)
+            self._library_status.setText("Could not re-send: %s" % msg)
 
         job, thread = net_worker.call_with_progress(
-            lambda say: sync.push(self._client(), output, reconcile=True,
-                                  progress=say))
+            lambda say: sync.push_all(self._client(), self._db, reconcile=True,
+                                      progress=say))
         job.done.connect(done)
         job.failed.connect(failed)
-        # A first sync is a few hundred posters. Without this the button is
-        # grey for half a minute with nothing else changing, which is what
-        # makes somebody press it again.
         job.progress.connect(self._library_status.setText)
         self._track(thread)
         thread.start()
 
+    def _require_device(self):
+        if self._settings.device_url:
+            return True
+        QMessageBox.information(self, "No device", "Set the device URL first.")
+        return False
+
     def _pull_overrides(self):
-        output = self._settings.effective_output()
-        if not output:
-            QMessageBox.information(self, "No output",
-                                    "Set the source library first.")
-            return
-        self._do(lambda: sync.pull_overrides(self._client(), output),
+        self._do(lambda: sync.pull_overrides(self._client(), self._db),
                  lambda changed: self._library_status.setText(
-                     "Wrote %d edit(s) into the preparer's overrides file."
-                     % changed))
+                     "Took %d edit(s) from the stick." % changed))

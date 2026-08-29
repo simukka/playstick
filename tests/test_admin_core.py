@@ -1,15 +1,15 @@
-"""Tests for the Qt-free core of the admin app: the overrides writer, the
-library model's "what is new" scan, the device HTTP client, and the sync that
-carries a prepared library onto the device.
+"""The admin app's core against a real HTTP server: the client, and the push.
 
 These import only the core package, never the views, so no display is needed.
+What they add over the other admin test files is a socket -- `DeviceClient` and
+the daemon's routes really do speak to each other here, over a stub server, so
+a request shape that is wrong fails as a request rather than passing against a
+convenient fake.
 
-The sync is the piece worth the most attention here. The device does not read
-the preparer's index -- it has its own database and the share it would read the
-index from is mounted read-only -- so this is the only thing that connects the
-machine that prepares films to the machine that plays them. If it silently
-sends nothing, everything still looks fine on this side and the grid on the
-stick never changes.
+The push is the piece worth the most attention. The stick reads nothing but
+films off the share; everything it knows about them arrives through these calls.
+If they silently send nothing, everything still looks fine on this side and the
+grid in the other room never changes.
 """
 
 import atexit
@@ -27,76 +27,20 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src", "admin"))
 sys.path.insert(0, os.path.join(ROOT, "src", "prep"))
 
-from playstick_admin.core import overrides as ov          # noqa: E402
-from playstick_admin.core import library_model             # noqa: E402
-from playstick_admin.core import posters                   # noqa: E402
-from playstick_admin.core import sync                      # noqa: E402
+from playstick_admin.core import catalog                    # noqa: E402
+from playstick_admin.core import device_library             # noqa: E402
+from playstick_admin.core import posters                    # noqa: E402
+from playstick_admin.core import prepared                   # noqa: E402
+from playstick_admin.core import sync                       # noqa: E402
+from playstick_admin.core.db import Database                # noqa: E402
 from playstick_admin.core.device_client import DeviceClient, DeviceError  # noqa: E402
-import playstick_prep as prep                              # noqa: E402
+import playstick_prep as prep                               # noqa: E402
 
 
-class OverridesWriter(unittest.TestCase):
-    def test_write_then_prep_reads_it(self):
-        with tempfile.TemporaryDirectory() as d:
-            ov.set_entry(d, "abc", source_rel="Hook/Hook.mkv", tmdb_id=2493,
-                         title="Hook", year=1991, genres=["Adventure"])
-            # The preparer's own reader must understand what the app wrote.
-            loaded = prep.load_overrides(d)
-            self.assertIn("abc", loaded)
-            self.assertEqual(loaded["abc"]["tmdb_id"], 2493)
-            self.assertEqual(loaded["abc"]["title"], "Hook")
-
-    def test_empty_values_clear_fields(self):
-        with tempfile.TemporaryDirectory() as d:
-            ov.set_entry(d, "abc", title="Hook", year=1991)
-            ov.set_entry(d, "abc", year=None)          # clear the year
-            entry = ov.load(d)["abc"]
-            self.assertNotIn("year", entry)
-            self.assertEqual(entry["title"], "Hook")
-
-    def test_clear_entry(self):
-        with tempfile.TemporaryDirectory() as d:
-            ov.set_entry(d, "abc", title="Hook")
-            ov.clear_entry(d, "abc")
-            self.assertEqual(ov.load(d), {})
-
-
-class ScanNew(unittest.TestCase):
-    def _make_film(self, root, rel):
-        path = os.path.join(root, rel)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        # A sparse file over the 100 MB floor discover() applies, without
-        # actually writing 100 MB to disk.
-        with open(path, "wb") as f:
-            f.truncate(110 * 1024 * 1024)
-        return path
-
-    def test_finds_unprepared_and_skips_known(self):
-        with tempfile.TemporaryDirectory() as d:
-            self._make_film(d, "Hook (1991)/Hook.mkv")
-            self._make_film(d, "Ponyo (2008)/Ponyo.mkv")
-            new = library_model.scan_new(d, d)
-            rels = {f["rel"] for f in new}
-            self.assertEqual(rels, {"Hook (1991)/Hook.mkv", "Ponyo (2008)/Ponyo.mkv"})
-            # Mark one as already seen via the prep-state cache.
-            state_dir = os.path.join(d, prep.WORK_DIR)
-            os.makedirs(state_dir, exist_ok=True)
-            with open(os.path.join(state_dir, prep.STATE_NAME), "w") as f:
-                json.dump({"Hook (1991)/Hook.mkv": {}}, f)
-            new = library_model.scan_new(d, d)
-            rels = {f["rel"] for f in new}
-            self.assertEqual(rels, {"Ponyo (2008)/Ponyo.mkv"})
-
-    def test_missing_library_is_empty(self):
-        self.assertEqual(library_model.scan_new("/no/such/dir", "/tmp"), [])
-
-
-# What the stub device below claims to already hold, and what reached it. Class
-# attributes because BaseHTTPRequestHandler is instantiated per request; the
-# tests reset them in setUp.
 class Device:
     films = []          # what GET /api/admin/library answers with
     synced = []         # bodies POSTed to /api/admin/films
+    deleted = []        # bodies POSTed to /api/admin/films/delete
     thumbs = []         # (film_id, bytes) PUT to /api/admin/thumb/<id>
     thumb_gets = []     # film ids fetched from /api/thumb/<id>
     # What /api/thumb/<id> hands back. The daemon answers a film with no poster
@@ -108,6 +52,7 @@ class Device:
     def reset(cls, films=()):
         cls.films = list(films)
         cls.synced = []
+        cls.deleted = []
         cls.thumbs = []
         cls.thumb_gets = []
         cls.serves = (b"\xff\xd8\xffposter", "image/jpeg")
@@ -151,13 +96,16 @@ class _StubHandler(BaseHTTPRequestHandler):
             Device.synced.append(body)
             return self._send({"written": len(body.get("films") or []),
                                "removed": 0})
+        if self.path == "/api/admin/films/delete":
+            Device.deleted.append(body)
+            return self._send({"removed": len(body.get("ids") or [])})
         self._send({"ok": True, "echo": body})
 
     def do_PUT(self):
         data = self._read()
         Device.thumbs.append((self.path.rsplit("/", 1)[-1], data))
         self._send({"id": self.path.rsplit("/", 1)[-1],
-                    "etag": sync.poster_etag_of(data), "bytes": len(data)})
+                    "etag": prepared.etag_of(data), "bytes": len(data)})
 
 
 # One stub device for the whole module. Per-class would be tidier and is wrong:
@@ -200,257 +148,233 @@ class DeviceClientTests(unittest.TestCase):
         self.assertEqual(Device.thumbs, [("abc123", b"\xff\xd8\xffposter")])
 
 
-class SyncPush(unittest.TestCase):
-    """Carrying a prepared library onto the device."""
+class Pushing(unittest.TestCase):
+    """One film, over a real socket, in the shape the daemon validates.
 
-    def setUp(self):
-        Device.reset()
-        self.dir = tempfile.mkdtemp(prefix="playstick-sync-")
-        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
-        self.client = DeviceClient(BASE)
-
-    def write_index(self, movies):
-        with open(os.path.join(self.dir, "playstick-library.json"), "w") as f:
-            json.dump({"schema": 1, "movies": movies}, f)
-
-    def write_poster(self, rel, data):
-        path = os.path.join(self.dir, rel)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "wb") as f:
-            f.write(data)
-        return path
-
-    def test_the_index_becomes_the_payload(self):
-        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                           "rel": ".playstick/media/x.mp4", "title": "Hook",
-                           "year": 1991, "genres": ["Adventure"]}])
-        result = sync.push(self.client, self.dir)
-        self.assertEqual(result["written"], 1)
-        sent = Device.synced[0]["films"][0]
-        self.assertEqual(sent["id"], "a" * 16)
-        self.assertEqual(sent["title"], "Hook")
-        # `rel` is what to PLAY -- the transcode -- and `source_rel` is the
-        # original. Swapping them would play the wrong file or none at all.
-        self.assertEqual(sent["media_rel"], ".playstick/media/x.mp4")
-        self.assertEqual(sent["source_rel"], "Hook/Hook.mkv")
-
-    def test_no_index_is_a_sentence_rather_than_an_empty_sync(self):
-        """An empty payload with reconcile set would delete the device's whole
-        library because somebody had not run the preparer yet."""
-        with self.assertRaises(DeviceError):
-            sync.push(self.client, self.dir)
-        self.assertEqual(Device.synced, [])
-
-    def test_a_poster_the_device_lacks_is_uploaded(self):
-        self.write_poster(".playstick/posters/a.jpg", b"\xff\xd8\xffposter")
-        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                           "rel": "Hook/Hook.mkv", "title": "Hook",
-                           "poster": ".playstick/posters/a.jpg"}])
-        result = sync.push(self.client, self.dir)
-        self.assertEqual(result["posters"], 1)
-        self.assertEqual(Device.thumbs[0][1], b"\xff\xd8\xffposter")
-
-    def test_a_poster_the_device_already_has_is_skipped(self):
-        """The property that makes a re-sync of an unchanged library one small
-        request instead of a hundred JPEGs."""
-        data = b"\xff\xd8\xffposter"
-        self.write_poster(".playstick/posters/a.jpg", data)
-        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                           "rel": "Hook/Hook.mkv", "title": "Hook",
-                           "poster": ".playstick/posters/a.jpg"}])
-        Device.films = [{"id": "a" * 16, "thumb_etag": sync.poster_etag_of(data)}]
-        result = sync.push(self.client, self.dir)
-        self.assertEqual((result["posters"], result["skipped"]), (0, 1))
-        self.assertEqual(Device.thumbs, [])
-
-    def test_a_changed_poster_is_uploaded_again(self):
-        """The other half. A poster corrected on this machine that never
-        reached the device is a wrong tile that nothing would ever fix."""
-        self.write_poster(".playstick/posters/a.jpg", b"\xff\xd8\xffnew")
-        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                           "rel": "Hook/Hook.mkv", "title": "Hook",
-                           "poster": ".playstick/posters/a.jpg"}])
-        Device.films = [{"id": "a" * 16, "thumb_etag": "0" * 16}]
-        self.assertEqual(sync.push(self.client, self.dir)["posters"], 1)
-
-    def test_the_etag_matches_what_the_daemon_computes(self):
-        """These two are comparing answers across a network. A difference in
-        how they are derived would mean every poster uploaded on every sync,
-        forever, with nothing reporting anything wrong."""
-        sys.path.insert(0, os.path.join(ROOT, "src", "server"))
-        from playstick.thumbs import etag_for
-        data = b"\xff\xd8\xffsome bytes"
-        path = self.write_poster("p.jpg", data)
-        self.assertEqual(sync.poster_etag(path), etag_for(data))
-
-
-class SyncPull(unittest.TestCase):
-    """Carrying the device's edits back into the preparer's overrides file."""
-
-    def setUp(self):
-        Device.reset()
-        self.dir = tempfile.mkdtemp(prefix="playstick-pull-")
-        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
-        self.client = DeviceClient(BASE)
-
-    def test_an_edit_made_on_the_device_reaches_the_preparer(self):
-        """Without this the next prep run derives the old title from the
-        filename again, and the correction is lost at the next sync."""
-        Device.films = [{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                         "overrides": {"title": "Hook", "year": 1991}}]
-        self.assertEqual(sync.pull_overrides(self.client, self.dir), 1)
-        entry = ov.load(self.dir)["a" * 16]
-        self.assertEqual(entry["title"], "Hook")
-        self.assertEqual(entry["year"], 1991)
-        # And the preparer's own reader must understand what was written.
-        self.assertEqual(prep.load_overrides(self.dir)["a" * 16]["title"], "Hook")
-
-    def test_a_pinned_tmdb_match_is_not_lost(self):
-        """tmdb_id is this app's field; the device has no column for it. A pull
-        that replaced the entry would throw away a hand-picked match every time
-        somebody fixed a title on the stick."""
-        ov.set_entry(self.dir, "a" * 16, tmdb_id=2493, title="Old")
-        Device.films = [{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                         "overrides": {"title": "New"}}]
-        sync.pull_overrides(self.client, self.dir)
-        entry = ov.load(self.dir)["a" * 16]
-        self.assertEqual(entry["tmdb_id"], 2493)
-        self.assertEqual(entry["title"], "New")
-
-    def test_a_field_the_device_has_no_edit_for_is_left_alone(self):
-        """"Nobody corrected this there" is not the same as "somebody cleared
-        it there", and treating them alike would delete a pin made here."""
-        ov.set_entry(self.dir, "a" * 16, plot="A boy who would not grow up.")
-        Device.films = [{"id": "a" * 16, "overrides": {"title": "Hook"}}]
-        sync.pull_overrides(self.client, self.dir)
-        self.assertEqual(ov.load(self.dir)["a" * 16]["plot"],
-                         "A boy who would not grow up.")
-
-    def test_a_device_with_no_edits_writes_nothing(self):
-        Device.films = [{"id": "a" * 16, "overrides": {}}]
-        self.assertEqual(sync.pull_overrides(self.client, self.dir), 0)
-        self.assertEqual(ov.load(self.dir), {})
-
-
-class MergedMovies(unittest.TestCase):
-    """Which of the two places a film's fields come from.
-
-    The device holds the film table and the edits; the index on this machine
-    holds what only a prep run knows. Getting the precedence wrong here is the
-    kind of bug that shows a title somebody fixed weeks ago.
+    The payload is built from the admin database and handed through
+    prep.device_film, so what these check is the whole path from a row here to a
+    request the stick would accept -- including the part where every path in it
+    has to be relative and resolve under the stick's own library root.
     """
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="playstick-merge-")
-        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        Device.reset()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.db = Database(os.path.join(self._tmp.name, "admin.db"))
+        self.db.migrate()
+        self.addCleanup(self.db.close)
+        self.client = DeviceClient(BASE)
+        self.ident = "0123456789abcdef"
+        self._add(self.ident)
 
-    def write_index(self, movies):
-        with open(os.path.join(self.dir, "playstick-library.json"), "w") as f:
-            json.dump({"schema": 1, "movies": movies}, f)
+    def _add(self, ident, title="Ponyo", poster=b"\xff\xd8\xffposter"):
+        self.db.write().execute(
+            "INSERT INTO item (id, rel, abs_path, seen_at) VALUES (?,?,?,0)",
+            (ident, "%s.mkv" % title, "/x/%s.mkv" % title))
+        prepared.record(
+            self.db, ident,
+            {"title": title, "sort_title": title.lower(), "year": 2008,
+             "rating": 8.0, "duration": 6060.0, "width": 1280, "height": 720,
+             "vcodec": "h264", "acodec": "aac", "tmdb_id": 12429,
+             "genres": ["Animation", "Family"],
+             "subtitles": [{"rel": ".playstick/subs/%s.eng.srt" % ident,
+                            "lang": "eng"}],
+             "phone_audio": [{"n": 1, "rel": ".playstick/audio/%s/1.eng.m4a" % ident,
+                              "lang": "eng", "title": "", "channels": 2,
+                              "default": True, "offset": 0.25}]},
+            ".playstick/media/%s.mp4" % ident, "%s.mkv" % title,
+            poster=(poster, "image/jpeg", "tmdb") if poster else None)
 
-    def test_with_no_device_it_is_the_index_and_the_local_overrides(self):
-        """The fallback, and it is not a nicety: preparing a library is most of
-        a day and must not require the stick to be plugged in."""
-        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                           "title": "Hook", "year": 1991}])
-        ov.set_entry(self.dir, "a" * 16, title="Hook (1991)")
-        movies = library_model.merged_movies(self.dir)
-        self.assertEqual(len(movies), 1)
-        self.assertEqual(movies[0]["title"], "Hook (1991)")
-        self.assertEqual(movies[0]["source"], "index")
-        self.assertTrue(movies[0]["has_override"])
+    def test_the_payload_carries_the_children(self):
+        sync.push_one(self.client, self.db, self.ident)
+        sent = Device.synced[0]["films"][0]
+        self.assertEqual(sent["genres"], ["Animation", "Family"])
+        self.assertEqual(sent["subtitles"][0]["lang"], "eng")
+        self.assertEqual(sent["audio"][0]["offset"], 0.25)
+        self.assertTrue(sent["audio"][0]["default"])
+        # Text on the way out of the database, coerced back by the daemon.
+        self.assertEqual(sent["rating"], "8.0")
 
-    def test_the_device_wins_over_the_index(self):
-        """What the stick says a film is called is what a child is looking at.
-        An index that still has the old title is the stale one."""
-        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                           "title": "Red Hook Summer", "year": 2012}])
-        movies = library_model.merged_movies(self.dir, [
-            {"id": "a" * 16, "source_rel": "Hook/Hook.mkv", "title": "Hook",
-             "year": 1991, "overrides": {"title": "Hook"}, "thumb_etag": ""}])
-        self.assertEqual(movies[0]["title"], "Hook")
-        self.assertEqual(movies[0]["year"], 1991)
-        self.assertEqual(movies[0]["source"], "device")
+    def test_every_path_is_relative_and_stays_under_the_root(self):
+        # The daemon re-validates all of these and refuses the whole request on
+        # one bad path, so a payload that fails here is a library that will not
+        # sync at all.
+        sync.push_one(self.client, self.db, self.ident)
+        sent = Device.synced[0]["films"][0]
+        paths = ([sent["source_rel"], sent["media_rel"]]
+                 + [x["rel"] for x in sent["subtitles"] + sent["audio"]])
+        for path in paths:
+            self.assertFalse(os.path.isabs(path), path)
+            self.assertNotIn("..", path.split("/"), path)
 
-    def test_prep_facts_survive_underneath(self):
-        """The device has no column for a verify note or a match score, and a
-        merge that dropped them would empty the Notes column."""
-        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                           "title": "Hook", "notes": ["short by 3s"],
-                           "tmdb_score": 0.91, "width": 1280}])
-        movies = library_model.merged_movies(self.dir, [
-            {"id": "a" * 16, "source_rel": "Hook/Hook.mkv", "title": "Hook",
-             "overrides": {}, "thumb_etag": ""}])
-        self.assertEqual(movies[0]["notes"], ["short by 3s"])
-        self.assertEqual(movies[0]["tmdb_score"], 0.91)
-        self.assertEqual(movies[0]["width"], 1280)
+    def test_one_film_never_reconciles(self):
+        """reconcile deletes what a batch does not mention. On a batch of one
+        that is the whole library."""
+        sync.push_one(self.client, self.db, self.ident)
+        self.assertFalse(Device.synced[0]["reconcile"])
 
-    def test_a_film_the_stick_has_never_heard_of_is_shown_and_marked(self):
-        """The single most useful thing this tab can say: it is prepared here
-        and it is not over there, which means the sync has not been run."""
-        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                           "title": "Hook"},
-                          {"id": "b" * 16, "source_rel": "Ponyo/Ponyo.mkv",
-                           "title": "Ponyo"}])
-        movies = library_model.merged_movies(self.dir, [
-            {"id": "a" * 16, "source_rel": "Hook/Hook.mkv", "title": "Hook",
-             "overrides": {}, "thumb_etag": ""}])
-        by_title = {m["title"]: m for m in movies}
-        self.assertTrue(by_title["Ponyo"]["unsynced"])
-        self.assertFalse(by_title["Hook"].get("unsynced"))
+    def test_the_poster_follows_the_film_and_never_precedes_it(self):
+        # A poster is foreign-keyed to its film on the device, so uploading one
+        # for a film it has not been told about is a 404 rather than a row.
+        sync.push_one(self.client, self.db, self.ident)
+        self.assertEqual(len(Device.synced), 1)
+        self.assertEqual(Device.thumbs[0][0], self.ident)
 
-    def test_the_edited_title_is_the_one_shown(self):
-        """/api/admin/library reports the base row and its edits separately --
-        deliberately, so this app can tell a chosen title from a derived one --
-        which means the join is this module's job.
+    def test_a_poster_the_stick_already_has_is_not_sent_again(self):
+        # On a RE-push. The device names each poster by sha1(bytes)[:16] and so
+        # does this side, so an unchanged one is a comparison and no image data.
+        data = b"\xff\xd8\xffposter"
+        prepared.mark_pushed(self.db, self.ident)
+        Device.films = [{"id": self.ident,
+                         "thumb_etag": prepared.etag_of(data)}]
+        sync.push_one(self.client, self.db, self.ident)
+        self.assertEqual(Device.thumbs, [])
 
-        Skipping it reads as a film marked "edited" still showing the title the
-        edit replaced. That is convincing enough to survive being looked at,
-        and it is what this assertion is here to stop.
-        """
-        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                           "title": "Red Hook Summer"}])
-        movies = library_model.merged_movies(self.dir, [
-            {"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-             "title": "Red Hook Summer", "year": 2012,
-             "overrides": {"title": "Hook", "year": 1991}, "thumb_etag": ""}])
-        self.assertEqual(movies[0]["title"], "Hook")
-        self.assertEqual(movies[0]["year"], 1991)
-        # ...and the base is still reachable, because writing the edit back
-        # into the preparer's overrides file needs to know which is which.
-        self.assertEqual(movies[0]["device_overrides"],
-                         {"title": "Hook", "year": 1991})
+    def test_a_changed_poster_is_sent_on_a_re_push(self):
+        prepared.mark_pushed(self.db, self.ident)
+        Device.films = [{"id": self.ident, "thumb_etag": "somethingelse"}]
+        sync.push_one(self.client, self.db, self.ident)
+        self.assertEqual(Device.thumbs[0][0], self.ident)
 
-    def test_an_edit_made_elsewhere_still_reads_as_an_edit(self):
-        """has_override comes from the DEVICE's answer, not this machine's
-        overrides file -- an edit made from another copy of this app is still
-        an edit, and the star in the title column should say so."""
-        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                           "title": "Hook"}])
-        movies = library_model.merged_movies(self.dir, [
-            {"id": "a" * 16, "source_rel": "Hook/Hook.mkv", "title": "Fixed",
-             "overrides": {"title": "Fixed"}, "thumb_etag": ""}])
-        self.assertTrue(movies[0]["has_override"])
-        self.assertEqual(movies[0]["device_overrides"], {"title": "Fixed"})
+    def test_a_first_push_does_not_ask_what_posters_the_stick_has(self):
+        """There is no per-film route for that -- asking means fetching the
+        whole film table. Doing it once per film in a queue of two hundred
+        would be two hundred five-hundred-row payloads, every one of them to be
+        told the stick has no poster for a film it heard about a second ago."""
+        asked = []
+        real = self.client.admin_library
+        self.client.admin_library = lambda: (asked.append(1), real())[1]
+        sync.push_one(self.client, self.db, self.ident)
+        self.assertEqual(asked, [])
+        self.assertEqual(Device.thumbs[0][0], self.ident)
 
-    def test_a_pinned_tmdb_match_comes_from_the_local_file(self):
-        """The device stores tmdb_id as a plain column from the sync and has no
-        notion of one having been CHOSEN. That distinction is this app's, so it
-        has to survive being shown device rows."""
-        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                           "title": "Hook"}])
-        ov.set_entry(self.dir, "a" * 16, tmdb_id=2493)
-        movies = library_model.merged_movies(self.dir, [
-            {"id": "a" * 16, "source_rel": "Hook/Hook.mkv", "title": "Hook",
-             "overrides": {}, "thumb_etag": ""}])
-        self.assertEqual(movies[0]["override_tmdb_id"], 2493)
+    def test_a_pushed_film_stops_being_pending(self):
+        self.assertEqual(len(prepared.unpushed(self.db)), 1)
+        sync.push_one(self.client, self.db, self.ident)
+        self.assertEqual(prepared.unpushed(self.db), [])
 
-    def test_an_empty_device_with_a_prepared_index_shows_everything_unsynced(self):
-        self.write_index([{"id": "a" * 16, "source_rel": "Hook/Hook.mkv",
-                           "title": "Hook"}])
-        movies = library_model.merged_movies(self.dir, [])
-        self.assertEqual(len(movies), 1)
-        self.assertTrue(movies[0]["unsynced"])
+    def test_push_pending_sends_only_what_is_waiting(self):
+        other = "fedcba9876543210"
+        self._add(other, title="Totoro")
+        prepared.mark_pushed(self.db, self.ident)
+        result = sync.push_pending(self.client, self.db)
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(Device.synced[0]["films"][0]["id"], other)
+
+    def test_re_sending_everything_reconciles(self):
+        self._add("fedcba9876543210", title="Totoro")
+        result = sync.push_all(self.client, self.db, reconcile=True)
+        self.assertTrue(Device.synced[0]["reconcile"])
+        self.assertEqual(result["written"], 2)
+        # In shelf order, so the daemon's own renumbering agrees with what this
+        # machine thinks the order is.
+        titles = [f["title"] for f in Device.synced[0]["films"]]
+        self.assertEqual(titles, sorted(titles))
+
+    def test_removing_a_film_is_targeted_and_not_a_reconcile(self):
+        # Phrasing it as "everything except these" would also delete every film
+        # the stick has that this machine does not know about.
+        sync.remove_one(self.client, self.db, self.ident)
+        self.assertEqual(Device.deleted, [{"ids": [self.ident]}])
+        self.assertEqual(Device.synced, [])
+
+    def test_a_film_that_was_never_prepared_here_is_refused(self):
+        with self.assertRaises(DeviceError):
+            sync.push_one(self.client, self.db, "a" * 16)
+
+
+class PullingEditsBack(unittest.TestCase):
+    """What somebody corrected from the sofa, brought here before a
+    preparation overwrites it.
+
+    Without this a preparation derives the title from the filename again and
+    pushes it back over the correction -- the edit survives on the stick only
+    until the next push, which is exactly the failure the old two-file
+    arrangement had.
+    """
+
+    def setUp(self):
+        Device.reset()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.db = Database(os.path.join(self._tmp.name, "admin.db"))
+        self.db.migrate()
+        self.addCleanup(self.db.close)
+        self.client = DeviceClient(BASE)
+        self.ident = "0123456789abcdef"
+        self.db.write().execute(
+            "INSERT INTO item (id, rel, abs_path, seen_at) VALUES (?,?,?,0)",
+            (self.ident, "Ponyo.mkv", "/x/Ponyo.mkv"))
+
+    def test_an_edit_on_the_stick_lands_here(self):
+        Device.films = [{"id": self.ident, "title": "Ponyo",
+                         "overrides": {"title": "Ponyo on the Cliff",
+                                       "year": 2008}}]
+        self.assertEqual(sync.pull_overrides(self.client, self.db), 1)
+        entry = prepared.overrides(self.db, self.ident)
+        self.assertEqual(entry["title"], "Ponyo on the Cliff")
+
+    def test_a_pull_does_not_lose_a_hand_picked_match(self):
+        # tmdb_id is this app's own idea. The device has no column for it, so a
+        # pull that replaced the entry would silently unpin every match anybody
+        # had chosen by hand.
+        prepared.set_override(self.db, self.ident, tmdb_id=12429)
+        Device.films = [{"id": self.ident, "overrides": {"title": "Ponyo"}}]
+        sync.pull_overrides(self.client, self.db)
+        entry = prepared.overrides(self.db, self.ident)
+        self.assertEqual(entry["tmdb_id"], 12429)
+        self.assertEqual(entry["title"], "Ponyo")
+
+    def test_a_film_with_no_edits_is_left_alone(self):
+        Device.films = [{"id": self.ident, "title": "Ponyo", "overrides": {}}]
+        self.assertEqual(sync.pull_overrides(self.client, self.db), 0)
+
+    def test_pulling_twice_reports_no_second_change(self):
+        Device.films = [{"id": self.ident, "overrides": {"title": "Ponyo"}}]
+        self.assertEqual(sync.pull_overrides(self.client, self.db), 1)
+        self.assertEqual(sync.pull_overrides(self.client, self.db), 0)
+
+
+class WhatTheLibraryTabShows(unittest.TestCase):
+    """The device's rows joined to their edits, and to what only a preparation
+    knows."""
+
+    def test_an_edited_film_shows_the_edit_and_not_what_it_replaced(self):
+        # /api/admin/library reports the base row and its edits separately, so
+        # the join is this side's job. Skipping it reads as a film marked
+        # "edited" still showing the title the edit replaced -- convincing
+        # enough to survive being looked at.
+        rows = device_library.device_movies([
+            {"id": "a" * 16, "title": "Ponyo", "sort_title": "ponyo",
+             "overrides": {"title": "Ponyo on the Cliff"}}])
+        self.assertEqual(rows[0]["title"], "Ponyo on the Cliff")
+        self.assertTrue(rows[0]["has_override"])
+
+    def test_prep_facts_come_from_here_and_lose_to_the_device(self):
+        local = {"a" * 16: {"duration": 6060.0, "width": 1280, "height": 720,
+                            "vcodec": "h264", "acodec": "aac",
+                            "tmdb_score": 0.91, "metadata_source": "tmdb",
+                            "poster_source": "tmdb", "prepared_at": 1.0,
+                            "pushed_at": 2.0, "notes": "[]"}}
+        rows = device_library.device_movies(
+            [{"id": "a" * 16, "title": "Ponyo", "duration": None}], local)
+        self.assertEqual(rows[0]["tmdb_score"], 0.91)
+        # The device said nothing about duration, so the local fact stands.
+        self.assertEqual(rows[0]["duration"], 6060.0)
+        self.assertTrue(rows[0]["in_admin_db"])
+
+    def test_a_film_this_machine_did_not_prepare_is_marked(self):
+        rows = device_library.device_movies([{"id": "b" * 16, "title": "Hook"}])
+        self.assertFalse(rows[0]["in_admin_db"])
+
+    def test_the_shelf_order_is_the_normalised_title(self):
+        rows = device_library.device_movies([
+            {"id": "a" * 16, "title": "Ponyo", "sort_title": "ponyo"},
+            {"id": "b" * 16, "title": "The Fifth Element",
+             "sort_title": "fifth element"}])
+        self.assertEqual([r["title"] for r in rows],
+                         ["The Fifth Element", "Ponyo"])
 
 
 class PosterCache(unittest.TestCase):

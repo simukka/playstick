@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (QCheckBox, QFormLayout, QGroupBox, QHBoxLayout,
                                QMessageBox, QPlainTextEdit, QPushButton,
                                QVBoxLayout, QWidget)
 
-from ..core import overrides as overrides_mod
+from ..core import prepared
 from ..core.device_client import DeviceClient, DeviceError
 from ..bridges import tmdb_worker
 
@@ -43,8 +43,9 @@ class MetadataEditor(QWidget):
     savedOverride = Signal()
     reprepareRequested = Signal(dict)
 
-    def __init__(self, settings, parent=None):
+    def __init__(self, db, settings, parent=None):
         super().__init__(parent)
+        self._db = db
         self._settings = settings
         self._movie = None
         self._pending_tmdb_id = None
@@ -153,19 +154,18 @@ class MetadataEditor(QWidget):
 
     @staticmethod
     def _where(movie):
-        """Whether the stick has this film, said before somebody edits it.
+        """What is already known about this film's edits, said before somebody
+        adds another.
 
-        A film prepared here but never synced cannot take an edit on the device
-        -- there is no row to attach one to -- and the least helpful moment to
-        discover that is after pressing Save. The edit is still worth making:
-        it goes into the overrides file and the next prep run and sync carry it
-        over, which is what the sentence says.
+        An edit made from the sofa lands on the stick, and this app only learns
+        about it by asking. Saying so here is what stops somebody typing over a
+        correction they cannot see, which the form has no other way to show.
         """
-        if movie.get("unsynced"):
-            return "   [not on the stick yet -- Device tab, Sync library]"
         edited = movie.get("device_overrides") or {}
         if edited:
             return "   [edited on the stick: %s]" % ", ".join(sorted(edited))
+        if movie.get("in_admin_db") is False:
+            return "   [this machine did not prepare it]"
         return ""
 
     def _update_match_label(self):
@@ -206,23 +206,18 @@ class MetadataEditor(QWidget):
     def _save(self):
         if not self._movie:
             return
-        output = self._settings.effective_output()
-        if not output:
-            QMessageBox.warning(self, "No library", "Set a source library first.")
-            return
         fields = self._gather()
-        # The local file first, unconditionally: it is the one write that
+        # The admin database first, unconditionally: it is the one write that
         # cannot fail for a reason outside this machine, and doing it first
         # means an unreachable stick costs the edit nothing.
-        overrides_mod.set_entry(output, self._movie["id"], **fields)
+        prepared.set_override(self._db, self._movie["id"], **fields)
         self._push(self._movie["id"], {k: fields.get(k) for k in DEVICE_FIELDS})
         self.savedOverride.emit()
 
     def _clear(self):
         if not self._movie:
             return
-        output = self._settings.effective_output()
-        overrides_mod.clear_entry(output, self._movie["id"])
+        prepared.clear_overrides(self._db, self._movie["id"])
         # None on every field is how the daemon spells "forget this edit and go
         # back to what the sync said" -- the same reset the form's empty boxes
         # mean here. Clearing locally without this would leave the device still
@@ -243,21 +238,24 @@ class MetadataEditor(QWidget):
         url = self._settings.device_url
         if not url:
             return
-        # A film the stick has never been told about has no row to hang an
-        # override on, and the daemon rightly answers 404. That is not a fault
-        # and must not be reported as one: the edit is recorded here and the
-        # sync will carry it. The heading already said so.
-        if self._movie and self._movie.get("unsynced"):
-            return
         try:
             DeviceClient(url).admin_item(film_id, fields)
         except DeviceError as exc:
             QMessageBox.warning(
                 self, "Saved here, not on the device",
-                "The edit is in the overrides file and the next prep run will "
-                "use it, but the stick did not answer:\n\n%s" % exc)
+                "The edit is in this machine's library and the next "
+                "preparation will use it, but the stick did not answer:"
+                "\n\n%s" % exc)
 
     def _save_and_reprepare(self):
+        """Save, then re-derive what the film is called on the share.
+
+        This used to run the WHOLE library and lean on a cache to skip the
+        encodes that were already done -- an hour's wait to change a title.
+        Nothing on the share changes when a title does: the encode, the audio
+        and the subtitles are the same files. So what this asks for now is a
+        metadata refresh, which costs a TMDb lookup and a poster.
+        """
         if not self._movie:
             return
         movie = self._movie
@@ -281,8 +279,7 @@ class MetadataEditor(QWidget):
         self._results.addItem("Searching...")
         self._search_btn.setEnabled(False)
         job, thread = tmdb_worker.start_search(
-            key, self._settings.effective_output(),
-            self._settings.tmdb_language, query, year)
+            key, self._settings.tmdb_language, query, year)
         self._search_thread = thread          # keep a reference alive
         job.results.connect(self._on_results)
         job.failed.connect(self._on_search_failed)

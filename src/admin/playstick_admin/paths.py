@@ -20,3 +20,43 @@ def ensure_prep_on_path():
     """Make `import playstick_prep` work from anywhere in the app."""
     if PREP_DIR not in sys.path:
         sys.path.insert(0, PREP_DIR)
+
+
+# Where this app keeps the things it owns. State rather than cache: the admin
+# database holds every metadata correction anybody has made and the record of
+# what is on the NAS, and a cache is by definition something a cleaner may
+# delete. The daemon draws the same line for the same reason -- see the note
+# above config._default_db() on the device side.
+def state_dir():
+    base = (os.environ.get("XDG_STATE_HOME")
+            or os.path.join(os.path.expanduser("~"), ".local", "state"))
+    return os.path.join(base, "playstick-admin")
+
+
+def db_path():
+    """The admin database. PLAYSTICK_ADMIN_DB overrides it, which is what the
+    tests and a second profile on one machine both need."""
+    return (os.environ.get("PLAYSTICK_ADMIN_DB")
+            or os.path.join(state_dir(), "admin.db"))
+
+
+def default_staging():
+    """Where a film is prepared before it moves onto the share.
+
+    A cache and not state: everything in it is either half-made or already
+    copied somewhere that matters, and a cleaner deleting it costs at most one
+    encode. The queue survives in the database either way.
+    """
+    base = (os.environ.get("XDG_CACHE_HOME")
+            or os.path.join(os.path.expanduser("~"), ".cache"))
+    return os.path.join(base, "playstick-admin", "staging")
+
+
+def tmdb_cache_path():
+    """The preparer's TMDb cache, here rather than on the share.
+
+    It used to live at <library>/.playstick/tmdb-cache.json, which put a file
+    nothing on the stick ever opens onto the one filesystem this app is trying
+    to keep to films.
+    """
+    return os.path.join(state_dir(), "tmdb-cache.json")

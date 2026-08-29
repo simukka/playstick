@@ -3,6 +3,12 @@ briefly. Not part of the unittest suite (it needs PySide6); run by hand from the
 admin venv:
 
     QT_QPA_PLATFORM=offscreen python src/admin/smoke_test.py
+
+It runs against a scratch database and a scratch share, so it can be run on a
+machine with neither -- and so that it can never touch the real ones. The
+database is the thing worth being careful about: it holds every metadata
+correction anybody has made, and unlike the stick's it cannot be rebuilt from
+anywhere.
 """
 
 import os
@@ -22,10 +28,15 @@ def main():
     QCoreApplication.setApplicationName(settings_mod.APP)
     app = QApplication(sys.argv)
 
-    # Seed a source library so the window does not pop the settings dialog.
-    tmp = tempfile.mkdtemp()
+    # A scratch share, so the window does not pop the settings dialog, and a
+    # scratch database beside it -- see the module docstring.
+    tmp = tempfile.mkdtemp(prefix="playstick-smoke-")
+    os.environ["PLAYSTICK_ADMIN_DB"] = os.path.join(tmp, "admin.db")
+    nas = os.path.join(tmp, "nas")
+    os.makedirs(nas)
     s = settings_mod.Settings()
-    s.source_library = tmp
+    s.nas_root = nas
+    s.staging_dir = os.path.join(tmp, "staging")
 
     from playstick_admin.app import MainWindow
     window = MainWindow()
