@@ -2405,7 +2405,23 @@ def publish_index(kept, excluded, args, paths, last=None):
 
 def collect(path, library, args, state):
     """Everything that can be learned about one file without encoding it."""
-    rel = os.path.relpath(path, library)
+    return collect_one(path, os.path.relpath(path, library), args, state)
+
+
+def collect_one(path, rel, args, state, ident=None):
+    """The same, for a caller that decides the relative path and the id itself.
+
+    A whole-library run has one root, so `rel` can only be the path relative to
+    it and the id can only be a hash of that. The admin app has many roots and
+    one share, and those are different questions: `rel` is what this file reads
+    a year and a season folder out of, while the id is the name a box in another
+    room knows the film by and must not change when the film is reached through
+    a different source. Passing both in is what keeps the two apart.
+
+    `ident` defaults to the old answer, so `collect` above is unchanged.
+    """
+    if ident is None:
+        ident = file_id(rel)
     try:
         stat = os.stat(path)
     except OSError as exc:
@@ -2429,6 +2445,11 @@ def collect(path, library, args, state):
             and cached.get("meta_version") == META_VERSION):
         movie = dict(cached["movie"])
         movie["source"] = path
+        # The cache stores the id it was written with, and the caller may have
+        # decided on a different one -- a film reached through a new source, or
+        # one that has moved onto the share. The id names a row on the stick, so
+        # the caller's answer wins over a remembered one.
+        movie["id"] = ident
         log("  . cached: %s", rel, level="verbose")
         return movie
 
@@ -2440,7 +2461,7 @@ def collect(path, library, args, state):
                 "verify_notes": ["ffprobe could not read it: %s" % error],
                 "title": clean_title(os.path.basename(path)),
                 "norm_title": normalize_title(clean_title(os.path.basename(path))),
-                "sort_title": "", "id": file_id(rel), "size": stat.st_size}
+                "sort_title": "", "id": ident, "size": stat.st_size}
 
     vid = video_stream(info) or {}
     audio = audio_streams(info)
@@ -2449,7 +2470,7 @@ def collect(path, library, args, state):
     movie = {
         "source": path,
         "source_rel": rel,
-        "id": file_id(rel),
+        "id": ident,
         "size": stat.st_size,
         "duration": round(duration_of(info), 3),
         "width": int(to_float(vid.get("width"))) or None,
@@ -2587,43 +2608,56 @@ def device_films(index):
     """
     films = []
     for movie in index.get("movies") or []:
-        ident = movie.get("id")
-        source_rel = movie.get("source_rel") or movie.get("rel")
-        if not ident or not source_rel:
-            continue
-        films.append({
-            "id": ident,
-            "source_rel": source_rel,
-            # `rel` is what to PLAY: the transcode when there is one, the
-            # source when there is not. build_index() has already made that
-            # choice; this only has to not undo it.
-            "media_rel": movie.get("rel") or source_rel,
-            "title": movie.get("title") or os.path.basename(source_rel),
-            "sort_title": movie.get("sort_title") or "",
-            "year": movie.get("year"),
-            "rating": movie.get("rating"),
-            "plot": movie.get("plot"),
-            "duration": movie.get("duration"),
-            "width": movie.get("width"),
-            "height": movie.get("height"),
-            "vcodec": movie.get("vcodec"),
-            "acodec": movie.get("acodec"),
-            "tmdb_id": movie.get("tmdb_id"),
-            "hidden": bool(movie.get("hidden")),
-            "genres": movie.get("genres") or [],
-            "subtitles": [{"rel": s["rel"], "lang": s.get("lang") or "und"}
-                          for s in movie.get("subtitles") or []
-                          if s.get("rel")],
-            "audio": [{"n": t["n"], "rel": t["rel"],
-                       "lang": t.get("lang") or "und",
-                       "title": t.get("title") or "",
-                       "channels": t.get("channels"),
-                       "default": bool(t.get("default")),
-                       "offset": t.get("offset") or 0.0}
-                      for t in movie.get("audio") or []
-                      if t.get("rel") and t.get("n") is not None],
-        })
+        film = device_film(movie)
+        if film is not None:
+            films.append(film)
     return films
+
+
+def device_film(movie):
+    """One index entry as the payload wants it, or None if it is not usable.
+
+    Split out of device_films so that a caller holding one film -- the admin
+    app, which now prepares and pushes them one at a time -- gets the same
+    translation rather than writing a second one. Two translations of this shape
+    would agree right up until somebody renamed a key in build_index().
+    """
+    ident = movie.get("id")
+    source_rel = movie.get("source_rel") or movie.get("rel")
+    if not ident or not source_rel:
+        return None
+    return {
+        "id": ident,
+        "source_rel": source_rel,
+        # `rel` is what to PLAY: the transcode when there is one, the
+        # source when there is not. build_index() has already made that
+        # choice; this only has to not undo it.
+        "media_rel": movie.get("rel") or source_rel,
+        "title": movie.get("title") or os.path.basename(source_rel),
+        "sort_title": movie.get("sort_title") or "",
+        "year": movie.get("year"),
+        "rating": movie.get("rating"),
+        "plot": movie.get("plot"),
+        "duration": movie.get("duration"),
+        "width": movie.get("width"),
+        "height": movie.get("height"),
+        "vcodec": movie.get("vcodec"),
+        "acodec": movie.get("acodec"),
+        "tmdb_id": movie.get("tmdb_id"),
+        "hidden": bool(movie.get("hidden")),
+        "genres": movie.get("genres") or [],
+        "subtitles": [{"rel": s["rel"], "lang": s.get("lang") or "und"}
+                      for s in movie.get("subtitles") or []
+                      if s.get("rel")],
+        "audio": [{"n": t["n"], "rel": t["rel"],
+                   "lang": t.get("lang") or "und",
+                   "title": t.get("title") or "",
+                   "channels": t.get("channels"),
+                   "default": bool(t.get("default")),
+                   "offset": t.get("offset") or 0.0}
+                  for t in movie.get("audio") or []
+                  if t.get("rel") and t.get("n") is not None],
+    }
 
 
 def poster_path(output, movie):
@@ -2680,6 +2714,183 @@ def apply_overrides(movie, overrides):
     if entry.get("hidden"):
         movie["hidden"] = True
     return entry
+
+
+def build_remux_argv(movie, dest, args):
+    """A container change and nothing else: the streams are already fine.
+
+    Reached only when transcode_plan() found nothing to complain about -- the
+    film is 8-bit H.264 at 720p or less -- and the only problem left is where
+    the bytes are. So no filters, no encoder, and -c copy: this costs a read and
+    a write of the file, not an evening of libx264.
+
+    -f mp4 explicitly, for the same reason build_transcode_argv gives: the write
+    goes to a ".part" first and ffmpeg picks its muxer from the extension.
+    """
+    argv = [FFMPEG, "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", movie["source"], "-map", "0:v:0"]
+    audio = movie.get("audio_index")
+    if audio is not None:
+        argv += ["-map", "0:%d" % audio]
+    argv += ["-c", "copy"]
+    if audio is None:
+        argv += ["-an"]
+    # Subtitles are extracted to sidecars, and most of what a matroska file
+    # carries has no mp4 mapping anyway -- a copy that tried would stop rather
+    # than drop them.
+    argv += ["-sn", "-dn", "-map_chapters", "-1", "-movflags", "+faststart",
+             "-f", "mp4", dest]
+    return argv
+
+
+def place_media(movie, args, dest_root):
+    """Make sure the film itself is a file underneath `dest_root`.
+
+    THE GAP THIS CLOSES
+
+    do_transcode() sets media_rel when it encoded something. When it did not --
+    the film already met every requirement -- nothing was written, and the index
+    fell back to naming the ORIGINAL by its library-relative path. That was
+    right while the library and the output root were the same share: the file
+    the daemon opened was the file the preparer had read.
+
+    They are not the same thing once the machine preparing films can see more
+    than the share does. A path relative to a drive on somebody's desk means
+    nothing on a box that mounts one share at /srv/movies and refuses anything
+    resolving outside it -- so a film that needed no encode would be indexed,
+    pushed, accepted, and then not play, with the daemon logging one line about
+    a path that does not resolve.
+
+    Three cases, and only the last one moves any bytes:
+
+      an encode exists      leave it; media_rel already names it
+      already under dest    record where it lies; copy nothing, which is the
+                            whole reason a film on the share is cheap
+      anywhere else         remux into <dest>/.playstick/media/<id>.mp4
+
+    Returns the dest-relative path, or None if it could not be placed.
+
+    The remux is a byte copy in a new container. If it fails -- an exotic codec
+    combination mp4 will not hold, which -c copy reports rather than working
+    around -- the file is copied verbatim under its own extension instead. mpv
+    plays matroska perfectly well; the mp4 is a preference, not a requirement,
+    and refusing the film over it would be choosing tidiness over the film.
+    """
+    if movie.get("media_rel"):
+        return movie["media_rel"]
+
+    source = os.path.realpath(movie["source"])
+    root = os.path.realpath(dest_root)
+    if source == root or source.startswith(root + os.sep):
+        movie["media_rel"] = os.path.relpath(source, root).replace(os.sep, "/")
+        return movie["media_rel"]
+
+    media_dir = os.path.join(root, WORK_DIR, "media")
+    os.makedirs(media_dir, exist_ok=True)
+    dest = os.path.join(media_dir, encode_name(movie["id"]))
+    rel = "%s/media/%s" % (WORK_DIR, encode_name(movie["id"]))
+
+    if os.path.isfile(dest) and not args.force:
+        log("  = already on the share: %s", os.path.basename(dest),
+            level="verbose")
+        movie["media_rel"] = rel
+        movie["prepared"] = True
+        return rel
+
+    staging = dest + ".part"
+    log("  > copying %s onto the share", movie["title"])
+    started = time.time()
+    argv = build_remux_argv(movie, staging, args)
+    log("    %s", " ".join(argv), level="verbose")
+    argv, watching = with_progress(argv, "copying", movie.get("duration"))
+    res = run(argv, timeout=args.transcode_timeout, progress=watching)
+
+    if res.returncode != 0:
+        discard(staging)
+        if cancelled():
+            log("  - copy of %s stopped part way; nothing kept", movie["title"])
+            return None
+        # The container would not hold the streams. Take the file as it is.
+        ext = os.path.splitext(movie["source"])[1].lower() or ".mkv"
+        dest = os.path.join(media_dir, "%s%s" % (movie["id"], ext))
+        rel = "%s/media/%s%s" % (WORK_DIR, movie["id"], ext)
+        staging = dest + ".part"
+        log("  ~ mp4 would not hold %s (%s); copying it as it is",
+            movie["title"], first_line(res.stderr or ""))
+        try:
+            shutil.copyfile(movie["source"], staging)
+        except OSError as exc:
+            warn("could not copy %s onto the share: %s", movie["title"], exc)
+            discard(staging)
+            return None
+
+    # Staged and renamed, like every other write onto the share: the stick
+    # mounts it with actimeo=60, so a file written in place can be served at a
+    # stale size for a minute afterwards -- and a wrong Content-Length is a
+    # phone that stops halfway through a film.
+    try:
+        os.replace(staging, dest)
+    except OSError as exc:
+        warn("could not place %s: %s", movie["title"], exc)
+        discard(staging)
+        return None
+
+    movie["media_rel"] = rel
+    movie["prepared"] = True
+    try:
+        movie["media_size"] = os.path.getsize(dest)
+    except OSError:
+        pass
+    log("  + %s in %s (%s)", os.path.basename(dest), hms(time.time() - started),
+        human_size(movie.get("media_size", 0)))
+    return rel
+
+
+def match_tmdb(movie, tmdb, overrides, args):
+    """Give one film TMDb's opinion of itself, if it can earn it.
+
+    Extracted from main() so that a single-film preparation cannot drift from a
+    whole-library one on the rule this file spends the most words defending:
+    a match has to survive the title, the year AND the runtime, because the
+    first run of this against a real library published Red Hook Summer as Hook
+    and every step of it succeeded. Two copies of that gate would eventually be
+    one gate and one hole.
+
+    Returns (why, matched). `why` is None on a confident match, and otherwise
+    the sentence explaining what was not confident enough -- the caller decides
+    whether to collect those and report them together, which is what a run over
+    a hundred films wants and a run over one does not.
+    """
+    entry = overrides.get(movie.get("id")) if overrides else None
+    forced_id = entry.get("tmdb_id") if isinstance(entry, dict) else None
+    why = None
+    if forced_id:
+        # A hand-picked film: take TMDb at its word for this id and skip the
+        # search and the confidence gate entirely.
+        meta, complaint = tmdb.fetch_by_id(forced_id)
+        if complaint:
+            log("  ! override for %s: %s", movie["title"], complaint)
+    else:
+        meta, why = tmdb.lookup(movie["title"], movie.get("year"),
+                                movie.get("duration"))
+    apply_metadata(movie, meta, args)
+    # TMDb knows how long the film should be, which is the one genuinely
+    # external check on "is this the whole thing". Both directions matter:
+    # short means cut or incomplete, and long means an extended edition -- or,
+    # before the match was verified, simply a different film.
+    expected = movie.get("expected_runtime")
+    duration = movie.get("duration")
+    if expected and duration and duration < expected * 0.85:
+        note = ("runs %s against TMDb's %s -- cut, or incomplete"
+                % (hms(duration), hms(expected)))
+        movie.setdefault("verify_notes", []).append(note)
+        warn("%s: %s", movie["title"], note)
+    elif expected and duration and duration > expected * 1.15:
+        note = ("runs %s against TMDb's %s -- an extended edition, or the "
+                "wrong match" % (hms(duration), hms(expected)))
+        movie.setdefault("verify_notes", []).append(note)
+        warn("%s: %s", movie["title"], note)
+    return why, not why
 
 
 def prepare_one(movie, args, paths, tmdb):
@@ -2803,39 +3014,11 @@ def main(argv=None, *, install_handlers=True):
         for movie in kept:
             if cancelled():
                 break
-            entry = overrides.get(movie.get("id")) if overrides else None
-            forced_id = entry.get("tmdb_id") if isinstance(entry, dict) else None
-            if forced_id:
-                # A hand-picked film: take TMDb at its word for this id and
-                # skip the search and the confidence gate entirely.
-                meta, why = tmdb.fetch_by_id(forced_id)
-                if why:
-                    log("  ! override for %s: %s", movie["title"], why)
-            else:
-                meta, why = tmdb.lookup(movie["title"], movie.get("year"),
-                                        movie.get("duration"))
-                if why:
-                    unmatched.append((movie, why))
-                    log("  ? %s (%s): %s", movie["title"], movie.get("year") or "?",
-                        why, level="verbose")
-            apply_metadata(movie, meta, args)
-            # TMDb knows how long the film should be, which is the one
-            # genuinely external check on "is this the whole thing". Both
-            # directions matter: short means cut or incomplete, and long means
-            # an extended edition -- or, before the match was verified, simply
-            # a different film.
-            expected = movie.get("expected_runtime")
-            duration = movie.get("duration")
-            if expected and duration and duration < expected * 0.85:
-                note = ("runs %s against TMDb's %s -- cut, or incomplete"
-                        % (hms(duration), hms(expected)))
-                movie.setdefault("verify_notes", []).append(note)
-                warn("%s: %s", movie["title"], note)
-            elif expected and duration and duration > expected * 1.15:
-                note = ("runs %s against TMDb's %s -- an extended edition, or "
-                        "the wrong match" % (hms(duration), hms(expected)))
-                movie.setdefault("verify_notes", []).append(note)
-                warn("%s: %s", movie["title"], note)
+            why, _ = match_tmdb(movie, tmdb, overrides, args)
+            if why:
+                unmatched.append((movie, why))
+                log("  ? %s (%s): %s", movie["title"], movie.get("year") or "?",
+                    why, level="verbose")
         tmdb.save()
         # Said once, together, at the end. A film with no confident match keeps
         # its filename title and year and gets a frame for a poster, which is
