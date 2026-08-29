@@ -132,6 +132,65 @@ class Accessors(unittest.TestCase):
         self.assertEqual([str(n) for n in nets], ["10.0.0.0/8", "127.0.0.1/32"])
 
 
+class TheContainersSettingsHeredoc(unittest.TestCase):
+    """scripts/gui-entrypoint.sh writes the daemon's settings file with an
+    UNQUOTED heredoc, and it has to: $LIBRARY, $STATE and $NAS_HOST are shell
+    variables that must expand.
+
+    That means every backtick and $( ) inside it is a command the container
+    runs while writing its own configuration. This has happened -- a comment
+    mentioning `docker compose down -v` in prose became a command substitution,
+    and the only reason it did nothing worse than print "docker: command not
+    found" is that the container has no docker in it. On an image that did, an
+    explanatory comment would have torn down the developer's stack from inside
+    it.
+
+    So: nothing unescaped, and the check is mechanical because reading past one
+    is exactly what happened.
+    """
+
+    def setUp(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "scripts", "gui-entrypoint.sh"),
+                  encoding="utf-8") as handle:
+            self.script = handle.read()
+
+    def heredoc(self):
+        """The lines between `cat > "$SETTINGS" <<TOML` and its terminator."""
+        lines = self.script.splitlines()
+        start = next(i for i, line in enumerate(lines)
+                     if line.startswith('cat > "$SETTINGS" <<TOML'))
+        end = next(i for i, line in enumerate(lines[start + 1:], start + 1)
+                   if line.strip() == "TOML")
+        return lines[start + 1:end]
+
+    def test_the_heredoc_is_found_at_all(self):
+        """If this stops matching, every assertion below silently passes."""
+        body = self.heredoc()
+        self.assertTrue(len(body) > 20, "the settings heredoc looks empty")
+        self.assertTrue(any("[library]" in line for line in body))
+
+    def test_no_backtick_is_left_unescaped(self):
+        for number, line in enumerate(self.heredoc(), 1):
+            stripped = line.replace("\\`", "")
+            self.assertNotIn("`", stripped,
+                             "line %d runs a command: %s" % (number, line))
+
+    def test_no_dollar_paren_is_left_unescaped(self):
+        for number, line in enumerate(self.heredoc(), 1):
+            stripped = line.replace("\\$(", "")
+            self.assertNotIn("$(", stripped,
+                             "line %d runs a command: %s" % (number, line))
+
+    def test_the_variables_it_does_expand_are_the_expected_ones(self):
+        """The flip side. The heredoc is unquoted FOR these, so a change that
+        quoted it -- the obvious fix to the above -- would leave the daemon
+        with a literal $LIBRARY as its library path and no error anywhere."""
+        body = "\n".join(self.heredoc())
+        for name in ("$LIBRARY", "$STATE", "$NAS_HOST"):
+            self.assertIn(name, body, "%s is no longer expanded" % name)
+
+
 class TheHandRunDefaults(unittest.TestCase):
     """`python3 src/server/playstick-web.py`, as yourself, with no settings
     file anywhere. config.py's header promises this works and it is worth one

@@ -74,9 +74,12 @@ path = "$LIBRARY"
 # port and back, which is worth watching at a human pace.
 scan_interval = 30
 
-# The one file the daemon writes. A named volume in compose, so `docker compose
-# down -v` resets it -- and resetting it means an empty library until
-# playstick-gui-seed runs again, which the entrypoint does on every start.
+# The one file the daemon writes. A named volume in compose, so
+# \`docker compose down -v\` resets it -- and resetting it means an empty
+# library until playstick-gui-seed runs again, which this script does on every
+# start. The backslashes are load-bearing: this heredoc is unquoted, because
+# \$LIBRARY and \$STATE have to expand, so a bare backtick here is a command
+# this container RUNS while writing its own settings file.
 [database]
 path = "$STATE/playstick.db"
 
