@@ -34,7 +34,7 @@ from unittest import mock
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPT = os.path.join(ROOT, "scripts", "playstick-prep.py")
+SCRIPT = os.path.join(ROOT, "src", "prep", "playstick_prep.py")
 
 # The hyphen in the filename keeps it out of `import`, which is the right name
 # for a command and the wrong one for a module.

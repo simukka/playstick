@@ -1,9 +1,32 @@
 """The HTTP surface: one handler, and the routes it will answer.
 
-No filesystem path ever crosses this boundary in either direction -- clients
-send opaque ids and small integers, and /api/audio is the only route in the
-process that streams file bytes. The package docstring explains how far that
-reaches.
+THE RULE ABOUT PATHS, AND THE ONE PLACE IT IS NARROWER THAN IT WAS
+
+No filesystem path crosses this boundary on any route a phone uses. Clients
+send opaque ids and small integers; /api/audio is the only route in the process
+that streams file bytes, and it names a file by indexing a table rather than by
+being told one.
+
+The exception is /api/admin/films, and it is a real one rather than a wording
+change. The library lives in a database on this device now, so the machine that
+prepares films has to be able to put paths INTO it -- there is no index file on
+the share left to read them from. The containment is three-fold and every part
+of it is load-bearing:
+
+  * library-relative only. An absolute path, or one that resolves outside the
+    library root, is a 400 with a sentence -- refused, not silently dropped, so
+    a mis-configured admin app is a visible failure rather than a film that
+    quietly never appears.
+  * the check is Library._under_root, the same realpath-and-compare that has
+    always stood between a stored path and mpv. It runs twice: once here before
+    a row is written, and again in Library._hydrate before a path is used. A
+    bug in either one alone cannot reach the filesystem.
+  * these routes are the only ones that accept a path in any form.
+
+There is still no authentication -- the CIDR allowlist is the whole control,
+exactly as it was before. See the package docstring for why, and note that it
+is now the only thing standing between somebody already on the LAN and the
+film table.
 """
 
 import hashlib
@@ -18,13 +41,15 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 from .config import (
+    ADMIN_SYNC_MAX, ADMIN_THUMB_CLEAR_RE, ADMIN_THUMB_MAX, ADMIN_THUMB_RE,
     ALLOW_NETWORKS, AUDIO_CHUNK, AUDIO_ROUTE_RE, AUDIO_SLOTS, HAS_AUDIO,
-    PHONE_AUDIO, PHONE_AUDIO_BPS, PHONE_AUDIO_BURST,
+    LIBRARY, PHONE_AUDIO, PHONE_AUDIO_BPS, PHONE_AUDIO_BURST,
     PHONE_AUDIO_STREAMS, RANGE_RE, SYNC_HEADER, SYNC_KEEP_RE, SYNC_MAX,
     SYNC_MAX_RATE, UI_FILE, log
 )
 from .airplay import airplay_active
-from .thumbs import Thumbs, placeholder_svg
+from .library import Library
+from .thumbs import placeholder_svg
 from .player import Busy
 
 
@@ -125,6 +150,41 @@ def build_id():
         return _ui_cache[1]
 
 
+def _int_or_none(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    # NaN and the infinities go in a REAL column happily and come back out to
+    # arithmetic that then produces neither an error nor a number.
+    return number if number == number and abs(number) != float("inf") else None
+
+
+def _float_or(value, default):
+    number = _float_or_none(value)
+    return default if number is None else number
+
+
+def _image_type(data):
+    """JPEG or PNG, by magic number. "" for anything else."""
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    return ""
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "playstick"
     protocol_version = "HTTP/1.1"
@@ -138,6 +198,10 @@ class Handler(BaseHTTPRequestHandler):
     timeout = 30
 
     library = None      # set on the server before serve_forever
+    # The database, set alongside the workers that read it. Held so a route can
+    # reach the store directly rather than through whichever worker happens to
+    # own the table it wants.
+    db = None
     # Whether the NAS is awake, and the one thing that can be done about it.
     nas = None
     thumbs = None
@@ -241,6 +305,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_ui()
         if path == "/api/library":
             return self._api_library()
+        if path == "/api/admin/library":
+            return self._api_admin_library()
         if path.startswith("/api/thumb/"):
             return self._api_thumb(path[len("/api/thumb/"):])
         if path == "/api/status":
@@ -302,6 +368,10 @@ class Handler(BaseHTTPRequestHandler):
                 delta = 0
             self.player.nudge_volume(delta)
             return self._api_status()
+        if path == "/api/seek":
+            return self._api_seek()
+        if path == "/api/subtitle":
+            return self._api_subtitle()
         if path == "/api/nas/wake":
             return self._api_nas_wake()
         if path == "/api/rescan":
@@ -309,7 +379,57 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if path == "/api/admin/item":
             return self._api_admin_item()
+        if path == "/api/admin/films":
+            return self._api_admin_films()
+        match = ADMIN_THUMB_CLEAR_RE.match(path)
+        if match:
+            return self._api_admin_thumb_clear(match.group(1))
         return self._json({"error": "not found"}, 404)
+
+    def do_PUT(self):                                # noqa: N802 - stdlib API
+        """One route, and the only one on this server that takes a body which
+        is not JSON.
+
+        A poster could have been base64 in a POST like everything else. It is
+        not, because the admin app pushes one per film on a full sync -- a few
+        hundred of them -- and base64 would inflate every one by a third for no
+        gain on a link whose whole job is to be the slow part. The body is read
+        here rather than in _body() for the same reason: it must never be
+        handed to json.loads.
+        """
+        path = urlparse(self.path).path
+        if not self._allowed():
+            # The body is still unread at this point, and protocol_version is
+            # HTTP/1.1 -- so it would be parsed as the next request line. Drain
+            # it before refusing.
+            self._drain()
+            return self._json({"error": "not on the local network"}, 403)
+        match = ADMIN_THUMB_RE.match(path)
+        if match:
+            return self._api_admin_thumb(match.group(1))
+        self._drain()
+        return self._json({"error": "not found"}, 404)
+
+    def _drain(self):
+        """Read and discard a body this handler is not going to parse.
+
+        Capped, because the point is to keep the connection usable rather than
+        to accept anything a client cares to send: past the cap the connection
+        is not worth saving and closing it is the honest answer.
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return
+        if length > ADMIN_THUMB_MAX:
+            self.close_connection = True
+            return
+        try:
+            self.rfile.read(length)
+        except OSError:
+            self.close_connection = True
 
     def _serve_ui(self):
         try:
@@ -325,6 +445,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_library(self):
         order, items, available, scanned_at, error = self.library.snapshot()
+        # One query for the whole grid rather than one stat per tile, which is
+        # what `have(ident)` per film used to cost when a poster was a file.
+        have_thumb = self.thumbs.haves()
         payload = {
             "available": available,
             "error": error,
@@ -334,17 +457,20 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "id": ident,
                     "title": items[ident]["title"],
-                    # A poster from the index is already on disk, so the tile
-                    # never has to show a placeholder first.
-                    "has_thumb": bool(items[ident].get("poster")) or self.thumbs.have(ident),
-                    # Present only when the library came from the index. The
-                    # page ignores what it does not recognise, so this is
+                    # Whether there are bytes to serve. False means the tile
+                    # gets the placeholder and the request enqueues an
+                    # extraction; a poster the admin app uploaded is already in
+                    # the table, so those tiles never show one at all.
+                    "has_thumb": ident in have_thumb,
+                    # Empty for a film the preparer could find nothing about.
+                    # The page ignores what it does not recognise, so this is
                     # additive for an older ui.html.
                     "year": items[ident].get("year"),
                     "rating": items[ident].get("rating"),
                     "genres": items[ident].get("genres") or [],
-                    # Empty for a walked share, where the page falls back to
-                    # the title -- which is what it would have sorted on anyway.
+                    # Empty when the preparer had no shelf key to offer, where
+                    # the page falls back to the title -- which is what it
+                    # would have sorted on anyway.
                     "sort_title": items[ident].get("sort_title") or "",
                     # Whether this film is held back from the children's grid.
                     # Sent for every client, not just the desktop editor: the
@@ -364,6 +490,49 @@ class Handler(BaseHTTPRequestHandler):
             ],
         }
         self._json(payload)
+
+    def _api_seek(self):
+        """Move the film. The page sends one number of seconds, signed.
+
+        Coerced here, like /api/volume and for the same reason -- the player
+        does arithmetic on it and a delta of "forward" would otherwise be a
+        ValueError on a thread nobody gets an answer from. The outer clamp is a
+        sanity bound rather than the real one: the player clamps to the film,
+        which is the only clamp that knows how long the film is.
+
+        Refused with a sentence when nothing is playing, rather than silently
+        doing nothing: the page only draws these buttons on the now-playing
+        view, so a seek arriving on an idle daemon means two phones disagree
+        about what is on, and the one that pressed should be told.
+        """
+        if self._state() not in ("playing", "paused"):
+            return self._json({"error": "Nothing is playing."}, 409)
+        try:
+            delta = float(self._body().get("delta", 0))
+        except (TypeError, ValueError):
+            delta = 0.0
+        if delta != delta or delta in (float("inf"), float("-inf")):
+            delta = 0.0
+        delta = max(-86400.0, min(86400.0, delta))
+        self.player.seek(delta)
+        return self._api_status()
+
+    def _api_subtitle(self):
+        """Which subtitle track is on the picture. 0 means none.
+
+        The number is validated against mpv's own track list inside the player
+        before it is used, which is the same shape of rule /api/play follows
+        with film ids: a client names something, and the name is only ever
+        looked up in a table this process built.
+        """
+        if self._state() not in ("playing", "paused"):
+            return self._json({"error": "Nothing is playing."}, 409)
+        try:
+            track = int(self._body().get("track", 0))
+        except (TypeError, ValueError):
+            track = 0
+        self.player.set_subtitle(max(0, track))
+        return self._api_status()
 
     def _api_nas_wake(self):
         """Switch the machine the films live on back on.
@@ -447,33 +616,226 @@ class Handler(BaseHTTPRequestHandler):
             fields["genres"] = picked or None
         return fields
 
+    # -- the admin app's routes ---------------------------------------------
+    #
+    # Everything below is what the desktop app uses and no phone ever calls.
+    # They are the only routes that write the film table, and the only ones
+    # that accept a path in any form -- see the module docstring for what that
+    # costs and what contains it.
+
+    def _api_admin_library(self):
+        """The film table as it is stored: paths, overrides, poster etags.
+
+        The one read that hands out stored paths, because the admin app is
+        diffing against what it sent and cannot do that against the resolved
+        view the phones get. The etags are what let it upload a poster only
+        when the local file's bytes differ, rather than pushing every poster in
+        the library on every sync.
+        """
+        return self._json({
+            "films": self.library.rows(),
+            "library": LIBRARY,
+        })
+
+    def _api_admin_films(self):
+        """The library, pushed from the machine that prepared it.
+
+        `reconcile` is what a full library push sets: films absent from the
+        batch are then deleted, which is how a film removed from the share
+        stops appearing on the grid. Without it this is an upsert of whatever
+        was sent and nothing else, which is what correcting one film wants.
+
+        Every entry is validated before ANY of them is written -- one bad path
+        refuses the whole request rather than leaving half a library. The
+        alternative, skipping the bad entry, would mean a typo in a path
+        presents as a film that silently never appears, which is the failure
+        this endpoint most needs not to have.
+        """
+        body = self._body()
+        raw = body.get("films")
+        if not isinstance(raw, list):
+            return self._json({"error": "films must be a list."}, 400)
+        if len(raw) > ADMIN_SYNC_MAX:
+            return self._json(
+                {"error": "That is more than %d films." % ADMIN_SYNC_MAX}, 400)
+        films, seen = [], set()
+        for index, entry in enumerate(raw):
+            if not isinstance(entry, dict):
+                return self._json(
+                    {"error": "Film %d is not an object." % index}, 400)
+            film, error = self._sync_film(entry)
+            if error:
+                return self._json({"error": "Film %d: %s" % (index, error)}, 400)
+            if film["id"] in seen:
+                return self._json(
+                    {"error": "Film %d: %s appears twice."
+                              % (index, film["id"])}, 400)
+            seen.add(film["id"])
+            films.append(film)
+        written, removed = self.library.sync(films,
+                                             bool(body.get("reconcile")))
+        return self._json({"written": written, "removed": removed})
+
+    @staticmethod
+    def _sync_film(entry):
+        """One film's row, coerced and proved. Returns (film, error).
+
+        Every path here is checked with the same Library._under_root the player
+        uses, against the real library root -- so a `rel` of "../../etc/passwd"
+        or an absolute "/etc/passwd" is refused here and never becomes a row.
+        The coercion is the boundary work /api/volume does for a delta, applied
+        to a bigger shape.
+        """
+        root = os.path.realpath(LIBRARY)
+
+        def under(rel):
+            if not isinstance(rel, str) or not rel:
+                return None
+            if os.path.isabs(rel):
+                return None
+            return Library._under_root(root, rel)
+
+        ident = entry.get("id")
+        if not isinstance(ident, str) or not re.fullmatch(r"[0-9a-f]{16}", ident):
+            return None, "id must be sixteen lowercase hex characters."
+        source_rel = entry.get("source_rel")
+        if under(source_rel) is None:
+            return None, "source_rel is not a path inside the library."
+        # A film with no re-encode plays from its source, which is what the
+        # preparer means by leaving media_rel out.
+        media_rel = entry.get("media_rel") or source_rel
+        if under(media_rel) is None:
+            return None, "media_rel is not a path inside the library."
+        title = str(entry.get("title") or "").strip()
+        if not title:
+            return None, "title is required."
+
+        subs = []
+        for sub in entry.get("subtitles") or ():
+            if not isinstance(sub, dict) or under(sub.get("rel")) is None:
+                return None, "a subtitle is not a path inside the library."
+            subs.append({"rel": sub["rel"],
+                         "lang": str(sub.get("lang") or "und").lower()[:8]})
+        audio = []
+        for track in entry.get("audio") or ():
+            if not isinstance(track, dict) or under(track.get("rel")) is None:
+                return None, "an audio track is not a path inside the library."
+            try:
+                number = int(track.get("n"))
+            except (TypeError, ValueError):
+                return None, "an audio track has no number."
+            audio.append({
+                "n": number, "rel": track["rel"],
+                "lang": str(track.get("lang") or "und")[:8],
+                "title": str(track.get("title") or "")[:200],
+                "channels": _int_or_none(track.get("channels")),
+                "default": bool(track.get("default")),
+                "offset": _float_or(track.get("offset"), 0.0),
+            })
+
+        genres = [str(g).strip()[:60] for g in (entry.get("genres") or ())
+                  if str(g).strip()]
+        return {
+            "id": ident,
+            "source_rel": source_rel,
+            "media_rel": media_rel,
+            "title": title[:400],
+            "sort_title": str(entry.get("sort_title") or "").strip()[:400],
+            "year": _int_or_none(entry.get("year")),
+            # Text in the column because it is both a score and a certificate;
+            # str() here rather than a type test so 7.8 and "PG" round-trip the
+            # same way, and _rating() in library.py turns it back.
+            "rating": (None if entry.get("rating") in (None, "")
+                       else str(entry["rating"])[:40]),
+            "plot": str(entry.get("plot") or "")[:8000] or None,
+            "duration": _float_or_none(entry.get("duration")),
+            "width": _int_or_none(entry.get("width")),
+            "height": _int_or_none(entry.get("height")),
+            "vcodec": str(entry.get("vcodec") or "")[:40] or None,
+            "acodec": str(entry.get("acodec") or "")[:40] or None,
+            "tmdb_id": _int_or_none(entry.get("tmdb_id")),
+            "hidden": 1 if entry.get("hidden") else 0,
+            "genres": genres[:20],
+            "subtitles": subs,
+            "audio": audio,
+        }, ""
+
+    def _api_admin_thumb(self, ident):
+        """A poster, as raw bytes, from the machine that made it.
+
+        Refused for a film that is not in the library, so the table cannot
+        collect posters for films that will never be shown. The magic-number
+        check is not a security control -- the bytes are only ever handed back
+        with the Content-Type this derives from them -- it is there so that a
+        mistyped curl leaves an error rather than a tile that renders as
+        nothing on six phones.
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return self._json({"error": "No image was sent."}, 400)
+        if length > ADMIN_THUMB_MAX:
+            # Not read: the point of the cap is to not allocate it.
+            self.close_connection = True
+            return self._json(
+                {"error": "That image is larger than %d bytes."
+                          % ADMIN_THUMB_MAX}, 413)
+        if self.library.get(ident) is None:
+            self._drain()
+            return self._json({"error": "That film is not in the library."}, 404)
+        data = self.rfile.read(length)
+        mime = _image_type(data)
+        if not mime:
+            return self._json({"error": "That is not a JPEG or a PNG."}, 400)
+        tag = self.thumbs.store(ident, data, mime, source="admin")
+        return self._json({"id": ident, "etag": tag, "bytes": len(data)})
+
+    def _api_admin_thumb_clear(self, ident):
+        """Forget a film's poster, so the extractor may make one again.
+
+        The way to undo a wrong poster: a re-sync will not replace it (a sync
+        deliberately leaves posters alone, so it cannot discard one somebody
+        uploaded), so there has to be something that says "that one was wrong".
+        """
+        if self.library.get(ident) is None:
+            return self._json({"error": "That film is not in the library."}, 404)
+        return self._json({"id": ident, "cleared": self.thumbs.clear(ident)})
+
     def _api_thumb(self, ident):
+        """One film's poster, from the `thumb` table.
+
+        Two sources land in the same column -- a poster the admin app uploaded
+        and a frame this box extracted -- and they get the same answer here,
+        which they did not when one was a file on the share and the other a
+        file in /var/cache. The ETag is what replaced that split: the uploaded
+        one used to be served max-age=86400 because a re-prep could change it,
+        and the extracted one immutable-for-a-year because nothing could. Now
+        the etag says which bytes these are, a revalidation costs one query and
+        a 304, and neither has to be guessed at.
+        """
         item = self.library.get(ident)
         if item is None:
             return self._json({"error": "not found"}, 404)
-        # A poster the prep tool made. Not immutable, unlike the extracted
-        # frames below: re-running prep can replace it, and a phone that
-        # cached it for a year would never find out.
-        poster = item.get("poster")
-        if poster:
-            try:
-                with open(poster, "rb") as fh:
-                    return self._send(200, fh.read(), "image/jpeg",
-                                      {"Cache-Control": "public, max-age=86400"})
-            except OSError:
-                pass
-        cached = Thumbs.cached_path(ident)
-        try:
-            with open(cached, "rb") as fh:
-                body = fh.read()
-        except OSError:
+        found = self.thumbs.get(ident)
+        if found is None:
             self.thumbs.request(ident)
             # no-store, so the next request after the frame is extracted gets
             # the real thing without the page having to cache-bust.
             return self._send(200, placeholder_svg(item["title"]),
                               "image/svg+xml", {"Cache-Control": "no-store"})
-        self._send(200, body, "image/jpeg",
-                   {"Cache-Control": "public, max-age=31536000, immutable"})
+        body, mime, tag = found
+        quoted = '"%s"' % tag
+        # A weak comparison would be wrong here and a list is what browsers
+        # actually send, so this checks membership rather than equality.
+        supplied = (self.headers.get("If-None-Match") or "").split(",")
+        if quoted in (s.strip() for s in supplied):
+            return self._send(304, b"", mime,
+                              {"ETag": quoted,
+                               "Cache-Control": "public, max-age=86400"})
+        self._send(200, body, mime,
+                   {"ETag": quoted, "Cache-Control": "public, max-age=86400"})
 
     def _log_sync(self, state, position, buffering):
         """A listening phone's own account of the last second, into the journal.
@@ -627,6 +989,13 @@ class Handler(BaseHTTPRequestHandler):
             "phone_audio": PHONE_AUDIO,
             # Empty for a film nobody has run playstick-prep.py over.
             "tracks": tracks,
+            # The subtitle tracks mpv actually loaded, and which of them is on
+            # the picture (0 for none). Asked of mpv rather than derived from
+            # the index, because a container can carry text tracks of its own.
+            # Only while a film is up: sub_tracks() answers off a cache that is
+            # empty until mpv has loaded the file.
+            "subs": self.player.sub_tracks() if state in ("playing", "paused") else [],
+            "sub": int(data.get("sid") or 0),
             "thumbs_pending": self.thumbs.pending(),
             # Which step of getting ready we are on, or null. Additive, so an
             # older ui.html that has never heard of it carries on ignoring it

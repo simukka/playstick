@@ -21,6 +21,10 @@ export interface PresenterDeps {
   grid: HTMLElement;
   /** The funnel, built by SheetManager: only the grid may show it. */
   filterBtn: HTMLElement;
+  /** The CC button, also built by SheetManager. Unlike the funnel it is not a
+   * property of which view is up -- see below -- so the switcher does not own
+   * it. Absent in the tests that do not care about it. */
+  subsBtn?: HTMLElement;
   /** Tapped when the banner offers to switch the NAS on. Absent in the tests
    * that do not care, and then the offer is simply never made. */
   wakeNas?: () => void;
@@ -34,6 +38,7 @@ export class StatusPresenter {
   private readonly grid: HTMLElement;
   private readonly reload: ReloadPolicy;
   private readonly wakeNas?: () => void;
+  private readonly subsBtn?: HTMLElement;
 
   /** The state the last poll reported, read by the controls to decide what the
    * play/pause button does. */
@@ -52,11 +57,13 @@ export class StatusPresenter {
     this.grid = deps.grid;
     this.reload = deps.reload;
     this.wakeNas = deps.wakeNas;
+    this.subsBtn = deps.subsBtn;
   }
 
   apply(s: Status): void {
     this.state = s.state;
     this.reload.consider(s.build, s.state);
+    this.paintSubsBtn(s);
 
     if (s.state === "preparing") {
       this.views.show("preparing");
@@ -95,6 +102,25 @@ export class StatusPresenter {
     } else {
       this.banner.show("");
     }
+  }
+
+  /**
+   * The CC button: shown while a film is up and only when there is something to
+   * offer, lit while subtitles are actually on.
+   *
+   * Here rather than in ViewSwitcher, which owns the funnel, because this is
+   * not a question about which view is drawn. A film with no text subtitles --
+   * an unprepped share, or one whose only subtitles are the image-based kind
+   * prep declines to OCR -- must not get a button that opens a sheet saying
+   * "nothing". The answer only arrives with the poll.
+   */
+  private paintSubsBtn(s: Status): void {
+    if (!this.subsBtn) {
+      return;
+    }
+    const up = s.state === "playing" || s.state === "paused";
+    toggleClass(this.subsBtn, "on", up && !!s.subs?.length);
+    toggleClass(this.subsBtn, "live", up && !!s.sub);
   }
 
   /**

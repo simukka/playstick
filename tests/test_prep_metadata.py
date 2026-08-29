@@ -23,7 +23,7 @@ import unittest
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SCRIPT = os.path.join(ROOT, "scripts", "playstick-prep.py")
+SCRIPT = os.path.join(ROOT, "src", "prep", "playstick_prep.py")
 DAEMON = os.path.join(ROOT, "src", "server", "playstick", "library.py")
 
 # The hyphen in the filename keeps it out of `import`, which is the right name
@@ -174,24 +174,21 @@ class SearchTitles(unittest.TestCase):
         self.assertEqual(prep.clean_title("Alien Director's Cut 1979.720p.BrRip.mp4"),
                          "Alien Director's Cut")
 
-    def test_clean_title_still_matches_the_daemons_copy(self):
-        """The comment above TAG_RE says these two are kept byte-for-byte in
-        step. This is that comment, enforced."""
+    def test_the_daemon_no_longer_carries_a_second_copy(self):
+        """There used to be two implementations of clean_title -- this one and
+        the daemon's, kept byte-for-byte in step by a test that diffed them.
+
+        The daemon does not derive titles any more. It has no walk to derive
+        them during: a film's title is a column, put there by whatever synced
+        the library, and this is the only code that turns a filename into one.
+        So the check that they agree is replaced by the check that there is
+        nothing left to disagree with -- a second copy reappearing in the
+        daemon would mean the walk had come back with it.
+        """
         with open(DAEMON, "r", encoding="utf-8") as handle:
             theirs = handle.read()
-        with open(SCRIPT, "r", encoding="utf-8") as handle:
-            ours = handle.read()
-
-        def body(text):
-            match = re.search(r"def clean_title\(filename\):(.*?)\n\n\n", text,
-                              re.DOTALL)
-            self.assertIsNotNone(match, "clean_title not found")
-            # The docstrings differ on purpose; the code must not.
-            lines = [l.strip() for l in match.group(1).splitlines()
-                     if l.strip() and not l.strip().startswith(('"', "#"))]
-            return lines
-
-        self.assertEqual(body(ours), body(theirs))
+        self.assertNotIn("def clean_title(", theirs)
+        self.assertNotIn("TAG_RE", theirs)
 
 
 # --- what a container tag is allowed to rename a film to --------------------

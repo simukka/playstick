@@ -586,6 +586,16 @@
     volume(delta) {
       return this.post("/api/volume", { delta });
     }
+    /** Seconds, signed. One request per gesture, not one per press -- see
+     * SeekPad. The daemon clamps to the film and answers with the position it
+     * actually reached, so the bar does not have to guess. */
+    seek(delta) {
+      return this.post("/api/seek", { delta });
+    }
+    /** Which subtitle track is on the picture, 0 for none. */
+    subtitle(track) {
+      return this.post("/api/subtitle", { track });
+    }
     /** Takes no body: there is one NAS and its address is a setting on the
      * daemon, not something this page may name. */
     wakeNas() {
@@ -734,10 +744,139 @@
     const pct = Math.max(0, Math.min(100, 100 * position / duration));
     return pct.toFixed(1) + "%";
   }
+  function clockTime(seconds) {
+    seconds = Math.max(0, Math.round(seconds));
+    const h2 = Math.floor(seconds / 3600);
+    const m = Math.floor(seconds % 3600 / 60);
+    const s = seconds % 60;
+    const mm = h2 ? String(m).padStart(2, "0") : String(m);
+    return (h2 ? h2 + ":" : "") + mm + ":" + String(s).padStart(2, "0");
+  }
+  function jumpLabel(seconds) {
+    return (seconds < 0 ? "−" : "+") + clockTime(Math.abs(seconds));
+  }
+
+  // src/seek.ts
+  var STEP = 10;
+  var TAU = 3e3 / Math.log(180);
+  var MAX_JUMP = 4 * 3600;
+  var TAIL = 5;
+  var TICK = 60;
+  var FLUSH = 350;
+  function nice(seconds) {
+    if (seconds < 60) {
+      return Math.round(seconds / 5) * 5;
+    }
+    if (seconds < 600) {
+      return Math.round(seconds / 30) * 30;
+    }
+    return Math.round(seconds / 60) * 60;
+  }
+  function jumpFor(heldMs) {
+    const raw = STEP * Math.exp(Math.max(0, heldMs) / TAU);
+    return nice(Math.min(raw, MAX_JUMP));
+  }
+  var SeekPad = class {
+    constructor(deps) {
+      this.deps = deps;
+      /** Seconds queued but not yet sent. Signed. Zero when there is nothing
+       * pending, which is what the view draws its preview from. */
+      this.pending = 0;
+      this.dir = 0;
+      this.base = 0;
+      this.since = 0;
+      this.ticker = null;
+      this.flusher = null;
+    }
+    /** True while a button is down. */
+    get holding() {
+      return this.dir !== 0;
+    }
+    press(dir) {
+      if (this.dir !== 0) {
+        return;
+      }
+      this.stopFlush();
+      this.dir = dir;
+      this.base = this.pending;
+      this.since = this.deps.now();
+      this.set(this.base + dir * STEP);
+      this.ticker = this.deps.schedule(() => this.tick(), TICK);
+    }
+    release() {
+      if (this.dir === 0) {
+        return;
+      }
+      this.stopTick();
+      this.set(this.base + this.dir * jumpFor(this.deps.now() - this.since));
+      this.dir = 0;
+      this.armFlush();
+    }
+    /** The gesture was taken away -- a call arrived, the browser cancelled the
+     * pointer. Whatever the hold had grown to is discarded rather than committed:
+     * an accidental half-hour jump is much worse than a lost one. */
+    abort() {
+      if (this.dir === 0) {
+        return;
+      }
+      this.stopTick();
+      this.dir = 0;
+      this.set(this.base);
+      if (this.pending !== 0) {
+        this.armFlush();
+      }
+    }
+    /** Drop everything without sending -- the film ended, or the view went away
+     * under a finger. */
+    clear() {
+      this.stopTick();
+      this.stopFlush();
+      this.dir = 0;
+      this.set(0);
+    }
+    tick() {
+      if (this.dir === 0) {
+        return;
+      }
+      this.set(this.base + this.dir * jumpFor(this.deps.now() - this.since));
+      this.ticker = this.deps.schedule(() => this.tick(), TICK);
+    }
+    set(pending) {
+      if (pending === this.pending) {
+        return;
+      }
+      this.pending = pending;
+      this.deps.onChange(pending);
+    }
+    armFlush() {
+      this.stopFlush();
+      this.flusher = this.deps.schedule(() => {
+        this.flusher = null;
+        const delta = this.pending;
+        this.set(0);
+        if (delta) {
+          this.deps.send(delta);
+        }
+      }, FLUSH);
+    }
+    stopTick() {
+      if (this.ticker !== null) {
+        this.deps.cancel(this.ticker);
+        this.ticker = null;
+      }
+    }
+    stopFlush() {
+      if (this.flusher !== null) {
+        this.deps.cancel(this.flusher);
+        this.flusher = null;
+      }
+    }
+  };
 
   // src/views.ts
   var PLAY_GLYPH = "▶";
   var PAUSE_GLYPH = "❙❙";
+  var skipIcon = (back) => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (back ? '<path d="M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6"/>' : '<path d="M12 5V1l5 5-5 5V7a6 6 0 1 0 6 6"/>') + '<text x="12" y="16.6" text-anchor="middle" font-size="8" font-weight="700" stroke="none" fill="currentColor" font-family="system-ui, sans-serif">10</text></svg>';
   var BANNER_CSS = `
 #banner {
   display: none; margin: 12px 0 4px; padding: 14px 16px; border-radius: 14px;
@@ -805,17 +944,55 @@
   font-size: 26px; font-weight: 700; margin: 26px 8px 4px; line-height: 1.2;
 }
 #nowSub { color: var(--dim); font-size: 17px; margin-bottom: 26px; }
-#bar { height: 6px; border-radius: 3px; background: #26262e; margin: 0 4px 30px; overflow: hidden; }
-#barFill { height: 100%; width: 0; background: var(--accent); transition: width .8s linear; }
+#bar {
+  position: relative; height: 6px; border-radius: 3px; background: #26262e;
+  margin: 0 4px 10px;
+}
+#barFill {
+  height: 100%; width: 0; background: var(--accent); border-radius: 3px;
+  transition: width .8s linear;
+}
+/* Where a skip would land. Deliberately without #barFill's transition: this one
+   is following a thumb, and easing it would make the number and the marker
+   disagree about where the film is going. */
+#barGhost {
+  position: absolute; top: -5px; width: 3px; height: 16px; border-radius: 2px;
+  background: var(--ink); display: none; margin-left: -1px;
+}
+#barGhost.on { display: block; }
 
+/* Only ever on screen while a skip is pending, so the layout below it must not
+   move when it appears -- hence a reserved line rather than a hidden element. */
+#seekHint {
+  min-height: 24px; margin: 0 4px 6px; font-size: 17px; font-weight: 650;
+  color: var(--accent); font-variant-numeric: tabular-nums;
+}
+
+#transport {
+  display: flex; align-items: center; justify-content: center; gap: min(4vw, 22px);
+}
 #toggle {
-  width: min(46vw, 220px); aspect-ratio: 1; border-radius: 50%;
+  width: min(42vw, 200px); aspect-ratio: 1; border-radius: 50%;
   background: var(--accent); color: #06121f;
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: min(20vw, 96px); line-height: 1;
+  font-size: min(18vw, 88px); line-height: 1;
   transition: transform .08s ease;
+  flex: 0 0 auto;
 }
 #toggle:active { transform: scale(.94); }
+
+/* Big, because they are pressed and HELD by a child in the dark, and a hold
+   that slips off the edge is a jump that does not happen. .held rather than
+   :active: the button captures the pointer, so a thumb that slides off it is
+   still holding it, and :active does not always agree. */
+#skipBack, #skipFwd {
+  width: min(24vw, 108px); aspect-ratio: 1; border-radius: 50%;
+  background: var(--card); color: var(--ink);
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 auto; transition: transform .08s ease, background .12s ease;
+}
+#skipBack svg, #skipFwd svg { width: 58%; height: 58%; display: block; }
+#skipBack.held, #skipFwd.held { background: #2f2f3a; transform: scale(.94); }
 
 #stop {
   display: block; width: 100%; margin: 34px auto 0; max-width: 420px;
@@ -950,13 +1127,33 @@
   };
   var PlayingView = class {
     constructor(doc) {
+      // The last poll's numbers, kept so a preview drawn between polls has
+      // something to be relative to. The alternative -- handing the position to
+      // showSeek() from the caller -- would put the presenter in the business of
+      // knowing what a skip is.
+      this.position = 0;
+      this.duration = 0;
       this.title = h(doc, "div", { id: "nowTitle" });
       this.sub = h(doc, "div", { id: "nowSub" });
       this.bar = h(doc, "div", { id: "barFill" });
+      this.ghost = h(doc, "div", { id: "barGhost" });
+      this.hint = h(doc, "div", { id: "seekHint" });
       this.toggle = h(doc, "button", {
         id: "toggle",
         aria: "Play or pause",
         html: PAUSE_GLYPH
+      });
+      this.skipBack = h(doc, "button", {
+        id: "skipBack",
+        type: "button",
+        aria: "Back ten seconds, or hold to go further",
+        html: skipIcon(true)
+      });
+      this.skipFwd = h(doc, "button", {
+        id: "skipFwd",
+        type: "button",
+        aria: "Forward ten seconds, or hold to go further",
+        html: skipIcon(false)
       });
       this.stop = h(doc, "button", { id: "stop", text: "STOP" });
       this.volDown = h(doc, "button", { id: "volDown", aria: "Quieter", text: "−" });
@@ -965,8 +1162,9 @@
       this.root = h(doc, "div", { id: "playing", class: "view" }, [
         this.title,
         this.sub,
-        h(doc, "div", { id: "bar" }, [this.bar]),
-        this.toggle,
+        h(doc, "div", { id: "bar" }, [this.bar, this.ghost]),
+        this.hint,
+        h(doc, "div", { id: "transport" }, [this.skipBack, this.toggle, this.skipFwd]),
         this.stop,
         this.volume
       ]);
@@ -981,12 +1179,38 @@
       toggleClass(this.volume, "on", !!s.audio);
       const duration = (_a = s.duration) != null ? _a : 0;
       const position = (_b = s.position) != null ? _b : 0;
+      this.duration = duration;
+      this.position = position;
       if (duration > 0) {
         this.bar.style.width = barWidth(position, duration);
         setText(this.sub, paused ? "Paused" : timeLeft(duration - position));
       } else {
         setText(this.sub, paused ? "Paused" : "Playing");
       }
+    }
+    /**
+     * Draw a skip that has not been sent yet: a marker on the bar where it would
+     * land, and the jump and the destination in words. Zero clears it.
+     *
+     * The number shown is the CLAMPED one. A hold that has run past the end of
+     * the film keeps climbing as a raw total, and a label that promised "+2:14:00"
+     * for a jump the daemon is going to cut to eight minutes would be the page
+     * lying about the one thing this control exists to make legible.
+     */
+    showSeek(pending) {
+      if (!pending || !(this.duration > 0)) {
+        toggleClass(this.ghost, "on", false);
+        setText(this.hint, "");
+        return;
+      }
+      const limit = Math.max(0, this.duration - TAIL);
+      const target = Math.max(0, Math.min(limit, this.position + pending));
+      this.ghost.style.left = barWidth(target, this.duration);
+      toggleClass(this.ghost, "on", true);
+      setText(
+        this.hint,
+        jumpLabel(target - this.position) + " → " + clockTime(target)
+      );
     }
   };
 
@@ -1008,11 +1232,13 @@
       this.grid = deps.grid;
       this.reload = deps.reload;
       this.wakeNas = deps.wakeNas;
+      this.subsBtn = deps.subsBtn;
     }
     apply(s) {
       var _a;
       this.state = s.state;
       this.reload.consider(s.build, s.state);
+      this.paintSubsBtn(s);
       if (s.state === "preparing") {
         this.views.show("preparing");
         this.preparing.apply(s);
@@ -1039,6 +1265,25 @@
       } else {
         this.banner.show("");
       }
+    }
+    /**
+     * The CC button: shown while a film is up and only when there is something to
+     * offer, lit while subtitles are actually on.
+     *
+     * Here rather than in ViewSwitcher, which owns the funnel, because this is
+     * not a question about which view is drawn. A film with no text subtitles --
+     * an unprepped share, or one whose only subtitles are the image-based kind
+     * prep declines to OCR -- must not get a button that opens a sheet saying
+     * "nothing". The answer only arrives with the poll.
+     */
+    paintSubsBtn(s) {
+      var _a;
+      if (!this.subsBtn) {
+        return;
+      }
+      const up = s.state === "playing" || s.state === "paused";
+      toggleClass(this.subsBtn, "on", up && !!((_a = s.subs) == null ? void 0 : _a.length));
+      toggleClass(this.subsBtn, "live", up && !!s.sub);
     }
     /**
      * The films cannot be reached. Three different sentences, because they ask
@@ -1208,7 +1453,7 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
       this.api = api;
       this.deps = deps;
       this.busyUntil = 0;
-      var _a;
+      var _a, _b, _c;
       this.now = (_a = deps.now) != null ? _a : Date.now;
       buttons.toggle.addEventListener("click", () => {
         if (!this.guard()) {
@@ -1221,6 +1466,7 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
         if (!this.guard()) {
           return;
         }
+        this.pad.clear();
         this.deps.toLibrary();
         void this.api.stop().then((r) => this.applyIfOk(r));
       };
@@ -1231,6 +1477,54 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
       });
       buttons.volUp.addEventListener("click", () => {
         void this.api.volume(10);
+      });
+      this.pad = new SeekPad({
+        now: this.now,
+        schedule: (_b = deps.schedule) != null ? _b : ((fn, ms) => window.setTimeout(fn, ms)),
+        cancel: (_c = deps.cancelTimer) != null ? _c : ((id) => window.clearTimeout(id)),
+        onChange: (pending) => {
+          var _a2, _b2;
+          return (_b2 = (_a2 = this.deps).onSeekPreview) == null ? void 0 : _b2.call(_a2, pending);
+        },
+        send: (delta) => {
+          void this.api.seek(delta).then((r) => this.applyIfOk(r));
+        }
+      });
+      this.hold(buttons.skipBack, -1);
+      this.hold(buttons.skipFwd, 1);
+    }
+    /**
+     * Bind one skip button.
+     *
+     * Pointer events rather than click, because the whole feature is the
+     * difference between a press and a hold, and a click only reports that both
+     * happened. preventDefault on the down stops the browser turning a long press
+     * into a selection or a callout -- the page already asks for that globally,
+     * but a button being held for three seconds is exactly the case where a
+     * browser reconsiders.
+     *
+     * setPointerCapture is what makes a hold survive a thumb sliding off the
+     * button, which on a round control the size of a coin is most holds. It is
+     * optional-chained because the DOM stub the tests build against has no
+     * business implementing it.
+     */
+    hold(el, dir) {
+      el.addEventListener("pointerdown", (ev) => {
+        var _a, _b;
+        const p = ev;
+        (_a = p.preventDefault) == null ? void 0 : _a.call(p);
+        (_b = el.setPointerCapture) == null ? void 0 : _b.call(el, p.pointerId);
+        toggleClass(el, "held", true);
+        this.pad.press(dir);
+      });
+      const up = () => {
+        toggleClass(el, "held", false);
+        this.pad.release();
+      };
+      el.addEventListener("pointerup", up);
+      el.addEventListener("pointercancel", () => {
+        toggleClass(el, "held", false);
+        this.pad.abort();
       });
     }
     guard() {
@@ -1762,19 +2056,24 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
 
   // src/sheet.ts
   var SHEET_CSS = `
-#filterBtn, #audioBtn {
+#filterBtn, #audioBtn, #subsBtn {
   position: fixed; z-index: 20;
   top: calc(10px + env(safe-area-inset-top));
   width: 52px; height: 52px; border-radius: 50%;
   background: var(--card); color: var(--ink);
   display: none; align-items: center; justify-content: center;
 }
-#filterBtn { right: 72px; }
+/* The funnel and the CC button share a slot, and never collide: the funnel
+   belongs to the grid, the CC button to a film that is playing. */
+#filterBtn, #subsBtn { right: 72px; }
 #audioBtn { right: 12px; }
-#filterBtn.on, #audioBtn.on { display: inline-flex; }
-#filterBtn.live, #audioBtn.live { background: var(--accent); color: #06121f; }
+#filterBtn.on, #audioBtn.on, #subsBtn.on { display: inline-flex; }
+#filterBtn.live, #audioBtn.live, #subsBtn.live {
+  background: var(--accent); color: #06121f;
+}
 #filterBtn svg { width: 24px; height: 24px; display: block; }
 #audioBtn svg { width: 26px; height: 26px; display: block; }
+#subsBtn svg { width: 26px; height: 26px; display: block; }
 
 #sheetScrim {
   position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.6);
@@ -1813,6 +2112,7 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
 .row .sub { display: block; font-size: 14px; color: var(--dim); margin-top: 2px; }
 .row .grow { flex: 1; min-width: 0; }
 `;
+  var CC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="3"/><path d="M10 10.2a2.6 2.6 0 1 0 0 3.6M17.5 10.2a2.6 2.6 0 1 0 0 3.6"/></svg>';
   var FUNNEL_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>';
   function row(doc, label, sub, selected, onTap) {
     const text = h(doc, "span", { class: "grow", text: label });
@@ -1871,56 +2171,73 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
   }
   var SheetManager = class {
     constructor(doc, deps) {
-      this.deps = deps;
-      this.sheet = deps.sound;
-      this.fsheet = deps.filter;
+      this.roots = { sound: deps.sound, subs: deps.subs, filter: deps.filter };
+      this.opened = {
+        sound: deps.onSoundOpen,
+        subs: deps.onSubsOpen,
+        filter: deps.onFilterOpen
+      };
       this.audioBtn = h(doc, "button", {
         id: "audioBtn",
         aria: "Sound",
-        onTap: () => this.showSound(!this.soundOpen)
+        onTap: () => this.show("sound", !this.isOpen("sound"))
+      });
+      this.subsBtn = h(doc, "button", {
+        id: "subsBtn",
+        aria: "Subtitles",
+        html: CC_ICON,
+        onTap: () => this.show("subs", !this.isOpen("subs"))
       });
       this.filterBtn = h(doc, "button", {
         id: "filterBtn",
         aria: "Filter and sort",
         html: FUNNEL_ICON,
-        onTap: () => this.showFilter(!this.filterOpen)
+        onTap: () => this.show("filter", !this.isOpen("filter"))
       });
       this.scrim = h(doc, "div", {
         id: "sheetScrim",
-        onTap: () => {
-          this.showSound(false);
-          this.showFilter(false);
-        }
+        onTap: () => this.closeAll()
       });
     }
+    isOpen(name) {
+      return this.roots[name].classList.contains("on");
+    }
     get soundOpen() {
-      return this.sheet.classList.contains("on");
+      return this.isOpen("sound");
+    }
+    get subsOpen() {
+      return this.isOpen("subs");
     }
     get filterOpen() {
-      return this.fsheet.classList.contains("on");
+      return this.isOpen("filter");
+    }
+    show(name, on) {
+      for (const key of Object.keys(this.roots)) {
+        toggleClass(this.roots[key], "on", on && key === name);
+      }
+      toggleClass(
+        this.scrim,
+        "on",
+        Object.keys(this.roots).some((k) => this.isOpen(k))
+      );
+      if (on) {
+        this.opened[name]();
+      }
     }
     showSound(on) {
-      toggleClass(this.sheet, "on", on);
-      if (on) {
-        toggleClass(this.fsheet, "on", false);
-      }
-      this.paintScrim();
-      if (on) {
-        this.deps.onSoundOpen();
-      }
+      this.show("sound", on);
+    }
+    showSubs(on) {
+      this.show("subs", on);
     }
     showFilter(on) {
-      toggleClass(this.fsheet, "on", on);
-      if (on) {
-        toggleClass(this.sheet, "on", false);
-      }
-      this.paintScrim();
-      if (on) {
-        this.deps.onFilterOpen();
-      }
+      this.show("filter", on);
     }
-    paintScrim() {
-      toggleClass(this.scrim, "on", this.soundOpen || this.filterOpen);
+    closeAll() {
+      for (const key of Object.keys(this.roots)) {
+        toggleClass(this.roots[key], "on", false);
+      }
+      toggleClass(this.scrim, "on", false);
     }
   };
 
@@ -2174,6 +2491,72 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
     }
     tuneButton(label, aria, onTap) {
       return h(this.doc, "button", { type: "button", text: label, aria, onTap });
+    }
+  };
+
+  // src/subs-sheet.ts
+  var SUBS_CSS = `
+#subsNote {
+  color: var(--dim); font-size: 16px; line-height: 1.45; padding: 6px 14px 2px;
+}
+`;
+  var SubsSheet = class {
+    constructor(doc, deps) {
+      this.deps = deps;
+      this.tracks = [];
+      this.current = 0;
+      this.playing = false;
+      this.doc = doc;
+      this.list = h(doc, "div", { id: "subsList" });
+      this.note = h(doc, "div", { id: "subsNote" });
+      this.root = h(
+        doc,
+        "div",
+        {
+          id: "subsSheet",
+          class: "sheet",
+          role: "dialog",
+          modal: true,
+          aria: "Subtitles"
+        },
+        [grip(doc), head(doc, "Subtitles"), this.list, this.note]
+      );
+    }
+    /** Fold a status poll in. Cheap and side-effect-free unless the sheet is
+     * open: the manager repaints it when it opens, and main.ts when a poll lands
+     * while it already is. */
+    onStatus(s) {
+      this.tracks = s.subs || [];
+      this.current = s.sub || 0;
+      this.playing = s.state === "playing" || s.state === "paused";
+    }
+    paint() {
+      this.list.textContent = "";
+      setText(this.note, "");
+      if (!this.playing) {
+        setText(this.note, "Start a film and its subtitles will appear here.");
+        return;
+      }
+      this.list.appendChild(
+        row(this.doc, "Off", "", this.current === 0, () => this.deps.choose(0))
+      );
+      for (const track of this.tracks) {
+        this.list.appendChild(
+          row(
+            this.doc,
+            langName(track.lang, track.title),
+            "",
+            track.n === this.current,
+            () => this.deps.choose(track.n)
+          )
+        );
+      }
+      if (!this.tracks.length) {
+        setText(
+          this.note,
+          "This film has no subtitles the player can show. Run playstick-prep.py over the library to extract them."
+        );
+      }
     }
   };
 
@@ -2446,6 +2829,7 @@ button:disabled { opacity: .45; }
     PLAYING_CSS,
     SHEET_CSS,
     SOUND_CSS,
+    SUBS_CSS,
     FILTER_CSS
   ].join("\n");
   function installStyles(doc) {
@@ -2519,11 +2903,30 @@ button:disabled { opacity: .45; }
       libraryLangs: () => model.facets.langs,
       storage: localStorage
     });
+    const subsSheet = new SubsSheet(doc, {
+      // The status the POST returns, applied at once: somebody in the dark has
+      // just tapped a language and the tick has to move now, not on the next
+      // poll. A refusal (the film ended between the tap and the packet) becomes
+      // the banner, which is the only account of why nothing happened.
+      choose: (track) => {
+        void api.subtitle(track).then((r) => {
+          if (r.ok) {
+            onStatus(r.data);
+            subsSheet.paint();
+          } else if (r.data.error) {
+            presenter.banner.show(r.data.error, 6e3);
+            sheets.closeAll();
+          }
+        });
+      }
+    });
     const filterSheet = new FilterSheet(doc, model, () => libraryView.render());
     const sheets = new SheetManager(doc, {
       sound: soundSheet.root,
+      subs: subsSheet.root,
       filter: filterSheet.root,
       onSoundOpen: () => soundSheet.paint(),
+      onSubsOpen: () => subsSheet.paint(),
       onFilterOpen: () => filterSheet.paint()
     });
     const libraryView = new LibraryView(doc, model, stamp, (id) => play(id), sheets.filterBtn);
@@ -2549,30 +2952,36 @@ button:disabled { opacity: .45; }
       library: libraryView.root,
       grid: libraryView.gridEl,
       filterBtn: sheets.filterBtn,
+      subsBtn: sheets.subsBtn,
       wakeNas
     });
-    new Controls(
+    const controls = new Controls(
       {
         toggle: presenter.playing.toggle,
         stop: presenter.playing.stop,
         cancel: presenter.preparing.cancel,
         volDown: presenter.playing.volDown,
-        volUp: presenter.playing.volUp
+        volUp: presenter.playing.volUp,
+        skipBack: presenter.playing.skipBack,
+        skipFwd: presenter.playing.skipFwd
       },
       api,
       {
         stateOf: () => presenter.state,
         apply: (s) => onStatus(s),
-        toLibrary: () => presenter.views.show("library")
+        toLibrary: () => presenter.views.show("library"),
+        onSeekPreview: (pending) => presenter.playing.showSeek(pending)
       }
     );
     for (const el of [
       presenter.banner.root,
       sheets.audioBtn,
       sheets.filterBtn,
+      sheets.subsBtn,
       soundSheet.tapToListen,
       sheets.scrim,
       soundSheet.root,
+      subsSheet.root,
       filterSheet.root,
       libraryView.root,
       presenter.preparing.root,
@@ -2607,9 +3016,16 @@ button:disabled { opacity: .45; }
       }
       presenter.apply(s);
       audio.onStatus(s);
+      subsSheet.onStatus(s);
+      if (sheets.subsOpen) {
+        subsSheet.paint();
+      }
       const onGrid = s.state !== "playing" && s.state !== "paused" && s.state !== "preparing";
-      if (onGrid && Date.now() - libraryFetchedAt > 1e4) {
-        loadLibrary();
+      if (onGrid) {
+        controls.pad.clear();
+        if (Date.now() - libraryFetchedAt > 1e4) {
+          loadLibrary();
+        }
       }
     }
     function loadLibrary() {

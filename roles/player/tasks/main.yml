@@ -118,13 +118,11 @@
               Install linux-modules-extra for this kernel.
           when: player_ftdi.rc != 0
 
-    - name: Create the poster cache
-      ansible.builtin.file:
-        path: "{{ player_thumb_dir }}"
-        state: directory
-        owner: "{{ player_user }}"
-        group: "{{ player_user }}"
-        mode: "0755"
+    # The database directory is deliberately NOT created here. StateDirectory=
+    # in the unit does it, which means systemd owns its existence, its mode and
+    # its writability under ProtectSystem=full in one declaration instead of
+    # three files agreeing about it. The poster cache this replaces was a
+    # directory task plus a ReadWritePaths= line that had to match it.
 
     - name: Create the UI directory
       ansible.builtin.file:

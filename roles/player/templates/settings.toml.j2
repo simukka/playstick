@@ -18,20 +18,20 @@ port = {{ player_port | int | to_json }}
 ui_file = {{ player_ui_file | to_json }}
 allow_networks = {{ player_allow_networks | to_json }}
 
+{# The share, and how often to check it is still there. There is no index and
+   no overlay here any more: the film table lives in the database below, put
+   there by the admin app. What is left is a path to read films from and a
+   probe interval. #}
 [library]
 path = {{ player_library_path | to_json }}
-# Set-but-empty means "ignore any index / no overlay", which is a different
-# thing from the key being absent (that means "the usual place, beside the
-# films"). Ansible always renders both keys, so the daemon here only ever sees
-# the explicit form -- see config.py, where the distinction is load-bearing.
-index_file = {{ player_index_file | to_json }}
-overlay_file = {{ player_overlay_file | to_json }}
-extensions = {{ player_extensions | to_json }}
-min_size_mb = {{ player_min_size_mb | int | to_json }}
-scan_depth = {{ player_scan_depth | int | to_json }}
 scan_interval = {{ player_scan_interval | int | to_json }}
-skip_pattern = {{ player_skip_pattern | to_json }}
 subtitles = {{ player_subtitles | bool | to_json }}
+
+{# The one file this appliance owns and writes. On /var/lib rather than the
+   share, because the share is mounted read-only -- see player_db_path in
+   group_vars/all.yml, and db.py for what it holds. #}
+[database]
+path = {{ player_db_path | to_json }}
 
 {# The daemon learns the NAS exists only so it can say "it is off" and offer to
    switch it on. It does not mount anything -- that is the automount's job and
@@ -51,8 +51,10 @@ wake_port = {{ nas_wake_port | int | to_json }}
 wake_cooldown = {{ nas_wake_cooldown | int | to_json }}
 wake_window = {{ nas_wake_window | int | to_json }}
 
+{# Only the extraction is configured here; the posters themselves are rows in
+   the database. This is the fallback for a film the admin app had no poster
+   for -- see thumbs.py. #}
 [thumbs]
-dir = {{ player_thumb_dir | to_json }}
 at = {{ player_thumb_at | to_json }}
 timeout = {{ player_thumb_timeout | int | to_json }}
 {# Poster extraction, through the same binary as playback so that ffmpeg never

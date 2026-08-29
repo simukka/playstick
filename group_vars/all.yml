@@ -660,52 +660,60 @@ player_restore_file: /run/playstick/restore-airplay
 
 # --- player: library -----------------------------------------------------
 player_library_path: "{{ nas_mount_point }}"
-player_extensions: [".mkv", ".mp4", ".m4v", ".avi", ".mov", ".m2ts", ".ts"]
 
-# The index scripts/playstick-prep.py writes on the developer machine. When
-# this file exists the daemon takes the library from it -- deduplicated,
-# verified, with posters, ratings, genres and subtitles already prepared --
-# instead of walking the share and stat-ing every file over CIFS.
+# WHERE THE LIBRARY ACTUALLY LIVES, which changed.
 #
-# It is a preference, not a requirement: a missing, unparseable or
-# newer-than-understood index logs one line and falls back to the walk, so a
-# library nobody has prepped still works exactly as it did before. Every
-# setting below applies to that fallback and is ignored while an index is in
-# use, because the answers are already in it.
+# It used to be a JSON index playstick-prep.py wrote onto the share, re-read
+# every scan interval, with a walk of that share as the fallback. Both are
+# gone. The film table, the metadata edits, the posters and the resume
+# positions are rows in one SQLite database on the device, and the desktop
+# admin app puts them there over /api/admin/films.
 #
-# Set to "" to ignore an index that is present.
-player_index_file: "{{ player_library_path }}/playstick-library.json"
+# The reason is the mount options two hundred lines up: the share is `ro`. The
+# old edit file lived on it, so every title corrected from the admin view got
+# EROFS and one line in the journal, and was gone at the next restart. A device
+# that is asked to remember things needs somewhere it can write, and /srv is
+# not it.
+#
+# What is still on the share is what SQLite has no business holding: the film,
+# its re-encode, its subtitles and its per-language audio, each named by a
+# library-relative path in a row. Nothing else.
+#
+# /var/lib rather than /var/cache, and the distinction is load-bearing: a cache
+# is something a cleaner may delete, and deleting this loses every correction
+# anybody has made. systemd creates the directory through StateDirectory= in
+# the unit, which is also what makes it writable under ProtectSystem=full.
+player_db_path: /var/lib/playstick/playstick.db
 
-# Runtime edits made from the admin view -- a title corrected, a genre fixed, a
-# film hidden from the children's grid -- kept in a small JSON sidecar keyed by
-# the same opaque id the index uses. Deliberately a SEPARATE file from the
-# index above, and that separation is the whole feature: the index is
-# regenerated wholesale by playstick-prep.py, so an edit stored inside it would
-# be erased on the next prep run. Stored beside it, an edit is an overlay
-# merged on top of whatever the index says and survives any number of
-# regenerations. Set to "" for no overlay.
-player_overlay_file: "{{ player_library_path }}/playstick-overlay.json"
+# Whether to LOAD the subtitles the prep tool extracted, so the page can offer
+# them. They live under .playstick/subs/ rather than beside each film, because
+# the share is mounted read-only, so --sub-auto cannot find them and the daemon
+# passes --sub-file explicitly.
+#
+# On does not mean subtitles appear. Every film starts with --sid=no and stays
+# that way until somebody picks a language from the CC button on their phone,
+# which is why this now defaults on: the deploy-time flag used to be the only
+# switch there was, and a choice that belongs to whoever is watching does not
+# belong in a playbook. Off means no film can offer them at all.
+player_subtitles: true
 
-# Whether to hand mpv the subtitles the prep tool extracted. They live under
-# .playstick/subs/ rather than beside each film, because the share is mounted
-# read-only, so --sub-auto cannot find them and the daemon passes --sub-file
-# explicitly. Off means the film plays with no subtitles at all.
-player_subtitles: false
-
-# Two filters, in the order they cost. The size test is free -- the scan has
-# already stat'ed the file -- and removes samples, trailers and stray extras
-# without needing the regex to be right. The regex is the backstop.
-player_min_size_mb: 100
-player_skip_pattern: "sample|trailer|extras?\\b|behind[ ._-]the[ ._-]scenes"
-
-# How deep to recurse. 2 is "the share, and one folder per film". Recursion is
-# the expensive part over CIFS, and a media library that needs more than two
-# levels is a library that wants a metadata database, not this.
-player_scan_depth: 2
+# How often the daemon asks whether the share is still there. One stat of the
+# mount point, which is all `available` on the page has ever meant -- it is
+# what turns the grid into "the films are unreachable" and offers the button
+# that switches the NAS back on.
+#
+# It used to be a recursive walk stat-ing every file over CIFS, which is why it
+# had to be as slow as five minutes. It could be far more frequent now; it is
+# not, because touching an automount is what keeps it mounted, and a NAS that
+# never gets to idle out is a NAS that never spins down.
 player_scan_interval: 300
 
 # --- player: posters -----------------------------------------------------
-player_thumb_dir: /var/cache/playstick/thumbs
+# Posters are rows in the database now, not files -- there is no cache
+# directory to configure. A poster the admin app uploaded and a frame this box
+# extracted land in the same table and are served the same way, with an ETag;
+# the settings below are only about the extraction, which is the fallback for a
+# film the admin app had no poster for.
 player_thumb_width: 320
 # A fifth of the way in, so tiles show the film rather than a distributor's
 # logo or a black fade-in.

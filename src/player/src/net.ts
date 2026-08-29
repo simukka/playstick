@@ -62,6 +62,16 @@ export class ApiClient {
   volume(delta: number): Promise<PostResult> {
     return this.post("/api/volume", { delta });
   }
+  /** Seconds, signed. One request per gesture, not one per press -- see
+   * SeekPad. The daemon clamps to the film and answers with the position it
+   * actually reached, so the bar does not have to guess. */
+  seek(delta: number): Promise<PostResult> {
+    return this.post("/api/seek", { delta });
+  }
+  /** Which subtitle track is on the picture, 0 for none. */
+  subtitle(track: number): Promise<PostResult> {
+    return this.post("/api/subtitle", { track });
+  }
   /** Takes no body: there is one NAS and its address is a setting on the
    * daemon, not something this page may name. */
   wakeNas(): Promise<PostResult> {

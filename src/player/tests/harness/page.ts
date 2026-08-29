@@ -22,26 +22,35 @@ export interface Shell {
   sheets: SheetManager;
   library: LibraryView;
   /** Ready to spread into a StatusPresenter's deps. */
-  parts: { library: HTMLElement; grid: HTMLElement; filterBtn: HTMLElement };
+  parts: {
+    library: HTMLElement;
+    grid: HTMLElement;
+    filterBtn: HTMLElement;
+    subsBtn: HTMLElement;
+  };
   soundPaints: () => number;
+  subsPaints: () => number;
   filterPaints: () => number;
 }
 
 /**
  * The grid view and the sheet chrome, wired to each other as main.ts wires them.
- * The two sheets are stand-ins: the manager only ever toggles a class on them,
- * and each real sheet is exercised by its own test.
+ * The three sheets are stand-ins: the manager only ever toggles a class on
+ * them, and each real sheet is exercised by its own test.
  */
 export function makeShell(doc: FakeDocument = makePage(), plays: string[] = []): Shell {
   const d = asDocument(doc);
   const model = new LibraryModel();
   let soundPaints = 0;
+  let subsPaints = 0;
   let filterPaints = 0;
 
   const sheets = new SheetManager(d, {
     sound: h(d, "div", { id: "sheet", class: "sheet" }),
+    subs: h(d, "div", { id: "subsSheet", class: "sheet" }),
     filter: h(d, "div", { id: "fsheet", class: "sheet" }),
     onSoundOpen: () => soundPaints++,
+    onSubsOpen: () => subsPaints++,
     onFilterOpen: () => filterPaints++,
   });
   const library = new LibraryView(
@@ -62,8 +71,10 @@ export function makeShell(doc: FakeDocument = makePage(), plays: string[] = []):
       library: library.root,
       grid: library.gridEl,
       filterBtn: sheets.filterBtn,
+      subsBtn: sheets.subsBtn,
     },
     soundPaints: () => soundPaints,
+    subsPaints: () => subsPaints,
     filterPaints: () => filterPaints,
   };
 }

@@ -42,6 +42,14 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
 COPY src/server/playstick/ /usr/local/lib/playstick/
 COPY src/server/playstick-web.py /usr/local/bin/playstick-web.py
 COPY src/player/dist/playstick-ui.html /usr/local/share/playstick/ui.html
+# The preparer, which runs on a DEVELOPER machine and never on the stick --
+# but this container is the closest thing to one that also has the library
+# mounted and ffmpeg installed. gui-seed.py imports it for its discovery rules,
+# and `docker compose exec gui playstick-prep` is how the test films get their
+# headphone audio.
+COPY src/prep/ /usr/local/lib/playstick-prep/
+COPY scripts/playstick-prep.py /usr/local/bin/playstick-prep
+COPY scripts/gui-seed.py /usr/local/bin/playstick-gui-seed
 COPY scripts/gui-entrypoint.sh /usr/local/bin/playstick-gui-entrypoint
 COPY scripts/gui-fake-airplay.py /usr/local/bin/fake-airplay
 RUN chmod 0755 /usr/local/bin/playstick-gui-entrypoint \
@@ -54,6 +62,9 @@ RUN chmod 0755 /usr/local/bin/playstick-gui-entrypoint \
 # (PLAYSTICK_GUI_PROJECTOR, PLAYSTICK_GUI_NAS, ...) are environment variables
 # on `make gui`, and a file baked into an image cannot read them.
 ENV PLAYSTICK_SETTINGS=/etc/playstick/settings.toml
+# So gui-seed.py and playstick-prep can find the preparer, and the daemon
+# package alongside it.
+ENV PYTHONPATH=/usr/local/lib:/usr/local/lib/playstick-prep
 
 # Runs as root, as on the appliance (player_user: root) though for far less
 # reason: nothing here needs DRM master or systemctl. It keeps /run/playstick

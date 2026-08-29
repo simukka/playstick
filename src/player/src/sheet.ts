@@ -1,11 +1,11 @@
-// The bottom sheets: one scrim, two sheets (sound and filter), never more than
-// one open. Each opener closes the other rather than stacking, because a sheet
-// is most of the screen and a second over it would leave the first reachable
-// only by dismissing something that looks identical.
+// The bottom sheets: one scrim, three sheets (sound, subtitles and filter),
+// never more than one open. Each opener closes the others rather than stacking,
+// because a sheet is most of the screen and a second over it would leave the
+// first reachable only by dismissing something that looks identical.
 //
-// This module owns the chrome both sheets share -- the scrim, the two round
-// openers, and the look of a sheet and its rows -- while each sheet builds its
-// own contents.
+// This module owns the chrome the sheets share -- the scrim, the round openers,
+// and the look of a sheet and its rows -- while each sheet builds its own
+// contents.
 import { h, toggleClass } from "./dom";
 
 /* The openers sit outside every view, because .view { display: none } would
@@ -14,19 +14,24 @@ import { h, toggleClass } from "./dom";
    starts: that is not only for convenience, since tapping it there is the user
    gesture iOS wants before it will let a page play audio later. */
 export const SHEET_CSS = `
-#filterBtn, #audioBtn {
+#filterBtn, #audioBtn, #subsBtn {
   position: fixed; z-index: 20;
   top: calc(10px + env(safe-area-inset-top));
   width: 52px; height: 52px; border-radius: 50%;
   background: var(--card); color: var(--ink);
   display: none; align-items: center; justify-content: center;
 }
-#filterBtn { right: 72px; }
+/* The funnel and the CC button share a slot, and never collide: the funnel
+   belongs to the grid, the CC button to a film that is playing. */
+#filterBtn, #subsBtn { right: 72px; }
 #audioBtn { right: 12px; }
-#filterBtn.on, #audioBtn.on { display: inline-flex; }
-#filterBtn.live, #audioBtn.live { background: var(--accent); color: #06121f; }
+#filterBtn.on, #audioBtn.on, #subsBtn.on { display: inline-flex; }
+#filterBtn.live, #audioBtn.live, #subsBtn.live {
+  background: var(--accent); color: #06121f;
+}
 #filterBtn svg { width: 24px; height: 24px; display: block; }
 #audioBtn svg { width: 26px; height: 26px; display: block; }
+#subsBtn svg { width: 26px; height: 26px; display: block; }
 
 #sheetScrim {
   position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.6);
@@ -65,6 +70,12 @@ export const SHEET_CSS = `
 .row .sub { display: block; font-size: 14px; color: var(--dim); margin-top: 2px; }
 .row .grow { flex: 1; min-width: 0; }
 `;
+
+const CC_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" ' +
+  'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  '<rect x="2.5" y="5" width="19" height="14" rx="3"/>' +
+  '<path d="M10 10.2a2.6 2.6 0 1 0 0 3.6M17.5 10.2a2.6 2.6 0 1 0 0 3.6"/></svg>';
 
 const FUNNEL_ICON =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
@@ -114,77 +125,104 @@ export function langName(code: string, title?: string): string {
 }
 
 export interface SheetManagerDeps {
-  /** The two sheets' roots. Each sheet builds its own; this only shows them. */
+  /** The sheets' roots. Each sheet builds its own; this only shows them. */
   sound: HTMLElement;
+  subs: HTMLElement;
   filter: HTMLElement;
   onSoundOpen: () => void;
+  onSubsOpen: () => void;
   onFilterOpen: () => void;
 }
+
+type SheetName = "sound" | "subs" | "filter";
 
 export class SheetManager {
   /** The chrome, mounted by the composition root. */
   readonly scrim: HTMLElement;
   readonly audioBtn: HTMLElement;
+  readonly subsBtn: HTMLElement;
   readonly filterBtn: HTMLElement;
-  private readonly sheet: HTMLElement;
-  private readonly fsheet: HTMLElement;
+  // Kept as a map rather than as three fields: "open this one, close the
+  // others" is one rule, and written pairwise it becomes one rule per pair --
+  // which is how the third sheet would have introduced a case nobody wrote.
+  private readonly roots: Record<SheetName, HTMLElement>;
+  private readonly opened: Record<SheetName, () => void>;
 
-  constructor(doc: Document, private readonly deps: SheetManagerDeps) {
-    this.sheet = deps.sound;
-    this.fsheet = deps.filter;
+  constructor(doc: Document, deps: SheetManagerDeps) {
+    this.roots = { sound: deps.sound, subs: deps.subs, filter: deps.filter };
+    this.opened = {
+      sound: deps.onSoundOpen,
+      subs: deps.onSubsOpen,
+      filter: deps.onFilterOpen,
+    };
 
     // Left empty: main.ts paints it with the speaker or the crossed-out speaker
     // as the audio session changes.
     this.audioBtn = h(doc, "button", {
       id: "audioBtn",
       aria: "Sound",
-      onTap: () => this.showSound(!this.soundOpen),
+      onTap: () => this.show("sound", !this.isOpen("sound")),
+    });
+    this.subsBtn = h(doc, "button", {
+      id: "subsBtn",
+      aria: "Subtitles",
+      html: CC_ICON,
+      onTap: () => this.show("subs", !this.isOpen("subs")),
     });
     this.filterBtn = h(doc, "button", {
       id: "filterBtn",
       aria: "Filter and sort",
       html: FUNNEL_ICON,
-      onTap: () => this.showFilter(!this.filterOpen),
+      onTap: () => this.show("filter", !this.isOpen("filter")),
     });
     this.scrim = h(doc, "div", {
       id: "sheetScrim",
-      onTap: () => {
-        this.showSound(false);
-        this.showFilter(false);
-      },
+      onTap: () => this.closeAll(),
     });
   }
 
+  isOpen(name: SheetName): boolean {
+    return this.roots[name].classList.contains("on");
+  }
+
   get soundOpen(): boolean {
-    return this.sheet.classList.contains("on");
+    return this.isOpen("sound");
+  }
+  get subsOpen(): boolean {
+    return this.isOpen("subs");
   }
   get filterOpen(): boolean {
-    return this.fsheet.classList.contains("on");
+    return this.isOpen("filter");
+  }
+
+  show(name: SheetName, on: boolean): void {
+    for (const key of Object.keys(this.roots) as SheetName[]) {
+      toggleClass(this.roots[key], "on", on && key === name);
+    }
+    toggleClass(
+      this.scrim,
+      "on",
+      (Object.keys(this.roots) as SheetName[]).some((k) => this.isOpen(k)),
+    );
+    if (on) {
+      this.opened[name]();
+    }
   }
 
   showSound(on: boolean): void {
-    toggleClass(this.sheet, "on", on);
-    if (on) {
-      toggleClass(this.fsheet, "on", false);
-    }
-    this.paintScrim();
-    if (on) {
-      this.deps.onSoundOpen();
-    }
+    this.show("sound", on);
   }
-
+  showSubs(on: boolean): void {
+    this.show("subs", on);
+  }
   showFilter(on: boolean): void {
-    toggleClass(this.fsheet, "on", on);
-    if (on) {
-      toggleClass(this.sheet, "on", false);
-    }
-    this.paintScrim();
-    if (on) {
-      this.deps.onFilterOpen();
-    }
+    this.show("filter", on);
   }
 
-  private paintScrim(): void {
-    toggleClass(this.scrim, "on", this.soundOpen || this.filterOpen);
+  closeAll(): void {
+    for (const key of Object.keys(this.roots) as SheetName[]) {
+      toggleClass(this.roots[key], "on", false);
+    }
+    toggleClass(this.scrim, "on", false);
   }
 }

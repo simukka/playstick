@@ -192,3 +192,42 @@ describe("StatusPresenter reload", () => {
     expect(reloads).toHaveLength(0);
   });
 });
+
+describe("the CC button", () => {
+  const playing = (over: Partial<Status> = {}) =>
+    status({ state: "playing", subs: [{ n: 1, lang: "eng" }], sub: 0, ...over });
+
+  it("is hidden on the grid", () => {
+    const { doc, p } = present();
+    p.apply(status({ state: "idle" }));
+    expect(on(doc, "subsBtn")).toBe(false);
+  });
+
+  it("appears with the film", () => {
+    const { doc, p } = present();
+    p.apply(playing());
+    expect(on(doc, "subsBtn")).toBe(true);
+  });
+
+  it("stays hidden for a film that has no subtitles to offer", () => {
+    const { doc, p } = present();
+    p.apply(playing({ subs: [] }));
+    expect(on(doc, "subsBtn")).toBe(false);
+  });
+
+  it("lights up while subtitles are actually on", () => {
+    const { doc, p } = present();
+    p.apply(playing());
+    expect(doc.getElementById("subsBtn")!.classList.contains("live")).toBe(false);
+    p.apply(playing({ sub: 1 }));
+    expect(doc.getElementById("subsBtn")!.classList.contains("live")).toBe(true);
+  });
+
+  it("goes away with the film, lit or not", () => {
+    const { doc, p } = present();
+    p.apply(playing({ sub: 1 }));
+    p.apply(status({ state: "idle" }));
+    expect(on(doc, "subsBtn")).toBe(false);
+    expect(doc.getElementById("subsBtn")!.classList.contains("live")).toBe(false);
+  });
+});

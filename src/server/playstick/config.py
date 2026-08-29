@@ -12,7 +12,12 @@ the unit template, parsed here, and defaulted again in the dev container and
 the test harness -- and the copies drifted. PLAYSTICK_OVERLAY was the proof:
 this file read it, the unit template never set it, and nothing said so, so the
 overlay path silently fell back to the default here. One file cannot drift from
-itself, and [library] overlay_file is now rendered like every other key.
+itself, and every key below is rendered like every other key.
+
+That overlay file is gone now, along with the index beside it and the poster
+cache directory -- the library, the edits and the posters are rows in the
+database DB_PATH names. What is left here is genuinely configuration: values
+Ansible decides and this process only obeys. State lives in db.py.
 
 The defaults below are still real and still matter. They are what you get
 running src/server/playstick-web.py by hand on a developer machine with no
@@ -101,47 +106,26 @@ PORT = int(_get("server", "port", 8080))
 UI_FILE = _get("server", "ui_file", "/usr/local/share/playstick/ui.html")
 
 LIBRARY = _get("library", "path", "/srv/movies")
-EXTENSIONS = tuple(
-    e if e.startswith(".") else "." + e
-    for e in _words("library", "extensions", ".mkv .mp4 .m4v .avi .mov")
-)
-MIN_SIZE = int(_get("library", "min_size_mb", 100) or 0) * 1024 * 1024
-SCAN_DEPTH = max(1, int(_get("library", "scan_depth", 2) or 2))
+# How often the daemon checks that the share is still there. Once a walk of
+# that share, and the reason it had to be as slow as five minutes; now a single
+# stat of the root, because the film table lives in the database and no longer
+# has to be rediscovered. The name is kept because /api/rescan is what asks for
+# one early and the page has always called it that.
 SCAN_INTERVAL = max(30, int(_get("library", "scan_interval", 300) or 300))
-SKIP_PATTERN = _get("library", "skip_pattern", r"sample|trailer|extras?\b")
-
-# The index scripts/playstick-prep.py writes on the developer machine. When it
-# is present the library comes from there instead of from a walk of the share,
-# which is the difference between a poster grid that appears and one that has
-# to stat every file over CIFS first. Anything wrong with it -- missing,
-# unparseable, a schema from the future -- falls back to the walk, because a
-# stale index must never be the reason a child cannot watch a film.
-# Unset means "the usual place"; set-but-empty means "ignore any index there
-# is". The distinction is load-bearing rather than pedantic: the unit always
-# writes an Environment= line, so player_index_file: "" arrives here as an
-# empty string, and treating that as "unset" would make the documented way of
-# switching the index off do nothing at all.
-_UNSET = object()
-_index_set = _get("library", "index_file", _UNSET)
-INDEX_FILE = (os.path.join(LIBRARY, "playstick-library.json")
-              if _index_set is _UNSET else _index_set)
-INDEX_SCHEMA = 1
-# Runtime edits made from the desktop admin view -- a title corrected, a genre
-# fixed, a film hidden from the children's grid -- kept in a small JSON sidecar
-# keyed by the same opaque id the index uses. Deliberately a SEPARATE file from
-# the index above, and that separation is the whole feature: the index is
-# regenerated wholesale on a developer machine by playstick-prep.py, so an edit
-# stored inside it would be erased on the next prep run. Stored beside it here,
-# an edit is an overlay merged on top of whatever the index says and survives
-# any number of regenerations. Unset means "the usual place"; set-but-empty
-# means "no overlay", the same load-bearing distinction INDEX_FILE draws and
-# for the same reason -- the unit always writes an Environment= line.
-_overlay_set = _get("library", "overlay_file", _UNSET)
-OVERLAY_FILE = (os.path.join(LIBRARY, "playstick-overlay.json")
-                if _overlay_set is _UNSET else _overlay_set)
 # Subtitles the prep tool extracted. Off means they are not passed to mpv at
 # all, which is not the same as mpv having none to choose.
 SUBTITLES = _flag("library", "subtitles", True)
+
+# The library, the edits, the posters and the resume positions -- everything
+# this appliance knows and is allowed to change. See db.py for why it is one
+# file and why that file is here rather than on the share: /srv/movies is
+# mounted read-only, so the share is somewhere this daemon can read and never
+# somewhere it can remember.
+#
+# /var/lib rather than /var/cache, and the distinction is the point: a cache is
+# something you may delete, and deleting this loses every title anybody
+# corrected. systemd makes the directory through StateDirectory= in the unit.
+DB_PATH = _get("database", "path", "/var/lib/playstick/playstick.db")
 
 # Per-language audio for headphones, also from the prep tool.
 #
@@ -185,6 +169,23 @@ AUDIO_ROUTE_RE = re.compile(r"^/api/audio/([0-9a-f]{16})/([0-9]{1,2})$")
 # write per ~170 ms for about 6 KB/s of extra syscalls.
 AUDIO_CHUNK = 8 * 1024
 RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+# The two admin routes that carry an id in the path, matched the same way and
+# for the same reason as AUDIO_ROUTE_RE above: against the WHOLE path, so "..",
+# "%2e%2e" and an uppercased id simply fail to match and fall through to the
+# 404 at the bottom of the dispatch rather than reaching a handler that then
+# has to be careful.
+ADMIN_THUMB_RE = re.compile(r"^/api/admin/thumb/([0-9a-f]{16})$")
+ADMIN_THUMB_CLEAR_RE = re.compile(r"^/api/admin/thumb/([0-9a-f]{16})/clear$")
+# The largest poster the admin app may upload. The preparer makes them 400 px
+# wide at JPEG q3, which is tens of kilobytes; this is two orders of magnitude
+# of headroom and still small enough that a body read into memory on a 2 GB
+# device cannot be a way to hurt it.
+ADMIN_THUMB_MAX = 4 * 1024 * 1024
+# Films per sync request. The whole library arrives in one POST -- a few
+# hundred entries of a few hundred bytes -- and this is the bound on what a
+# single request may make this process allocate.
+ADMIN_SYNC_MAX = 5000
 AUDIO_SLOTS = threading.Semaphore(PHONE_AUDIO_STREAMS)
 
 # Playback telemetry from a phone with ?debug in its URL, carried on the status
@@ -211,7 +212,6 @@ SYNC_MAX = 512
 # journal shares 32 GB of eMMC with everything else.
 SYNC_MAX_RATE = 20
 
-THUMB_DIR = _get("thumbs", "dir", "/var/cache/playstick/thumbs")
 # A real list in the file, so a path with a space in it survives. The
 # environment could only carry one string and this went through shlex.split.
 THUMB_ARGS = list(_get("thumbs", "args", []))
@@ -363,30 +363,6 @@ def _parse_networks(items):
 
 
 ALLOW_NETWORKS = _parse_networks(_words("server", "allow_networks", []))
-
-SKIP_RE = re.compile(SKIP_PATTERN, re.IGNORECASE) if SKIP_PATTERN else None
-
-# Directories that are never part of a film library and are expensive to walk.
-# @eaDir in particular is Synology's per-file metadata sidecar tree -- it holds
-# a directory per media file, so walking it multiplies the scan cost by more
-# than the library contains.
-SKIP_DIRS = {"@eaDir", ".AppleDouble", "#recycle", "$RECYCLE.BIN",
-             "lost+found", "System Volume Information"}
-
-# Release tags and everything after them. Cutting at the first one turns
-# "Ponyo.2008.1080p.BluRay.x264-GROUP.mkv" into "Ponyo 2008", and the year
-# goes next.
-TAG_RE = re.compile(
-    r"\b(?:\d{3,4}p|4k|x26[45]|h\.?26[45]|hevc|xvid|divx|blu-?ray|b[rd]rip|"
-    r"web-?dl|web-?rip|hd(?:tv|rip)|dvd-?rip|remux|aac\d*|ac3|dts(?:-hd)?|"
-    r"ddp?5|truehd|atmos|proper|repack|internal|limited|extended|unrated|"
-    r"multi|dual|imax)\b.*",
-    re.IGNORECASE,
-)
-YEAR_RE = re.compile(r"\s*[\(\[]?\b(19|20)\d{2}\b[\)\]]?\s*$")
-
-SIDECAR_NAMES = ("poster.jpg", "poster.png", "cover.jpg", "cover.png",
-                 "folder.jpg", "folder.png")
 
 
 def log(msg, *args):

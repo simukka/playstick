@@ -4,13 +4,27 @@
 // presenter's job -- so each of these is a set of small, order-free writes that
 // a test can drive against the DOM stub and read straight back.
 import { h, setText, toggleClass } from "./dom";
-import { timeLeft, barWidth } from "./format";
+import { timeLeft, barWidth, clockTime, jumpLabel } from "./format";
+import { TAIL } from "./seek";
 import type { Status } from "./types";
 
 export type ViewName = "library" | "preparing" | "playing";
 
 const PLAY_GLYPH = "\u25B6"; // ▶
 const PAUSE_GLYPH = "\u2759\u2759"; // ❙❙
+
+/* The skip icons: a circular arrow with the number of seconds inside it, which
+   is the one transport idiom a child has already met on somebody's tablet. Drawn
+   rather than set in text because the "10" has to sit inside the arc. */
+const skipIcon = (back: boolean): string =>
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+  'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+  (back
+    ? '<path d="M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6"/>'
+    : '<path d="M12 5V1l5 5-5 5V7a6 6 0 1 0 6 6"/>') +
+  '<text x="12" y="16.6" text-anchor="middle" font-size="8" font-weight="700" ' +
+  'stroke="none" fill="currentColor" font-family="system-ui, sans-serif">10</text>' +
+  "</svg>";
 
 export const BANNER_CSS = `
 #banner {
@@ -86,17 +100,55 @@ export const PLAYING_CSS = `
   font-size: 26px; font-weight: 700; margin: 26px 8px 4px; line-height: 1.2;
 }
 #nowSub { color: var(--dim); font-size: 17px; margin-bottom: 26px; }
-#bar { height: 6px; border-radius: 3px; background: #26262e; margin: 0 4px 30px; overflow: hidden; }
-#barFill { height: 100%; width: 0; background: var(--accent); transition: width .8s linear; }
+#bar {
+  position: relative; height: 6px; border-radius: 3px; background: #26262e;
+  margin: 0 4px 10px;
+}
+#barFill {
+  height: 100%; width: 0; background: var(--accent); border-radius: 3px;
+  transition: width .8s linear;
+}
+/* Where a skip would land. Deliberately without #barFill's transition: this one
+   is following a thumb, and easing it would make the number and the marker
+   disagree about where the film is going. */
+#barGhost {
+  position: absolute; top: -5px; width: 3px; height: 16px; border-radius: 2px;
+  background: var(--ink); display: none; margin-left: -1px;
+}
+#barGhost.on { display: block; }
 
+/* Only ever on screen while a skip is pending, so the layout below it must not
+   move when it appears -- hence a reserved line rather than a hidden element. */
+#seekHint {
+  min-height: 24px; margin: 0 4px 6px; font-size: 17px; font-weight: 650;
+  color: var(--accent); font-variant-numeric: tabular-nums;
+}
+
+#transport {
+  display: flex; align-items: center; justify-content: center; gap: min(4vw, 22px);
+}
 #toggle {
-  width: min(46vw, 220px); aspect-ratio: 1; border-radius: 50%;
+  width: min(42vw, 200px); aspect-ratio: 1; border-radius: 50%;
   background: var(--accent); color: #06121f;
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: min(20vw, 96px); line-height: 1;
+  font-size: min(18vw, 88px); line-height: 1;
   transition: transform .08s ease;
+  flex: 0 0 auto;
 }
 #toggle:active { transform: scale(.94); }
+
+/* Big, because they are pressed and HELD by a child in the dark, and a hold
+   that slips off the edge is a jump that does not happen. .held rather than
+   :active: the button captures the pointer, so a thumb that slides off it is
+   still holding it, and :active does not always agree. */
+#skipBack, #skipFwd {
+  width: min(24vw, 108px); aspect-ratio: 1; border-radius: 50%;
+  background: var(--card); color: var(--ink);
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 auto; transition: transform .08s ease, background .12s ease;
+}
+#skipBack svg, #skipFwd svg { width: 58%; height: 58%; display: block; }
+#skipBack.held, #skipFwd.held { background: #2f2f3a; transform: scale(.94); }
 
 #stop {
   display: block; width: 100%; margin: 34px auto 0; max-width: 420px;
@@ -275,24 +327,48 @@ export class PreparingView {
 
 export class PlayingView {
   readonly root: HTMLElement;
-  // The four the controls wire. They live here because they are drawn here.
+  // The six the controls wire. They live here because they are drawn here.
   readonly toggle: HTMLElement;
   readonly stop: HTMLElement;
   readonly volDown: HTMLElement;
   readonly volUp: HTMLElement;
+  readonly skipBack: HTMLElement;
+  readonly skipFwd: HTMLElement;
   private readonly title: HTMLElement;
   private readonly sub: HTMLElement;
   private readonly bar: HTMLElement;
+  private readonly ghost: HTMLElement;
+  private readonly hint: HTMLElement;
   private readonly volume: HTMLElement;
+  // The last poll's numbers, kept so a preview drawn between polls has
+  // something to be relative to. The alternative -- handing the position to
+  // showSeek() from the caller -- would put the presenter in the business of
+  // knowing what a skip is.
+  private position = 0;
+  private duration = 0;
 
   constructor(doc: Document) {
     this.title = h(doc, "div", { id: "nowTitle" });
     this.sub = h(doc, "div", { id: "nowSub" });
     this.bar = h(doc, "div", { id: "barFill" });
+    this.ghost = h(doc, "div", { id: "barGhost" });
+    this.hint = h(doc, "div", { id: "seekHint" });
     this.toggle = h(doc, "button", {
       id: "toggle",
       aria: "Play or pause",
       html: PAUSE_GLYPH,
+    });
+    this.skipBack = h(doc, "button", {
+      id: "skipBack",
+      type: "button",
+      aria: "Back ten seconds, or hold to go further",
+      html: skipIcon(true),
+    });
+    this.skipFwd = h(doc, "button", {
+      id: "skipFwd",
+      type: "button",
+      aria: "Forward ten seconds, or hold to go further",
+      html: skipIcon(false),
     });
     this.stop = h(doc, "button", { id: "stop", text: "STOP" });
     this.volDown = h(doc, "button", { id: "volDown", aria: "Quieter", text: "\u2212" });
@@ -301,8 +377,9 @@ export class PlayingView {
     this.root = h(doc, "div", { id: "playing", class: "view" }, [
       this.title,
       this.sub,
-      h(doc, "div", { id: "bar" }, [this.bar]),
-      this.toggle,
+      h(doc, "div", { id: "bar" }, [this.bar, this.ghost]),
+      this.hint,
+      h(doc, "div", { id: "transport" }, [this.skipBack, this.toggle, this.skipFwd]),
       this.stop,
       this.volume,
     ]);
@@ -317,11 +394,38 @@ export class PlayingView {
     toggleClass(this.volume, "on", !!s.audio);
     const duration = s.duration ?? 0;
     const position = s.position ?? 0;
+    this.duration = duration;
+    this.position = position;
     if (duration > 0) {
       this.bar.style.width = barWidth(position, duration);
       setText(this.sub, paused ? "Paused" : timeLeft(duration - position));
     } else {
       setText(this.sub, paused ? "Paused" : "Playing");
     }
+  }
+
+  /**
+   * Draw a skip that has not been sent yet: a marker on the bar where it would
+   * land, and the jump and the destination in words. Zero clears it.
+   *
+   * The number shown is the CLAMPED one. A hold that has run past the end of
+   * the film keeps climbing as a raw total, and a label that promised "+2:14:00"
+   * for a jump the daemon is going to cut to eight minutes would be the page
+   * lying about the one thing this control exists to make legible.
+   */
+  showSeek(pending: number): void {
+    if (!pending || !(this.duration > 0)) {
+      toggleClass(this.ghost, "on", false);
+      setText(this.hint, "");
+      return;
+    }
+    const limit = Math.max(0, this.duration - TAIL);
+    const target = Math.max(0, Math.min(limit, this.position + pending));
+    this.ghost.style.left = barWidth(target, this.duration);
+    toggleClass(this.ghost, "on", true);
+    setText(
+      this.hint,
+      jumpLabel(target - this.position) + " \u2192 " + clockTime(target),
+    );
   }
 }

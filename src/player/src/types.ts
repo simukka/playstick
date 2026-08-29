@@ -74,6 +74,13 @@ export interface Status {
   audio?: boolean;
   phone_audio?: boolean;
   tracks?: Track[];
+  /** The subtitle tracks mpv loaded for this film, as mpv numbers them. Empty
+   * when it has none -- a walked share with nothing prepped, or a film whose
+   * only subtitles are the image-based kind prep declines to OCR. */
+  subs?: Track[];
+  /** Which of them is on the picture, 0 for none. Shared: subtitles are on the
+   * projector everybody is looking at, unlike the sound, which is per phone. */
+  sub?: number;
   thumbs_pending?: number;
   prepare?: { label?: string } | null;
   notice?: string;

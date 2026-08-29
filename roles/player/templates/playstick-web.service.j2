@@ -33,6 +33,18 @@ RuntimeDirectory=playstick
 RuntimeDirectoryMode=0755
 RuntimeDirectoryPreserve=yes
 
+# /var/lib/playstick, holding the one file this daemon writes: the database
+# with the film table, the metadata edits, the posters and the resume
+# positions. systemd creates it, which is also what makes it writable under
+# ProtectSystem=full below -- StateDirectory= implies a ReadWritePaths= entry,
+# so there is no second line to keep in step with this one.
+#
+# NOT RuntimeDirectory and not /var/cache: this survives a reboot and a
+# re-provision on purpose. It is the only copy of every title anybody has
+# corrected, and the admin app is the only thing that could rebuild it.
+StateDirectory=playstick
+StateDirectoryMode=0750
+
 # The only environment variable the package reads. Everything else the daemon
 # needs is in the file it names.
 Environment=PLAYSTICK_SETTINGS=/etc/playstick/settings.toml
@@ -72,7 +84,6 @@ TimeoutStopSec=20
 ProtectSystem=full
 ProtectHome=yes
 NoNewPrivileges=yes
-ReadWritePaths={{ player_thumb_dir }}
 # AF_NETLINK is not optional and its absence fails in the dangerous direction:
 # ss reads NETLINK_SOCK_DIAG, and without it the AirPlay gate would silently
 # answer "nobody is mirroring" and take the display out from under a session.

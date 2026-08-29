@@ -18,6 +18,7 @@ import { AudioSession, type AudioElement } from "./audio";
 import { Tunables } from "./tunables";
 import { Telemetry } from "./telemetry";
 import { SoundSheet } from "./sound-sheet";
+import { SubsSheet } from "./subs-sheet";
 import { FilterSheet } from "./filter-sheet";
 import { SheetManager } from "./sheet";
 import { TimeDriver } from "./time-driver";
@@ -108,11 +109,30 @@ function boot(): void {
     libraryLangs: () => model.facets.langs,
     storage: localStorage,
   });
+  const subsSheet = new SubsSheet(doc, {
+    // The status the POST returns, applied at once: somebody in the dark has
+    // just tapped a language and the tick has to move now, not on the next
+    // poll. A refusal (the film ended between the tap and the packet) becomes
+    // the banner, which is the only account of why nothing happened.
+    choose: (track) => {
+      void api.subtitle(track).then((r) => {
+        if (r.ok) {
+          onStatus(r.data as unknown as Status);
+          subsSheet.paint();
+        } else if (r.data.error) {
+          presenter.banner.show(r.data.error, 6000);
+          sheets.closeAll();
+        }
+      });
+    },
+  });
   const filterSheet = new FilterSheet(doc, model, () => libraryView.render());
   const sheets = new SheetManager(doc, {
     sound: soundSheet.root,
+    subs: subsSheet.root,
     filter: filterSheet.root,
     onSoundOpen: () => soundSheet.paint(),
+    onSubsOpen: () => subsSheet.paint(),
     onFilterOpen: () => filterSheet.paint(),
   });
 
@@ -150,22 +170,26 @@ function boot(): void {
     library: libraryView.root,
     grid: libraryView.gridEl,
     filterBtn: sheets.filterBtn,
+    subsBtn: sheets.subsBtn,
     wakeNas,
   });
 
-  new Controls(
+  const controls = new Controls(
     {
       toggle: presenter.playing.toggle,
       stop: presenter.playing.stop,
       cancel: presenter.preparing.cancel,
       volDown: presenter.playing.volDown,
       volUp: presenter.playing.volUp,
+      skipBack: presenter.playing.skipBack,
+      skipFwd: presenter.playing.skipFwd,
     },
     api,
     {
       stateOf: () => presenter.state,
       apply: (s) => onStatus(s),
       toLibrary: () => presenter.views.show("library"),
+      onSeekPreview: (pending) => presenter.playing.showSeek(pending),
     },
   );
 
@@ -176,9 +200,11 @@ function boot(): void {
     presenter.banner.root,
     sheets.audioBtn,
     sheets.filterBtn,
+    sheets.subsBtn,
     soundSheet.tapToListen,
     sheets.scrim,
     soundSheet.root,
+    subsSheet.root,
     filterSheet.root,
     libraryView.root,
     presenter.preparing.root,
@@ -218,10 +244,19 @@ function boot(): void {
     }
     presenter.apply(s);
     audio.onStatus(s);
+    subsSheet.onStatus(s);
+    if (sheets.subsOpen) {
+      subsSheet.paint();
+    }
     const onGrid =
       s.state !== "playing" && s.state !== "paused" && s.state !== "preparing";
-    if (onGrid && Date.now() - libraryFetchedAt > 10000) {
-      loadLibrary();
+    if (onGrid) {
+      // The film went away -- it ended, or somebody else stopped it. A skip
+      // queued against a timeline that no longer exists must not be sent.
+      controls.pad.clear();
+      if (Date.now() - libraryFetchedAt > 10000) {
+        loadLibrary();
+      }
     }
   }
 

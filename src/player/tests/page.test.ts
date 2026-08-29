@@ -109,10 +109,12 @@ async function until(cond: () => boolean, ms = 3000): Promise<void> {
 // one of these is the failure this file exists to catch.
 const IDS = [
   "banner", "bannerMsg", "bannerAct",
-  "audioBtn", "filterBtn", "tapToListen", "sheetScrim", "sheet", "fsheet",
+  "audioBtn", "filterBtn", "subsBtn", "tapToListen", "sheetScrim", "sheet",
+  "subsSheet", "subsList", "subsNote", "fsheet",
   "library", "grid", "empty", "emptyClear", "filterChip", "preparing", "prepArt",
   "prepTitle", "prepStep", "prepBar", "prepCancel", "playing", "nowTitle", "nowSub",
-  "bar", "barFill", "toggle", "stop", "volume", "volDown", "volUp", "destList",
+  "bar", "barFill", "barGhost", "seekHint", "transport", "skipBack", "skipFwd",
+  "toggle", "stop", "volume", "volDown", "volUp", "destList",
   "langList", "sheetNote", "syncHead", "syncRow", "syncBack", "syncVal", "syncFwd",
   "syncHint", "syncDebug", "tuneHead", "tuneList", "tuneFoot", "tuneReset", "tuneNote",
   "sortList", "genreHead", "genreList", "scoreHead", "scoreList", "readyHead",
@@ -131,8 +133,8 @@ describe("the page boots", () => {
       .filter((e) => e.tagName !== "SCRIPT")
       .map((e) => e.id);
     expect(order).toEqual([
-      "banner", "audioBtn", "filterBtn", "tapToListen", "sheetScrim",
-      "sheet", "fsheet", "library", "preparing", "playing",
+      "banner", "audioBtn", "filterBtn", "subsBtn", "tapToListen", "sheetScrim",
+      "sheet", "subsSheet", "fsheet", "library", "preparing", "playing",
     ]);
   });
 
@@ -254,6 +256,74 @@ describe("the views a film brings up", () => {
     expect(p.el("barFill").style.width).toBe("25%");
     expect(p.el("toggle").innerHTML).toBe("❙❙");
     expect(p.css("volume").display).toBe("flex");
+    // The two skip buttons, in the transport row with the play control between
+    // them. Their presence is the point: no scrub bar, and no way to lose your
+    // place, but the film can still be moved.
+    expect(p.css("transport").display).toBe("flex");
+    expect([...p.el("transport").children].map((e) => e.id)).toEqual([
+      "skipBack", "toggle", "skipFwd",
+    ]);
+    expect(p.css("barGhost").display).toBe("none");
+    expect(p.el("seekHint").textContent).toBe("");
+  });
+
+  it("previews a held skip and sends it once on release", async () => {
+    const p = await boot({
+      state: "playing",
+      id: "a",
+      title: "Akira",
+      duration: 7200,
+      position: 1800,
+      subs: [{ n: 1, lang: "eng" }],
+      sub: 0,
+    } as Partial<Status>);
+    await until(() => p.css("playing").display === "block");
+
+    const fwd = p.el("skipFwd");
+    const down = new p.win.Event("pointerdown", { bubbles: true }) as Event & {
+      pointerId?: number;
+    };
+    down.pointerId = 1;
+    fwd.dispatchEvent(down);
+    expect(p.el("seekHint").textContent).toBe("+0:10 → 30:10");
+    expect(p.css("barGhost").display).toBe("block");
+
+    const up = new p.win.Event("pointerup", { bubbles: true }) as Event & {
+      pointerId?: number;
+    };
+    up.pointerId = 1;
+    fwd.dispatchEvent(up);
+    await until(() => p.calls.includes("/api/seek"), 2000);
+  });
+
+  it("offers the subtitle sheet only when the film has subtitles", async () => {
+    const none = await boot({
+      state: "playing", id: "a", title: "Akira", duration: 7200, subs: [],
+    } as Partial<Status>);
+    await until(() => none.css("playing").display === "block");
+    expect(none.css("subsBtn").display).toBe("none");
+    none.win.close();
+
+    const p = await boot({
+      state: "playing",
+      id: "a",
+      title: "Akira",
+      duration: 7200,
+      subs: [{ n: 1, lang: "eng" }, { n: 2, lang: "fin" }],
+      sub: 0,
+    } as Partial<Status>);
+    await until(() => p.css("subsBtn").display === "inline-flex");
+    p.tap("subsBtn");
+    expect(p.css("subsSheet").display).toBe("block");
+    // The tick rides on the row, so it comes back in the text: nothing is on,
+    // and Off is what is ticked.
+    expect([...p.el("subsList").children].map((e) => e.textContent)).toEqual([
+      "Off\u2713", "English", "Suomi",
+    ]);
+    // The sheets share one scrim and never stack.
+    p.tap("audioBtn");
+    expect(p.css("subsSheet").display).toBe("none");
+    expect(p.css("sheet").display).toBe("block");
   });
 
   it("shows the poster and the daemon's own words while getting ready", async () => {

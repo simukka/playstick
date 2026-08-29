@@ -13,6 +13,10 @@ DX            := ./dx
 COMPOSE       := docker compose
 NODE_MODULES  := $(PLAYER)/node_modules
 
+ADMIN         := src/admin
+ADMIN_VENV    := .venv-admin
+ADMIN_PY      := $(ADMIN_VENV)/bin/python
+
 .DEFAULT_GOAL := help
 
 .PHONY: help
@@ -29,8 +33,18 @@ help:
 	@echo "  make gui-down     stop the gui and drop its volumes"
 	@echo "  make clean        remove the build output and node deps"
 	@echo ""
+	@echo "Host admin app (PySide6):"
+	@echo "  make admin        install (first run) and launch the desktop admin app"
+	@echo "  make admin-clean  remove the admin virtualenv"
+	@echo ""
 	@echo "Override the published port with PLAYSTICK_GUI_PORT, and the library"
 	@echo "with PLAYSTICK_GUI_LIBRARY=/path/to/movies."
+	@echo ""
+	@echo "The sample library is generated once, on first run:"
+	@echo "  PLAYSTICK_GUI_CLIP_SECONDS=45  length of the ordinary clips"
+	@echo "  PLAYSTICK_GUI_LONG_SECONDS=900 length of the one feature-length"
+	@echo "                                 film, which is the only one the"
+	@echo "                                 skip buttons can be judged on"
 	@echo ""
 	@echo "The gui container writes /etc/playstick/settings.toml at startup"
 	@echo "from these; see scripts/gui-entrypoint.sh for what each one changes:"
@@ -86,3 +100,20 @@ gui-down:
 .PHONY: clean
 clean:
 	rm -rf $(PLAYER)/dist $(NODE_MODULES)
+
+# The admin app runs on the host that encodes the library, not the stick, so it
+# lives in its own virtualenv rather than the dependency-light device runtime.
+# Auto-created on first `make admin`; editable install so a code edit needs no
+# reinstall. Delete with `make admin-clean` or run pip install -e src/admin again.
+$(ADMIN_VENV):
+	python3 -m venv $(ADMIN_VENV)
+	$(ADMIN_PY) -m pip install --upgrade pip
+	$(ADMIN_PY) -m pip install -e $(ADMIN)
+
+.PHONY: admin
+admin: $(ADMIN_VENV)
+	$(ADMIN_PY) -m playstick_admin
+
+.PHONY: admin-clean
+admin-clean:
+	rm -rf $(ADMIN_VENV)

@@ -14,12 +14,19 @@ import { BANNER_CSS, PREPARING_CSS, PLAYING_CSS } from "./views";
 import { LIBRARY_CSS } from "./library-view";
 import { SHEET_CSS } from "./sheet";
 import { SOUND_CSS } from "./sound-sheet";
+import { SUBS_CSS } from "./subs-sheet";
 import { FILTER_CSS } from "./filter-sheet";
 
 /* Everything here is sized for a child holding a phone in a dark room. The
-   poster tiles are the buttons, the play/pause control is 40% of the screen,
-   and there is no seek bar -- a control that can lose your place is a control
-   that produces tears. */
+   poster tiles are the buttons, and the play/pause control is 40% of the
+   screen.
+
+   There is still no seek bar, and there will not be: a control you can drag is
+   a control that can lose your place, and losing a child's place produces
+   tears. The two skip buttons beside the play control are the other half of
+   that bargain -- they only ever move the film by an amount somebody asked for,
+   ten seconds at a time or an amount they watched grow while holding, and the
+   bar draws where the jump would land before it happens. */
 const BASE = `
 :root {
   --bg: #0b0b0d;
@@ -56,6 +63,7 @@ export const CSS = [
   PLAYING_CSS,
   SHEET_CSS,
   SOUND_CSS,
+  SUBS_CSS,
   FILTER_CSS,
 ].join("\n");
 

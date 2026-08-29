@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Entrypoint for the GUI development container -- see Dockerfile.gui.
 #
-# Three jobs: write the settings the daemon will read, put something in the
-# library worth looking at, then hand over to the same daemon the appliance
-# runs, unmodified.
+# Four jobs: write the settings the daemon will read, put something in the
+# library worth looking at, push it into the database the daemon reads, then
+# hand over to the same daemon the appliance runs, unmodified.
+#
+# The third one is new and stands in for the desktop admin app. The daemon no
+# longer discovers films -- its library is a table something else fills over
+# /api/admin/films -- so a container that only generated files would serve an
+# empty grid. gui-seed.py does what the admin app does, minus the HTTP, since
+# the daemon it would POST to has not started yet.
 #
 # The generated films are deliberately named the way a real collection is,
 # because most of what the library code does is undo those names: clean_title()
@@ -13,8 +19,15 @@
 set -euo pipefail
 
 LIBRARY=/srv/movies
-THUMBS=/var/cache/playstick/thumbs
+# The film table, the metadata edits, the posters and the resume positions.
+# On the device systemd makes this directory with StateDirectory=.
+STATE=/var/lib/playstick
 CLIP_SECONDS="${PLAYSTICK_GUI_CLIP_SECONDS:-45}"
+# One film long enough to skip around in. Everything else here is under a
+# minute, and on a forty-five second clip every jump the skip buttons can make
+# lands at the end -- a hold of three seconds is half an hour of film, so the
+# control cannot be judged at all without something that long to move inside.
+LONG_SECONDS="${PLAYSTICK_GUI_LONG_SECONDS:-900}"
 SETTINGS="${PLAYSTICK_SETTINGS:-/etc/playstick/settings.toml}"
 
 # PLAYSTICK_GUI_NAS is "host" or "host:port". Split here rather than in the
@@ -30,7 +43,7 @@ fi
 
 # /run/playstick holds the mpv IPC socket and the two flag files. On the device
 # systemd makes it with RuntimeDirectory=; here nothing does.
-mkdir -p /run/playstick "$THUMBS" "$LIBRARY" "$(dirname "$SETTINGS")"
+mkdir -p /run/playstick "$STATE" "$LIBRARY" "$(dirname "$SETTINGS")"
 
 # --- the settings ---------------------------------------------------------
 # The same file the appliance gets from roles/player/templates/settings.toml.j2,
@@ -55,18 +68,17 @@ allow_networks = []
 
 [library]
 path = "$LIBRARY"
-extensions = [".mkv", ".mp4", ".m4v", ".avi", ".mov", ".m2ts", ".ts"]
-skip_pattern = 'sample|trailer|extras?\b|behind[ ._-]the[ ._-]scenes'
-# The generated clips are a few MB each; the device's 100 MB floor -- which is
-# what removes samples and extras there for free -- would hide the entire
-# library. The skip regex above is left to do that job alone, so it gets
-# exercised.
-min_size_mb = 0
-scan_depth = 2
-# 300 s on the device, where a rescan means stat-ing every file over CIFS.
-# Nothing is remote here, and adding a file and waiting five minutes to see it
-# is not a development cycle.
+# 300 s on the device. All this paces now is one stat asking whether the share
+# is still there, and a container's is always there -- but the interval is also
+# how quickly the page recovers after PLAYSTICK_GUI_NAS is pointed at a dead
+# port and back, which is worth watching at a human pace.
 scan_interval = 30
+
+# The one file the daemon writes. A named volume in compose, so `docker compose
+# down -v` resets it -- and resetting it means an empty library until
+# playstick-gui-seed runs again, which the entrypoint does on every start.
+[database]
+path = "$STATE/playstick.db"
 
 [nas]
 # Empty by default: power reads "unknown" and the page behaves exactly as it
@@ -89,7 +101,6 @@ wake_cooldown = 5
 mount_unit = "playstick-gui-none.mount"
 
 [thumbs]
-dir = "$THUMBS"
 # Identical to the unit's: poster extraction is one part of this that a
 # container reproduces exactly.
 args = ["--no-config", "--really-quiet", "--frames=1", "--aid=no", "--sid=no",
@@ -220,6 +231,48 @@ generate() {
   # "my film is missing" is otherwise indistinguishable from a bug.
   clip "Archive/Boxed Set/Disc One/Fourth.Level.2020.mkv" testsrc
 
+  # --- the transport fixtures ---------------------------------------------
+  # The two controls that only exist while a film is playing: skipping, and
+  # subtitles. Neither can be judged on a forty-five second clip.
+
+  # "The Feature" -- fifteen minutes of it, with subtitles in two languages
+  # burned into the container as text tracks. The one film here that both
+  # controls added with them can be judged on: hold the forward button for
+  # three seconds and the label should climb to about +30:00 and the jump
+  # should clamp near the end rather than ending the film, and the CC button
+  # should offer English and Suomi over Off.
+  #
+  # Subtitle tracks INSIDE the container on purpose. The extracted SRTs prep
+  # writes live under .playstick/subs/ and only reach mpv via the index, which
+  # nothing here generates -- but mpv finds a container's own text tracks
+  # whatever the daemon passes, and the page treats the two identically
+  # because both come back through mpv's track-list.
+  echo "    generating a ${LONG_SECONDS}s feature (this one takes a moment)"
+  : > /tmp/feature.eng.srt
+  : > /tmp/feature.fin.srt
+  minute=0
+  while [ "$minute" -lt $(( (LONG_SECONDS + 59) / 60 )) ]; do
+    start=$(printf "00:%02d:00,000" "$minute")
+    end=$(printf "00:%02d:55,000" "$minute")
+    printf '%d\n%s --> %s\nMinute %d of the feature.\n\n' \
+      "$((minute + 1))" "$start" "$end" "$minute" >> /tmp/feature.eng.srt
+    printf '%d\n%s --> %s\nElokuvan minuutti %d.\n\n' \
+      "$((minute + 1))" "$start" "$end" "$minute" >> /tmp/feature.fin.srt
+    minute=$((minute + 1))
+  done
+  ffmpeg -y -hide_banner -loglevel error \
+    -f lavfi -i "testsrc2=size=640x360:rate=25" \
+    -f lavfi -i "sine=frequency=330:sample_rate=48000" \
+    -i /tmp/feature.eng.srt -i /tmp/feature.fin.srt \
+    -map 0:v -map 1:a -map 2:s -map 3:s -t "$LONG_SECONDS" \
+    -c:v libx264 -preset ultrafast -pix_fmt yuv420p -b:v 400k \
+    -c:a aac -b:a 64k -c:s srt \
+    -metadata:s:a:0 language=eng \
+    -metadata:s:s:0 language=eng -metadata:s:s:1 language=fin \
+    "$LIBRARY/The.Feature.2024.1080p.BluRay.x264-GROUP.mkv"
+  rm -f /tmp/feature.eng.srt /tmp/feature.fin.srt
+  echo "    The.Feature.2024.1080p.BluRay.x264-GROUP.mkv  (${LONG_SECONDS}s, 2 subtitle tracks)"
+
   # --- the headphone-audio fixtures ---------------------------------------
   # Everything below exists to be run through playstick-prep.py, which is what
   # extracts the per-language tracks the phones play. Without prep they show up
@@ -268,7 +321,7 @@ generate() {
   # appearing after a prep run, EPISODE_RE has been loosened too far.
   clip "12x12 A Cabin Story (2020).mkv" rgbtestsrc
 
-  echo "==> 13 files -> 11 tiles now, 10 after a prep run"
+  echo "==> 14 files -> 12 tiles now, 11 after a prep run"
   echo "==>   now:  the sample and the too-deep Fourth Level are filtered"
   echo "==>   prep: drops the 2 episodic files, and indexes Fourth Level --"
   echo "==>         its --max-depth is 3, the daemon's walk stops at 2"
@@ -281,5 +334,18 @@ if [ "${PLAYSTICK_GUI_SAMPLES:-1}" != "0" ] &&
    [ -z "$(find "$LIBRARY" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
   generate
 fi
+
+# --- into the database ----------------------------------------------------
+# Unconditional, and an upsert rather than a replace, so it is cheap on a
+# container that has already been started once and correct on one whose volume
+# was just reset. --reconcile so a film deleted from a bind-mounted library
+# stops appearing, which is the behaviour a developer pointing
+# PLAYSTICK_GUI_LIBRARY at their own films expects.
+#
+# Never fatal: a seeder that cannot run must not be the reason the daemon does
+# not start. An empty grid is a thing you can see and debug; a container that
+# exits at boot is not.
+playstick-gui-seed --library "$LIBRARY" --reconcile || \
+  echo "==> seed failed; the library will be empty until something syncs it" >&2
 
 exec "$@"
