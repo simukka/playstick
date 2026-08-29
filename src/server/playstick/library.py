@@ -339,11 +339,44 @@ class Library:
                 else:
                     cur = conn.execute("DELETE FROM film")
                 removed = cur.rowcount
+            self._renumber(conn)
             conn.execute(
                 "INSERT INTO meta (key, value) VALUES ('synced_at', ?) "
                 "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
                 (repr(now),))
         return len(films), removed
+
+    @staticmethod
+    def _renumber(conn):
+        """Put the whole shelf back in order, however this sync arrived.
+
+        `pos` used to be the film's index in the batch, which was right while
+        the only kind of sync was a whole library at once -- the admin app sent
+        every film in shelf order and the numbering fell out of the loop.
+
+        It stopped being right the moment films started arriving ONE AT A TIME,
+        which is what the admin app does now: each finished preparation is a
+        push of a single film with reconcile off. That film's index in its own
+        batch is zero, so it took position zero on the grid. Every film added
+        would have sat at the top, in reverse order of when it was added, and
+        nothing anywhere would have reported a problem -- the sync succeeds, the
+        poster appears, and the shelf is simply wrong.
+
+        So the order is derived here instead, from `sort_title`, which is what
+        `pos` was carrying all along: the preparer files a film under a
+        normalised title so that "The Fifth Element" sits under F the way it
+        would on a shelf. A correlated subquery rather than a window function
+        because it is a few hundred rows and this box has four 1.44 GHz cores
+        and an sqlite of whatever vintage the image shipped with.
+        """
+        conn.execute(
+            "UPDATE film SET pos = ("
+            "  SELECT COUNT(*) FROM film AS other"
+            "   WHERE other.sort_title < film.sort_title"
+            "      OR (other.sort_title = film.sort_title"
+            "          AND other.title < film.title)"
+            "      OR (other.sort_title = film.sort_title"
+            "          AND other.title = film.title AND other.id < film.id))")
 
     def _upsert(self, conn, film, pos, now):
         values = [film.get(c) for c in SYNC_COLUMNS]
@@ -382,6 +415,30 @@ class Library:
               t.get("title") or "", t.get("channels"),
               1 if t.get("default") else 0, float(t.get("offset") or 0.0))
              for t in film.get("audio") or ()])
+
+    def delete(self, ids):
+        """Remove named films and everything that hangs off them.
+
+        `thumb`, `override`, `playback`, `film_genre`, `subtitle` and
+        `audio_track` all cascade, which is the point: a film that is being
+        taken out of the library should not leave its resume position behind to
+        be inherited by whatever is next given the same id.
+
+        That is the opposite of what a re-sync must do, and the difference is
+        worth being clear about. A sync is an upsert precisely so that pushing
+        a film again does not discard the poster somebody uploaded or the title
+        somebody fixed. This is somebody saying "take it away", which is the one
+        case where discarding all of it is the whole request.
+        """
+        if not ids:
+            return 0
+        with self._db.write() as conn:
+            cur = conn.execute("DELETE FROM film WHERE id IN (%s)"
+                               % self._marks(ids), tuple(ids))
+            removed = cur.rowcount
+            if removed:
+                self._renumber(conn)
+        return removed
 
     def rows(self):
         """Every film as it is stored, paths and all, for the admin app.

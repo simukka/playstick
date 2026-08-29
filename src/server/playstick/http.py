@@ -381,6 +381,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_admin_item()
         if path == "/api/admin/films":
             return self._api_admin_films()
+        if path == "/api/admin/films/delete":
+            return self._api_admin_films_delete()
         match = ADMIN_THUMB_CLEAR_RE.match(path)
         if match:
             return self._api_admin_thumb_clear(match.group(1))
@@ -675,6 +677,38 @@ class Handler(BaseHTTPRequestHandler):
         written, removed = self.library.sync(films,
                                              bool(body.get("reconcile")))
         return self._json({"written": written, "removed": removed})
+
+    def _api_admin_films_delete(self):
+        """Take named films off the device.
+
+        The alternative is a full push with `reconcile` set, and that is a
+        different and much blunter instruction: it deletes everything the batch
+        does not mention, which includes every film the sending machine happens
+        not to know about. A second admin machine's work, or anything synced
+        before that machine's database existed, would go with it -- silently,
+        and looking afterwards exactly like a successful tidy-up.
+
+        So removing one film is its own route. Ids are validated the same way
+        /api/admin/films validates them, and an id that is not sixteen hex
+        characters refuses the whole request rather than being skipped: a typo
+        that silently removed nothing would be indistinguishable from a film
+        that was not there.
+        """
+        raw = self._body().get("ids")
+        if not isinstance(raw, list):
+            return self._json({"error": "ids must be a list."}, 400)
+        if len(raw) > ADMIN_SYNC_MAX:
+            return self._json(
+                {"error": "That is more than %d films." % ADMIN_SYNC_MAX}, 400)
+        ids = []
+        for index, ident in enumerate(raw):
+            if (not isinstance(ident, str)
+                    or not re.fullmatch(r"[0-9a-f]{16}", ident)):
+                return self._json(
+                    {"error": "Film %d: id must be sixteen lowercase hex "
+                              "characters." % index}, 400)
+            ids.append(ident)
+        return self._json({"removed": self.library.delete(ids)})
 
     @staticmethod
     def _sync_film(entry):

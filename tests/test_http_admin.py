@@ -222,6 +222,75 @@ class Syncing(AdminTest):
         self.assertEqual(resp.status, 400)
 
 
+class RemovingOneFilm(AdminTest):
+    """POST /api/admin/films/delete, and why it is not reconcile.
+
+    The admin app now takes a film out of the library as a deliberate act:
+    delete it here, delete its files from the share, drop it back to
+    "available" in the Prepare tab. Doing that with a full push and reconcile
+    set would phrase the same request as "everything except these", and would
+    therefore also delete every film on the stick the sending machine does not
+    know about -- another machine's work, or anything synced before that
+    machine's database existed. It would look exactly like a successful
+    tidy-up afterwards, which is what makes it worth a route of its own.
+    """
+
+    def delete(self, ids, status=200):
+        resp = self.fetch("/api/admin/films/delete", method="POST",
+                          body={"ids": ids})
+        self.assertEqual(resp.status, status, resp.body)
+        return resp.json
+
+    def test_it_removes_only_what_it_was_asked_for(self):
+        self.sync([entry(FILM), entry(OTHER, "Totoro/Totoro.mkv",
+                                      title="Totoro")])
+        self.assertEqual(self.delete([FILM])["removed"], 1)
+        remaining = [row["id"] for row in self.real_library.rows()]
+        self.assertEqual(remaining, [OTHER])
+
+    def test_everything_hanging_off_the_film_goes_with_it(self):
+        # A resume position inherited by whatever is next given this id would
+        # be a film that starts forty minutes in for no reason anybody can see.
+        self.sync([entry(FILM, genres=["Animation"])])
+        self.put_thumb(FILM, JPEG)
+        self.fetch("/api/admin/item", method="POST",
+                   body={"id": FILM, "fields": {"title": "Ponyo on the Cliff"}})
+        self.db.write().execute(
+            "INSERT INTO playback (film_id, position, updated_at) "
+            "VALUES (?, 42.0, 0)", (FILM,))
+
+        self.delete([FILM])
+
+        for table in ("thumb", "override", "playback", "film_genre"):
+            left = self.db.one(
+                "SELECT COUNT(*) AS n FROM %s WHERE film_id = ?" % table,
+                (FILM,))["n"]
+            self.assertEqual(left, 0, table)
+
+    def test_deleting_a_film_that_is_not_there_is_not_an_error(self):
+        self.sync([entry(FILM)])
+        self.assertEqual(self.delete([OTHER])["removed"], 0)
+
+    def test_a_bad_id_refuses_the_whole_request(self):
+        # Skipping it would make a typo indistinguishable from a film that was
+        # not there.
+        self.sync([entry(FILM)])
+        self.delete([FILM, "../../etc/passwd"], status=400)
+        self.assertEqual([row["id"] for row in self.real_library.rows()], [FILM])
+
+    def test_ids_must_be_a_list(self):
+        self.delete("everything", status=400)
+
+    def test_the_shelf_closes_up_behind_it(self):
+        self.sync([entry("a" * 16, "a.mkv", sort_title="alpha"),
+                   entry("b" * 16, "b.mkv", sort_title="mike"),
+                   entry("c" * 16, "c.mkv", sort_title="zulu")])
+        self.delete(["b" * 16])
+        positions = [r["pos"] for r in self.db.query(
+            "SELECT pos FROM film ORDER BY pos")]
+        self.assertEqual(positions, [0, 1])
+
+
 class AdminLibraryRead(AdminTest):
     def test_it_reports_paths_the_phone_facing_route_never_sends(self):
         """The admin app diffs against what it sent, which it cannot do against

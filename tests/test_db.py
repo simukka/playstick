@@ -240,6 +240,57 @@ class Overrides(unittest.TestCase):
         self.assertEqual(library.overrides(), {})
 
 
+class TheShelfOrder(unittest.TestCase):
+    """`pos` is the order a child sees, and it must not depend on how a film
+    arrived.
+
+    It used to be the film's index within its own batch, which was right while
+    the only kind of sync was the whole library at once. The admin app pushes
+    ONE film at a time now -- each finished preparation, with reconcile off --
+    and a batch of one has index zero. Every film added would have landed at the
+    top of the grid, in reverse order of when it was added, with nothing
+    reporting anything: the sync succeeds and the poster appears.
+    """
+
+    def films(self, library):
+        return [r["title"] for r in library.rows()]
+
+    def test_a_whole_library_files_by_sort_title(self):
+        _db, library, _thumbs = real_store("shelf-full")
+        library.sync([
+            film("a" * 16, "z.mkv", title="Ponyo", sort_title="ponyo"),
+            film("b" * 16, "y.mkv", title="The Fifth Element",
+                 sort_title="fifth element"),
+            film("c" * 16, "x.mkv", title="Hook", sort_title="hook"),
+        ])
+        # Under F, the way it would be on a shelf -- not under T, and not in
+        # the order the batch happened to be in.
+        self.assertEqual(self.films(library),
+                         ["The Fifth Element", "Hook", "Ponyo"])
+
+    def test_one_film_pushed_on_its_own_does_not_jump_to_the_front(self):
+        _db, library, _thumbs = real_store("shelf-one")
+        library.sync([
+            film("a" * 16, "x.mkv", title="Alpha", sort_title="alpha"),
+            film("b" * 16, "y.mkv", title="Zulu", sort_title="zulu"),
+        ])
+        # Exactly what a finished preparation sends: one film, reconcile off.
+        library.sync([film("c" * 16, "z.mkv", title="Mike", sort_title="mike")],
+                     reconcile=False)
+        self.assertEqual(self.films(library), ["Alpha", "Mike", "Zulu"])
+
+    def test_the_positions_are_a_dense_sequence(self):
+        db, library, _thumbs = real_store("shelf-dense")
+        library.sync([film("a" * 16, "x.mkv", sort_title="a"),
+                      film("b" * 16, "y.mkv", sort_title="b"),
+                      film("c" * 16, "z.mkv", sort_title="c")])
+        library.sync([film("d" * 16, "w.mkv", sort_title="bb")],
+                     reconcile=False)
+        positions = [r["pos"] for r in db.query(
+            "SELECT pos FROM film ORDER BY pos")]
+        self.assertEqual(positions, [0, 1, 2, 3])
+
+
 class WhatASyncMustNotDestroy(unittest.TestCase):
     """The reason `sync` is an upsert and not a replace.
 
