@@ -118,14 +118,29 @@ SUBTITLES = _flag("library", "subtitles", True)
 
 # The library, the edits, the posters and the resume positions -- everything
 # this appliance knows and is allowed to change. See db.py for why it is one
-# file and why that file is here rather than on the share: /srv/movies is
-# mounted read-only, so the share is somewhere this daemon can read and never
-# somewhere it can remember.
+# file and why that file is not on the share: /srv/movies is mounted read-only,
+# so the share is somewhere this daemon can read and never somewhere it can
+# remember.
 #
-# /var/lib rather than /var/cache, and the distinction is the point: a cache is
-# something you may delete, and deleting this loses every title anybody
-# corrected. systemd makes the directory through StateDirectory= in the unit.
-DB_PATH = _get("database", "path", "/var/lib/playstick/playstick.db")
+# On the device this is /var/lib/playstick/playstick.db, rendered into the
+# settings file like every other value. /var/lib rather than /var/cache, and
+# the distinction is the point: a cache is something you may delete, and
+# deleting this loses every title anybody corrected. systemd makes the
+# directory through StateDirectory= in the unit.
+#
+# THE DEFAULT BELOW IS NOT THAT PATH, for the same reason PORT's default is not
+# 80. A default is only ever reached with no settings file at all -- i.e. by a
+# developer running src/server/playstick-web.py by hand as themselves -- and
+# /var/lib/playstick is not writable by that person, so the daemon would fail
+# in makedirs before printing anything useful. The appliance and the dev
+# container both name the path explicitly and never see this.
+def _default_db():
+    base = (os.environ.get("XDG_STATE_HOME")
+            or os.path.join(os.path.expanduser("~"), ".local", "state"))
+    return os.path.join(base, "playstick", "playstick.db")
+
+
+DB_PATH = _get("database", "path", "") or _default_db()
 
 # Per-language audio for headphones, also from the prep tool.
 #

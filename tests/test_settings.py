@@ -132,5 +132,61 @@ class Accessors(unittest.TestCase):
         self.assertEqual([str(n) for n in nets], ["10.0.0.0/8", "127.0.0.1/32"])
 
 
+class TheHandRunDefaults(unittest.TestCase):
+    """`python3 src/server/playstick-web.py`, as yourself, with no settings
+    file anywhere. config.py's header promises this works and it is worth one
+    test, because everything about it is a default nothing else ever reaches --
+    the device and the dev container both name every value explicitly.
+
+    It has been broken once already. The database landed on /var/lib/playstick,
+    which is right for the appliance and not writable by the person running it
+    by hand, so the daemon died in makedirs before printing anything.
+    """
+
+    def test_the_port_is_not_the_privileged_one(self):
+        self.assertEqual(config.PORT, 8080)
+
+    def test_the_database_default_is_somewhere_a_person_can_write(self):
+        default = config._default_db()
+        self.assertFalse(default.startswith("/var/"), default)
+        self.assertTrue(default.endswith(".db"), default)
+        # Somewhere under the caller's own home, wherever that is on this
+        # machine -- not a fixed path that happens to work on one.
+        self.assertTrue(default.startswith(os.path.expanduser("~"))
+                        or default.startswith(
+                            os.environ.get("XDG_STATE_HOME", "\0")), default)
+
+    def test_the_directory_can_actually_be_created(self):
+        """The specific failure, rather than a claim about the string: makedirs
+        on the default has to succeed as the user running the tests."""
+        import shutil
+        os.environ["XDG_STATE_HOME"] = self.scratch
+        directory = os.path.dirname(config._default_db())
+        os.makedirs(directory, exist_ok=True)
+        self.assertTrue(os.path.isdir(directory))
+        shutil.rmtree(directory, ignore_errors=True)
+
+    def setUp(self):
+        self.scratch = tempfile.mkdtemp(prefix="playstick-state-")
+        self._had = os.environ.get("XDG_STATE_HOME")
+        self.addCleanup(__import__("shutil").rmtree, self.scratch, True)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._had is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = self._had
+
+    def test_an_explicit_setting_still_wins(self):
+        """The appliance renders [database] path like every other key, and that
+        has to beat the fallback above rather than being merged with it."""
+        config.SETTINGS.clear()
+        config.SETTINGS.update({"database": {"path": "/var/lib/playstick/x.db"}})
+        self.addCleanup(config.SETTINGS.clear)
+        self.assertEqual(config._get("database", "path", "") or config._default_db(),
+                         "/var/lib/playstick/x.db")
+
+
 if __name__ == "__main__":
     unittest.main()
