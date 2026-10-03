@@ -30,8 +30,10 @@ re-encoding a film because somebody switched the stick off, so it is recorded as
 prepared-but-not-pushed and `sync.push_pending` is the recovery.
 """
 
+import logging
 import os
 import shlex
+import time
 
 from .. import paths
 from . import catalog, nas_store, prepared, sync
@@ -39,6 +41,9 @@ from .device_client import DeviceError
 
 paths.ensure_prep_on_path()
 import playstick_prep as prep  # noqa: E402
+
+
+LOG = logging.getLogger(__name__)
 
 
 class PrepareError(Exception):
@@ -77,15 +82,22 @@ def prepare(db, item, settings, client=None, report=None):
     PrepareError with a sentence somebody can read on anything fatal.
     """
     def say(phase, text=""):
+        # Every phase goes to the terminal as well as to whoever is watching
+        # the tab. A queue left running overnight is the case this is for: the
+        # panel shows the film in front of it, the log shows the evening.
+        LOG.info("%s: %s%s", short, phase, (" -- " + text) if text else "")
         if report:
             report(phase, text)
 
     ident = item["id"]
+    short = item["title"] or item["rel"]
+    began = time.time()
     source_root = item["source_path"] or os.path.dirname(item["abs_path"])
-    staging = nas_store.staging_for(settings.staging_dir, ident)
     nas_root = settings.nas_root
+    staging = nas_store.staging_for(nas_root, ident)
     os.makedirs(staging, exist_ok=True)
 
+    LOG.info("preparing %s (%s) from %s", short, ident, item["abs_path"])
     if not os.path.isfile(item["abs_path"]):
         raise PrepareError("%s is not there any more." % item["abs_path"])
 
@@ -121,12 +133,29 @@ def prepare(db, item, settings, client=None, report=None):
     catalog.save_probe(db, ident, movie, fingerprint)
 
     # --- what it is called -------------------------------------------------
+    # An episode is named by its path, not by a search. Its row keeps its own
+    # title -- "Hospital", or "Episode 2" when the file says nothing more --
+    # and the series it belongs to, which is what folds it into one poster on
+    # the stick. The shelf key is the series', so the tile sits where the show
+    # would on a shelf rather than wherever its first episode's name falls.
+    episode = prep.episode_of(item["rel"])
+    if episode is not None:
+        movie["series"] = episode["series"]
+        movie["season"] = episode["season"]
+        movie["episode"] = episode["episode"]
+        movie["title"] = (episode["episode_title"]
+                          or "Episode %d" % episode["episode"])
+        movie["sort_title"] = prep.episode_sort_title(episode)
+
     overrides = prepared.overrides(db)
     # Read once before the lookup, because a pinned tmdb_id is what makes the
     # lookup skip its own search; and applied again afterwards, because a
     # hand-typed title has to win over whatever TMDb just said.
     prep.apply_overrides(movie, overrides)
-    tmdb = _tmdb(args)
+    # Not for an episode. The lookup searches FILMS, and an episode called
+    # "Hospital" is a confident match for a film called Hospital -- a wrong
+    # poster and a wrong plot, which is worse than a frame and no plot.
+    tmdb = _tmdb(args) if episode is None else None
     if tmdb is not None:
         say("matching", movie.get("title") or "")
         why, _ok = prep.match_tmdb(movie, tmdb, overrides, args)
@@ -156,21 +185,15 @@ def prepare(db, item, settings, client=None, report=None):
     if prep.place_media(movie, args, nas_root) is None:
         raise PrepareError("could not put the film on the share")
 
-    poster_bytes, poster_mime = nas_store.read_poster(settings.staging_dir, ident)
+    poster_bytes, poster_mime = nas_store.read_poster(nas_root, ident)
 
-    # --- across the mount --------------------------------------------------
+    # --- out of staging ---------------------------------------------------
     rels = nas_store.artifact_rels(movie)
     staged = [r for r in rels
               if os.path.isfile(os.path.join(staging, r.replace("/", os.sep)))]
-    needed = sum(os.path.getsize(os.path.join(staging, r.replace("/", os.sep)))
-                 for r in staged)
-    complaint = nas_store.check_space(nas_root, needed)
-    if complaint:
-        raise PrepareError(complaint)
-
     say("moving", "%d file(s) onto the share" % len(staged))
     try:
-        moved = nas_store.place(settings.staging_dir, nas_root, ident, rels,
+        moved = nas_store.place(nas_root, ident, rels,
                                 progress=lambda text: say("moving", text))
     except nas_store.NasError as exc:
         raise PrepareError(str(exc)) from exc
@@ -182,7 +205,7 @@ def prepare(db, item, settings, client=None, report=None):
                     poster=((poster_bytes, poster_mime,
                              movie.get("poster_source") or "prep")
                             if poster_bytes else None))
-    nas_store.discard_staging(settings.staging_dir, ident)
+    nas_store.discard_staging(nas_root, ident)
 
     # --- and only now does the stick hear about it -------------------------
     pushed, push_error = False, None
@@ -199,9 +222,26 @@ def prepare(db, item, settings, client=None, report=None):
         else:
             pushed = True
 
+    LOG.info("prepared %s in %.0fs: %s onto the share as %s%s",
+             movie.get("title") or short, time.time() - began, _bytes(moved),
+             movie["media_rel"],
+             ", on the stick" if pushed
+             else ", waiting for the stick" if push_error else "")
     return {"id": ident, "title": movie.get("title"), "bytes": moved,
             "pushed": pushed, "push_error": push_error,
             "media_rel": movie["media_rel"]}
+
+
+def _bytes(num):
+    """Sizes for the log. views.format.human_size does this for the window, and
+    core does not import views -- it is four lines and one direction of
+    dependency is worth more than sharing them."""
+    size = float(num or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return "%.1f %s" % (size, unit)
+        size /= 1024
+    return "%.1f GB" % size
 
 
 def refresh_metadata(db, ident, settings, client=None, report=None):
@@ -223,6 +263,8 @@ def refresh_metadata(db, ident, settings, client=None, report=None):
     row = prepared.get(db, ident)
     if row is None:
         raise PrepareError("%s is not in the library." % ident)
+    LOG.info("re-deriving the metadata for %s (%s), no ffmpeg",
+             row["title"], ident)
 
     movie = {
         "id": ident,
@@ -232,6 +274,8 @@ def refresh_metadata(db, ident, settings, client=None, report=None):
         "height": row["height"], "vcodec": row["vcodec"],
         "acodec": row["acodec"], "tmdb_id": row["tmdb_id"],
         "hidden": bool(row["hidden"]),
+        "series": row["series"], "season": row["season"],
+        "episode": row["episode"],
         "genres": prepared.children(db, ident)["genres"],
         "subtitles": [{"rel": s["rel"], "lang": s["lang"]}
                       for s in prepared.children(db, ident)["subtitles"]],
@@ -262,10 +306,13 @@ def remove(db, ident, settings, client=None):
     nas_store.orphans can find.
     """
     rels = prepared.artifact_rels(db, ident)
+    LOG.info("removing %s: %d file(s) on the share", ident, len(rels))
     if client is not None and settings.device_url:
         sync.remove_one(client, db, ident)
     removed, freed = nas_store.remove(settings.nas_root, rels)
     prepared.forget(db, ident)
     if catalog.get_item(db, ident) is not None:
         catalog.set_state(db, ident, catalog.AVAILABLE)
+    LOG.info("removed %s: %d file(s) deleted, %s freed", ident, removed,
+             _bytes(freed))
     return {"files": removed, "bytes": freed}

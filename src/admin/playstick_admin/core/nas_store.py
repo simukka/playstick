@@ -1,12 +1,17 @@
 """Putting a finished film onto the share, and taking one back off. Qt-free.
 
-WHY A FILM IS MADE SOMEWHERE ELSE FIRST
+WHERE A FILM IS MADE, AND WHY IT IS NOT A SETTING
 
-An encode is hours of small writes. The share is a CIFS mount over whatever
-wireless the house has, and it is the slow part of every operation in this app.
-So a preparation runs against a staging directory on local disk and only the
-finished artifacts cross the mount -- once each, sequentially, at whatever the
-link will do.
+A preparation runs in `<nas_root>/.playstick-staging/<id>/`, on the share
+itself, next to the films it reads. The raw films are already there, so making
+the encode anywhere else would only add a copy; and staging on the same
+filesystem makes the final move a rename.
+
+It is derived from nas_root rather than configured. A staging directory is
+cleared at every start, and it was once configurable: set to the share itself,
+the startup sweep walked /mnt/video and deleted every film folder in it. A
+dot folder of its own cannot be anybody's film collection, and the preparer's
+discovery skips dot folders, so a scan never offers what is half-made there.
 
 The staging layout is deliberately byte-identical to the share's. The preparer
 writes .playstick/media/<id>.mp4 relative to whatever output root it is given,
@@ -29,22 +34,21 @@ is written only after every move has succeeded, which means a crash in the
 middle leaves bytes on the share that nothing references -- wasted space, never
 a broken library, and never a film the stick has been told about but cannot
 play. `sweep_orphans` reclaims them, and it is the same walk a removal uses.
-
-FREE SPACE IS CHECKED BEFORE ANY OF IT STARTS
-
-ENOSPC six gigabytes into a copy over CIFS is a failure that costs an hour and
-leaves debris. It is also entirely predictable: the sizes are known before the
-first byte moves.
 """
 
 import errno
+import logging
 import os
+import re
 import shutil
+import time
 
 from .. import paths
 
 paths.ensure_prep_on_path()
 import playstick_prep as prep  # noqa: E402
+
+LOG = logging.getLogger(__name__)
 
 # The directories under the share that this app owns. Everything else there is
 # somebody's film collection and is never touched -- a sweep that walked the
@@ -56,11 +60,20 @@ class NasError(Exception):
     pass
 
 
-def staging_for(staging_root, ident):
+# Under the share, beside the films -- see the module docstring for why it is
+# derived here and nowhere else.
+STAGING_DIR = ".playstick-staging"
+
+
+def staging_root(nas_root):
+    return os.path.join(nas_root, STAGING_DIR)
+
+
+def staging_for(nas_root, ident):
     """Where one film is prepared. A directory per film rather than one shared
     tree, so that abandoning a job is `rmtree` on a path that belongs to nothing
     else."""
-    return os.path.join(staging_root, ident)
+    return os.path.join(staging_root(nas_root), ident)
 
 
 def artifact_rels(movie):
@@ -95,20 +108,7 @@ def _order(rels):
     return sorted(rels, key=lambda r: "/media/" in r)
 
 
-def check_space(nas_root, needed, margin=0.05):
-    """Refuse a move that obviously will not fit. Returns None or a sentence."""
-    try:
-        free = shutil.disk_usage(nas_root).free
-    except OSError as exc:
-        return "Could not check free space on %s: %s" % (nas_root, exc)
-    want = int(needed * (1 + margin))
-    if free >= want:
-        return None
-    return ("%s needs about %s free and has %s."
-            % (nas_root, prep.human_size(want), prep.human_size(free)))
-
-
-def place(staging_root, nas_root, ident, rels, progress=None):
+def place(nas_root, ident, rels, progress=None):
     """Move one film's artifacts onto the share. Returns the bytes moved.
 
     Raises NasError on the first failure, having cleaned up its own `.part`.
@@ -116,19 +116,25 @@ def place(staging_root, nas_root, ident, rels, progress=None):
     row yet, so they are orphans the sweep will find, and deleting them here
     would mean a retry re-copying what it had already got across.
     """
-    staging = staging_for(staging_root, ident)
+    staging = staging_for(nas_root, ident)
     moved = 0
     for rel in _order(rels):
         src = os.path.join(staging, rel.replace("/", os.sep))
         if not os.path.isfile(src):
             # Nothing to move: place_media() writes a film that needed no
-            # encode straight onto the share, because a copy has no reason to
-            # go via local disk first and would otherwise cost two.
+            # encode straight to where it belongs on the share.
             continue
         dest = os.path.join(nas_root, rel.replace("/", os.sep))
         if progress:
             progress("moving %s onto the share" % os.path.basename(rel))
-        moved += _move_one(src, dest)
+        started = time.monotonic()
+        size = _move_one(src, dest)
+        # A rename, normally. If this ever shows a copy's rate, staging and
+        # the share are not one filesystem any more and something has moved.
+        elapsed = max(time.monotonic() - started, 0.001)
+        LOG.info("moved %s onto the share: %.1f MB in %.1fs (%.1f MB/s)", rel,
+                 size / 1e6, elapsed, size / 1e6 / elapsed)
+        moved += size
     return moved
 
 
@@ -137,8 +143,8 @@ def _move_one(src, dest):
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     try:
         try:
-            # Free when staging and the share happen to be one filesystem,
-            # which is what somebody who staged onto the NAS deliberately gets.
+            # Free, since staging is on the share. The copy below is for a
+            # share whose .playstick is a different mount from its root.
             os.replace(src, part)
         except OSError as exc:
             if exc.errno != errno.EXDEV:
@@ -152,6 +158,7 @@ def _move_one(src, dest):
         size = os.path.getsize(part)
         os.replace(part, dest)
     except OSError as exc:
+        LOG.warning("could not put %s on the share: %s", dest, exc)
         _discard(part)
         raise NasError("could not put %s on the share: %s"
                        % (os.path.basename(dest), exc)) from exc
@@ -175,14 +182,18 @@ def remove(nas_root, rels):
     removed, freed = 0, 0
     for rel in rels:
         if not _is_owned(rel):
+            # Somebody's own film, lying where they put it. See the docstring.
+            LOG.debug("leaving %s alone: not this app's to delete", rel)
             continue
         path = os.path.join(nas_root, rel.replace("/", os.sep))
         try:
             freed += os.path.getsize(path)
             os.unlink(path)
             removed += 1
-        except OSError:
+        except OSError as exc:
+            LOG.debug("could not delete %s: %s", path, exc)
             continue
+        LOG.info("deleted %s from the share", rel)
     _prune_empty(nas_root)
     return removed, freed
 
@@ -243,7 +254,7 @@ def orphans(db, nas_root):
     return sorted(found)
 
 
-def discard_staging(staging_root, ident):
+def discard_staging(nas_root, ident):
     """Throw away one film's working directory.
 
     Only its own. A sweep of the whole staging root after a successful job
@@ -251,32 +262,43 @@ def discard_staging(staging_root, ident):
     waiting to be retried -- and those are the ones where an hour of libx264 is
     sitting on disk ready to be skipped.
     """
-    shutil.rmtree(staging_for(staging_root, ident), ignore_errors=True)
+    shutil.rmtree(staging_for(nas_root, ident), ignore_errors=True)
 
 
-def sweep_staging(staging_root, keep=()):
+# What staging_for() names a directory: a film id, sixteen hex characters.
+_STAGING_NAME = re.compile(r"^[0-9a-f]{16}$")
+
+
+def sweep_staging(nas_root, keep=()):
     """Clear the debris of a crash. `keep` is the ids still worth resuming.
 
     Nothing in staging is irreplaceable -- it is either half-made or already
-    copied somewhere that matters -- so this is safe to run at every start, and
-    that is when it runs.
+    moved somewhere that matters -- so this runs at every start. It takes the
+    share rather than a directory so that it can only ever look in
+    .playstick-staging, and even there it removes nothing but directories named
+    the way staging_for() names one.
     """
+    if not nas_root:
+        return 0
+    root = staging_root(nas_root)
     keep = set(keep)
     removed = 0
     try:
-        names = os.listdir(staging_root)
+        names = os.listdir(root)
     except OSError:
         return 0
     for name in names:
-        if name in keep:
+        if name in keep or not _STAGING_NAME.match(name):
             continue
-        path = os.path.join(staging_root, name)
+        path = os.path.join(root, name)
+        if os.path.islink(path) or not os.path.isdir(path):
+            continue
         shutil.rmtree(path, ignore_errors=True)
         removed += 1
     return removed
 
 
-def read_poster(staging_root, ident):
+def read_poster(nas_root, ident):
     """The poster the preparation made, as bytes, and its type.
 
     Read out of staging and never moved onto the share. The stick serves
@@ -284,7 +306,7 @@ def read_poster(staging_root, ident):
     JPEG on the share is tens of kilobytes nothing will read -- times a few
     hundred films.
     """
-    base = os.path.join(staging_for(staging_root, ident), prep.WORK_DIR,
+    base = os.path.join(staging_for(nas_root, ident), prep.WORK_DIR,
                         "posters")
     for name, mime in (("%s.jpg" % ident, "image/jpeg"),
                        ("%s.png" % ident, "image/png")):

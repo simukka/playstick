@@ -23,11 +23,13 @@ the whole reason the queue is persisted, and it is what makes a queue of twenty
 films something somebody will actually leave running.
 """
 
+import logging
 import time
 import traceback
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from . import lifetime
 from .. import paths
 from ..core import catalog, nas_store, pipeline, queue
 from ..core.device_client import DeviceClient
@@ -38,6 +40,8 @@ import playstick_prep as prep  # noqa: E402
 # How much of a job's log to keep. A failure is worth reading tomorrow; an
 # ffmpeg run that printed a warning per frame is not worth a megabyte a row.
 LOG_LIMIT = 64_000
+
+LOG = logging.getLogger(__name__)
 
 
 class QueueWorker(QObject):
@@ -59,6 +63,9 @@ class QueueWorker(QObject):
     # --- the loop ----------------------------------------------------------
 
     def run(self):
+        lifetime.name_thread("queue")
+        LOG.info("the queue is draining; %d film(s) waiting",
+                 len(queue.pending(self._db)))
         prep.reset_cancel()
         if self._settings.ffmpeg:
             prep.FFMPEG = self._settings.ffmpeg
@@ -75,9 +82,11 @@ class QueueWorker(QObject):
         except Exception:                       # pragma: no cover - defensive
             # A crash in the loop itself must not leave a job marked running
             # forever, and must not disappear into a dead thread.
+            LOG.exception("the queue loop stopped on an error")
             self.jobLog.emit(traceback.format_exc())
         finally:
             prep.set_reporter(None)
+            LOG.info("the queue is empty; nothing else is being prepared")
             self.queueChanged.emit()
             self.finished.emit()
 
@@ -92,6 +101,8 @@ class QueueWorker(QObject):
         if item is None:
             # The row went away between being queued and being reached -- a
             # source removed, most likely. Not worth stopping the queue for.
+            LOG.warning("job %s: %s is no longer in the catalogue",
+                        job["id"], job["item_id"])
             queue.finish(self._db, job["id"], catalog.MISSING,
                          error="the catalogue no longer has this film")
             self.jobFailed.emit({"item_id": job["item_id"], "title": title,
@@ -107,6 +118,8 @@ class QueueWorker(QObject):
         except pipeline.PrepareError as exc:
             self._fail(job, title, str(exc))
         except Exception as exc:                # pragma: no cover - defensive
+            LOG.exception("job %s (%s) stopped on an unexpected error",
+                          job["id"], title)
             self._log.append(traceback.format_exc())
             self._fail(job, title, repr(exc))
         else:
@@ -130,10 +143,12 @@ class QueueWorker(QObject):
         """Stop the film being worked on now, at the next point the preparer
         checks. Safe from any thread: it sets a flag and ends the current
         ffmpeg, which the run notices."""
+        LOG.info("cancelling the film being prepared now")
         prep.request_cancel()
 
     def stop(self):
         """Finish the current film and then stop. The queue keeps its place."""
+        LOG.info("stopping after this film")
         self._stopping = True
 
     # --- reporting ---------------------------------------------------------
@@ -144,6 +159,11 @@ class QueueWorker(QObject):
             self._append("[%s] %s" % (phase, text))
 
     def _on_prep_event(self, event):
+        # Deliberately NOT logged. prep.log already writes every one of these
+        # to stderr itself, on the same stream this app logs to, so logging
+        # them again would double every line of an encode -- and the ffmpeg
+        # progress line, which redraws itself in place, would be interleaved
+        # with its own copy.
         if event.get("event") == "log":
             self._append(event.get("text", ""))
 
@@ -170,6 +190,7 @@ def start(db, settings):
     worker.finished.connect(thread.quit)
     worker.finished.connect(worker.deleteLater)
     thread.finished.connect(thread.deleteLater)
+    lifetime.hold(worker, thread)
     return worker, thread
 
 
@@ -187,7 +208,9 @@ def recover(db, settings):
     """
     resumed = queue.reset_running(db)
     keep = {row["item_id"] for row in queue.pending(db)}
-    cleared = nas_store.sweep_staging(settings.staging_dir, keep)
+    cleared = nas_store.sweep_staging(settings.nas_root, keep)
+    LOG.info("recovered: %d job(s) put back, %d working director%s cleared",
+             resumed, cleared, "y" if cleared == 1 else "ies")
     if not resumed and not cleared:
         return None
     bits = []

@@ -14,6 +14,7 @@ grid in the other room never changes.
 
 import atexit
 import json
+import logging
 import os
 import shutil
 import sys
@@ -29,11 +30,14 @@ sys.path.insert(0, os.path.join(ROOT, "src", "prep"))
 
 from playstick_admin.core import catalog                    # noqa: E402
 from playstick_admin.core import device_library             # noqa: E402
+from playstick_admin.core import device_state                # noqa: E402
+from playstick_admin import log as log_setup                 # noqa: E402
 from playstick_admin.core import posters                    # noqa: E402
 from playstick_admin.core import prepared                   # noqa: E402
 from playstick_admin.core import sync                       # noqa: E402
 from playstick_admin.core.db import Database                # noqa: E402
 from playstick_admin.core.device_client import DeviceClient, DeviceError  # noqa: E402
+from playstick_admin.core import device_client               # noqa: E402
 import playstick_prep as prep                               # noqa: E402
 
 
@@ -443,6 +447,209 @@ class PosterCache(unittest.TestCase):
     def test_a_missing_cache_directory_is_not_an_error(self):
         """sweep runs on every reload, including the first one ever."""
         self.assertEqual(posters.sweep({"a"}), 0)
+
+
+class IsTheStickThere(unittest.TestCase):
+    """The shared verdict behind the indicator on the Library and Device tabs.
+
+    Worth testing without a display because the interesting part is not the
+    dot: it is which of several simultaneous truths gets said, and how long a
+    stale one is allowed to stand.
+    """
+
+    def setUp(self):
+        self.now = 1000.0
+        self.state = device_state.DeviceState(clock=lambda: self.now)
+        self.state.set_url("http://stick:8080")
+
+    def test_nothing_is_claimed_before_anything_has_been_asked(self):
+        """The window opens before the first poll answers. Green there would be
+        a guess, and red would send somebody to look at a working stick."""
+        colour, headline, _detail = self.state.describe()
+        self.assertEqual(self.state.state, device_state.UNKNOWN)
+        self.assertEqual(colour, "idle")
+        self.assertIn("Checking", headline)
+
+    def test_with_no_address_it_says_where_to_put_one(self):
+        state = device_state.DeviceState()
+        self.assertEqual(state.state, device_state.UNSET)
+        _colour, _headline, detail = state.describe()
+        self.assertIn("Settings", detail)
+
+    def test_a_failed_push_turns_it_red_without_waiting_for_a_poll(self):
+        """The whole reason every call reports its outcome. A poll four seconds
+        ago saying the stick was there does not survive a push that just failed
+        against it."""
+        self.state.reached()
+        self.assertEqual(self.state.state, device_state.ONLINE)
+        self.state.sync_begin("sending Ponyo")
+        self.state.sync_end("timed out")
+        self.assertEqual(self.state.state, device_state.OFFLINE)
+        self.assertIn("timed out", self.state.describe()[2])
+
+    def test_ending_a_sync_without_an_error_claims_nothing(self):
+        """For the caller that cannot tell -- a job that failed at some step
+        after the push. Silence is the honest answer; sync_done is the one that
+        says it worked."""
+        self.state.unreachable("refused")
+        self.state.sync_begin("a film")
+        self.state.sync_end()
+        self.assertEqual(self.state.state, device_state.OFFLINE)
+
+    def test_syncing_is_a_depth_so_the_first_finisher_does_not_clear_it(self):
+        """A queue pushing a film while somebody saves an edit is two writes
+        from two threads. A flag would go quiet on the first one and leave the
+        indicator claiming nothing was happening mid-upload."""
+        self.state.sync_begin("pushing Hook")
+        self.state.sync_begin("saving an edit")
+        self.state.sync_end()
+        self.assertTrue(self.state.syncing)
+        self.state.sync_end()
+        self.assertFalse(self.state.syncing)
+
+    def test_an_unbalanced_end_cannot_drive_it_negative(self):
+        """One stray end from a signal connected twice would otherwise make
+        every later sync invisible."""
+        self.state.sync_end()
+        self.state.sync_end()
+        self.state.sync_begin("a film")
+        self.assertTrue(self.state.syncing)
+
+    def test_a_sync_in_flight_is_what_the_headline_says(self):
+        """"Connected" and "sending Ponyo" are both true during a push, and only
+        one of them answers why the window is busy."""
+        self.state.reached()
+        self.state.sync_begin("sending Ponyo")
+        colour, headline, detail = self.state.describe()
+        self.assertEqual(colour, "busy")
+        self.assertIn("Syncing", headline)
+        self.assertIn("Ponyo", detail)
+
+    def test_progress_arriving_late_leaves_no_stale_line(self):
+        """A worker's progress signal can be queued behind its own done."""
+        self.state.sync_begin("sending Ponyo")
+        self.state.sync_end()
+        self.state.sync_say("uploading the poster...")
+        self.assertNotIn("poster", self.state.describe()[2])
+
+    def test_it_says_how_long_ago_it_last_answered(self):
+        """"Not answering" alone does not distinguish a stick switched off two
+        seconds ago from one that has been off since Tuesday."""
+        self.state.reached()
+        self.now += 3700
+        self.state.unreachable("timed out")
+        self.assertIn("1h 1m", self.state.describe()[2])
+
+    def test_a_fresh_answer_is_not_dated_and_an_old_one_is(self):
+        """"as of 4s ago" on every poll is noise. An hour old -- a laptop that
+        was shut with the window open -- is the difference between a fact and a
+        memory, and it is still green because nothing has said otherwise."""
+        self.state.reached()
+        self.assertEqual(self.state.describe()[2], "http://stick:8080")
+        self.now += 3700
+        colour, _headline, detail = self.state.describe()
+        self.assertEqual(colour, "ok")
+        self.assertIn("as of 1h 1m ago", detail)
+
+    def test_changing_the_address_drops_the_old_verdict(self):
+        """Green for four seconds after somebody points the app at a different
+        stick is a report on a machine they have stopped caring about."""
+        self.state.reached()
+        self.state.set_url("http://other:8080")
+        self.assertEqual(self.state.state, device_state.UNKNOWN)
+        self.assertIsNone(self.state.last_ok)
+
+    def test_the_same_address_again_is_not_a_change(self):
+        """refresh_url runs after every Settings dialog, including the ones
+        that changed something else."""
+        self.state.reached()
+        self.state.set_url("http://stick:8080/")      # a trailing slash is not
+        self.assertEqual(self.state.state, device_state.ONLINE)   # a new stick
+
+    def test_the_snapshot_moves_only_when_something_visible_does(self):
+        """What stops a poll every four seconds repainting two labels forever."""
+        self.state.reached()
+        before = self.state.snapshot()
+        self.now += 4
+        self.state.reached()
+        self.assertEqual(self.state.snapshot(), before)
+
+
+class WhatTheTerminalSees(unittest.TestCase):
+    """`make admin` prints what the app is doing. These cover the two parts of
+    that with a decision in them: which level, and what one line looks like."""
+
+    def test_the_default_is_the_running_commentary_and_not_the_firehose(self):
+        self.assertEqual(log_setup.level_from(["playstick-admin"], {}),
+                         logging.INFO)
+
+    def test_the_environment_turns_it_up(self):
+        """PLAYSTICK_ADMIN_LOG is the one that survives a desktop launcher,
+        where there is no command line to add a flag to."""
+        self.assertEqual(
+            log_setup.level_from(["x"], {"PLAYSTICK_ADMIN_LOG": "DEBUG"}),
+            logging.DEBUG)
+        self.assertEqual(
+            log_setup.level_from(["x"], {"PLAYSTICK_ADMIN_LOG": "quiet"}),
+            logging.WARNING)
+
+    def test_a_flag_beats_the_environment(self):
+        """-v is for one run, and a shell that exports debug everywhere should
+        not make it impossible to ask for less."""
+        env = {"PLAYSTICK_ADMIN_LOG": "quiet"}
+        self.assertEqual(log_setup.level_from(["x", "-v"], env), logging.DEBUG)
+
+    def test_nonsense_is_ignored_rather_than_fatal(self):
+        """A typo in an environment variable must not stop the app starting."""
+        self.assertEqual(
+            log_setup.level_from(["x"], {"PLAYSTICK_ADMIN_LOG": "loud"}),
+            logging.INFO)
+
+    def test_a_line_names_the_module_without_the_package_in_front(self):
+        """Every line would otherwise begin with the same eighteen characters."""
+        line = self._format("playstick_admin.core.nas_store", "moved it")
+        self.assertIn("nas_store: moved it", line)
+        self.assertNotIn("playstick_admin", line)
+
+    def test_a_line_from_a_worker_says_which_worker(self):
+        """The whole point of most of these lines is that they happened while
+        somebody was doing something else."""
+        self.assertIn("(queue)", self._format("playstick_admin.core.pipeline",
+                                              "encoding", thread="queue"))
+
+    def test_a_line_from_the_window_does_not(self):
+        self.assertNotIn("(", self._format("playstick_admin.app", "starting"))
+
+    @staticmethod
+    def _format(name, message, thread="MainThread"):
+        record = logging.LogRecord(name, logging.INFO, "f.py", 1, message,
+                                   (), None)
+        record.threadName = thread
+        return log_setup._Formatter(
+            "%(levelname)s %(where)s%(aside)s: %(message)s").format(record)
+
+
+class WhenTheStickAnswersWithAPage(unittest.TestCase):
+    """An error body is quoted in a log line, a status bar and a message box,
+    and none of those has room for a page of HTML."""
+
+    def test_a_short_message_is_left_exactly_as_it_is(self):
+        self.assertEqual(device_client.brief("no such film"), "no such film")
+
+    def test_a_page_becomes_one_line(self):
+        """Newlines collapse rather than being dropped: a paragraph break in
+        the middle of a log is worse than a run-on sentence."""
+        page = "<html>\n  <body>\n    <p>Error code: 501</p>\n  </body>\n</html>"
+        self.assertNotIn("\n", device_client.brief(page))
+        self.assertIn("Error code: 501", device_client.brief(page))
+
+    def test_a_long_one_is_cut_and_says_so(self):
+        out = device_client.brief("x" * 500)
+        self.assertEqual(len(out), device_client.DETAIL_LIMIT)
+        self.assertTrue(out.endswith("..."))
+
+    def test_nothing_at_all_is_not_an_error(self):
+        self.assertEqual(device_client.brief(None), "")
 
 
 if __name__ == "__main__":

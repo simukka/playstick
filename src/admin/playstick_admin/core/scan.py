@@ -19,16 +19,21 @@ It does not decide anything. Every file found is a row in `available`, which
 means "nobody has said anything about this". A collection of four thousand
 films produces four thousand such rows and no work at all.
 
-EPISODIC FILES ARE RECORDED RATHER THAN DROPPED
+EPISODES ARE OFFERED LIKE FILMS
 
-The preparer refuses television, and it is right to: a single season becomes 24
-near-identical tiles a child has to scroll past, and de-duplication starts
-treating the episodes as copies of each other. But "where did my box set go" is
-a real question, and a tab that had simply never mentioned the files cannot
-answer it. They are written as `excluded` with the reason, and the tab can show
-them on request.
+The preparer's command line still refuses television by default, and for the
+reason it gives: in a whole-library run a season becomes 24 near-identical tiles
+and de-duplication treats the episodes as copies of each other. Neither applies
+here. Nothing is prepared until somebody picks it, there is no de-duplication,
+and the stick folds every episode of a series into one poster -- so discovery is
+run with --allow-episodes, and an episode is an ordinary `available` row whose
+title says which one it is.
+
+Episodes an older scan wrote as `excluded` are brought back to `available` by
+the next one; see catalog.upsert_item.
 """
 
+import logging
 import os
 import shlex
 import time
@@ -39,6 +44,18 @@ from . import catalog, identity
 paths.ensure_prep_on_path()
 import playstick_prep as prep  # noqa: E402
 
+LOG = logging.getLogger(__name__)
+
+
+class WrongShare(Exception):
+    """nas_root is not the share this database's ids were named against.
+
+    Raised before anything is written. Scanning on would give every film on the
+    share a new id under the same (source, rel) -- which the UNIQUE constraint
+    turns into a crash half way through a source, and which would orphan every
+    poster, correction and resume position on the stick if it did not.
+    """
+
 
 def discovery_args(root, extra=""):
     """The preparer's own argument namespace, for discovery alone.
@@ -47,7 +64,8 @@ def discovery_args(root, extra=""):
     discovery flag reaches this without anybody remembering to add it -- and so
     that `prep_extra_args` means here exactly what it means everywhere else.
     """
-    argv = ["--library", root]
+    # First, so that an explicit flag in `extra` still has the last word.
+    argv = ["--library", root, "--allow-episodes"]
     if extra:
         argv += shlex.split(extra)
     return prep.parse_args(argv)
@@ -66,8 +84,16 @@ def scan_source(db, source, nas_root, extra="", progress=None):
     other three thousand gone.
     """
     def say(text):
+        # The same sentence to the tab and to the terminal. A scan of three
+        # mounts is the longest thing this app does that is not an encode, and
+        # the only sign of it used to be a label on a tab.
+        LOG.info("%s", text)
         if progress:
             progress(text)
+
+    problem = identity.guard_nas_root(db, nas_root)
+    if problem:
+        raise WrongShare(problem)
 
     root = source["path"]
     started = time.time()
@@ -80,12 +106,17 @@ def scan_source(db, source, nas_root, extra="", progress=None):
 
     say("scanning %s..." % root)
     args = discovery_args(root, extra)
+    episodic = []
     try:
-        found, episodic = prep.discover(root, args)
+        # The second list is what discovery skipped as television, which
+        # --allow-episodes leaves empty; the episodes are in the first.
+        found, _skipped = prep.discover(root, args)
     except OSError as exc:
         say("could not walk %s: %s" % (root, exc))
         return {"found": 0, "episodic": 0, "missing": 0, "error": str(exc)}
 
+    LOG.info("%s: the walk found %d file(s) in %.1fs; writing them down",
+             root, len(found), time.time() - started)
     conn = db.write()
     with conn:
         for path in found:
@@ -95,44 +126,48 @@ def scan_source(db, source, nas_root, extra="", progress=None):
                 stat = os.stat(path)
             except OSError:
                 continue           # vanished between the walk and the stat
+            episode = prep.episode_of(rel)
+            if episode is not None:
+                episodic.append(rel)
             catalog.upsert_item(
                 db, ident, source["id"], rel, os.path.realpath(path),
                 nas_rel=nas_rel, size=stat.st_size, mtime=stat.st_mtime,
-                title=prep.clean_title(os.path.basename(rel)),
+                title=(episode_label(episode) if episode
+                       else prep.clean_title(os.path.basename(rel))),
                 year=prep.year_from_path(rel), conn=conn)
-
-        for rel in episodic:
-            # discover() reports pruned season FOLDERS too, with a trailing
-            # separator. A directory is not an item -- there is nothing to
-            # prepare and nothing to give an id to -- so only the files are
-            # recorded, and the folder is left to the count.
-            if rel.endswith(os.sep) or rel.endswith("/"):
-                continue
-            path = os.path.join(root, rel)
-            ident, nas_rel = identity.film_id(nas_root, path)
-            catalog.upsert_item(
-                db, ident, source["id"], rel.replace(os.sep, "/"),
-                os.path.realpath(path), nas_rel=nas_rel,
-                title=prep.clean_title(os.path.basename(rel)),
-                state=catalog.EXCLUDED,
-                excluded_reason="episodic television", conn=conn)
 
     gone = catalog.mark_unseen_missing(db, source["id"], started)
     catalog.touch_scanned(db, source["id"])
-    say("%s: %d film(s), %d episodic, %d no longer there"
-        % (os.path.basename(root.rstrip(os.sep)) or root, len(found),
+    films = len(found) - len(episodic)
+    say("%s: %d film(s), %d episode(s), %d no longer there"
+        % (os.path.basename(root.rstrip(os.sep)) or root, films,
            len(episodic), gone))
-    return {"found": len(found), "episodic": len(episodic), "missing": gone}
+    return {"found": films, "episodic": len(episodic), "missing": gone}
+
+
+def episode_label(episode):
+    """What the Prepare tab calls an episode before anybody has prepared it:
+    "Bluey S01E02 Hospital". The SxxEyy form because it is what the files are
+    named with, so it is what somebody searching the tab will type."""
+    label = "%s S%02dE%02d" % (episode["series"], episode["season"],
+                               episode["episode"])
+    if episode["episode_title"]:
+        label += " " + episode["episode_title"]
+    return label
 
 
 def scan_all(db, nas_root, extra="", progress=None):
     """Every enabled source, in turn. Returns the summed totals."""
+    began = time.time()
     total = {"found": 0, "episodic": 0, "missing": 0, "sources": 0}
     for source in catalog.sources(db, enabled_only=True):
         result = scan_source(db, source, nas_root, extra, progress)
         for key in ("found", "episodic", "missing"):
             total[key] += result.get(key, 0)
         total["sources"] += 1
+    LOG.info("scanned %d source(s) in %.1fs: %d film(s), %d episodic, "
+             "%d no longer there", total["sources"], time.time() - began,
+             total["found"], total["episodic"], total["missing"])
     return total
 
 

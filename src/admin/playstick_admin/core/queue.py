@@ -29,6 +29,7 @@ rather than a rule somebody has to remember: it takes the next waiting job and
 marks it running in one statement, and refuses if anything is already running.
 """
 
+import logging
 import time
 
 WAITING = "queued"
@@ -40,6 +41,8 @@ CANCELLED = "cancelled"
 # What a job is while it still counts as work. Nothing outside this set is
 # looked at again unless somebody retries it.
 PENDING = (WAITING, RUNNING)
+
+LOG = logging.getLogger(__name__)
 
 
 def enqueue(db, ident):
@@ -61,6 +64,7 @@ def enqueue(db, ident):
             "INSERT INTO job (item_id, state, pos, queued_at) "
             "VALUES (?, ?, ?, ?)", (ident, WAITING, nxt, time.time()))
         conn.execute("UPDATE item SET state = 'queued' WHERE id = ?", (ident,))
+        LOG.info("queued %s as job %d, position %d", ident, cur.lastrowid, nxt)
         return cur.lastrowid
 
 
@@ -118,6 +122,10 @@ def finish(db, job_id, item_state, error=None, log=None):
         if row is not None:
             conn.execute("UPDATE item SET state = ? WHERE id = ?",
                          (item_state, row["item_id"]))
+    if error:
+        LOG.warning("job %s failed: %s", job_id, error)
+    else:
+        LOG.info("job %s is done (%s)", job_id, item_state)
 
 
 def reset_running(db):
@@ -138,6 +146,9 @@ def reset_running(db):
         conn.execute(
             "UPDATE item SET state = 'queued' WHERE id IN "
             "(SELECT item_id FROM job WHERE state = ?)", (WAITING,))
+    if cur.rowcount:
+        LOG.warning("%d job(s) were left running by a process that died; "
+                    "back on the queue", cur.rowcount)
     return cur.rowcount
 
 

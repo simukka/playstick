@@ -9,7 +9,7 @@ import { CLOCK, SYNC, TIMING } from "./config";
 import { ServerClock } from "./clock";
 import { FilmClock } from "./timecode";
 import { SyncController } from "./sync";
-import { LibraryModel } from "./library";
+import { LibraryModel, fullTitle } from "./library";
 import { ApiClient } from "./net";
 import { StatusPresenter } from "./presenter";
 import { LibraryView } from "./library-view";
@@ -20,6 +20,7 @@ import { Telemetry } from "./telemetry";
 import { SoundSheet } from "./sound-sheet";
 import { SubsSheet } from "./subs-sheet";
 import { FilterSheet } from "./filter-sheet";
+import { EpisodeSheet } from "./episode-sheet";
 import { SheetManager } from "./sheet";
 import { TimeDriver } from "./time-driver";
 import { Poller } from "./poller";
@@ -127,16 +128,33 @@ function boot(): void {
     },
   });
   const filterSheet = new FilterSheet(doc, model, () => libraryView.render());
+  const episodeSheet = new EpisodeSheet(doc, (id) => {
+    sheets.closeAll();
+    play(id);
+  });
   const sheets = new SheetManager(doc, {
     sound: soundSheet.root,
     subs: subsSheet.root,
     filter: filterSheet.root,
+    episodes: episodeSheet.root,
     onSoundOpen: () => soundSheet.paint(),
     onSubsOpen: () => subsSheet.paint(),
     onFilterOpen: () => filterSheet.paint(),
+    onEpisodesOpen: () => episodeSheet.paint(),
   });
 
-  const libraryView = new LibraryView(doc, model, stamp, (id) => play(id), sheets.filterBtn);
+  // A tile is a film to play or a series to choose from. The model knows which,
+  // because it is what folded the episodes into the tile in the first place.
+  const openTile = (id: string): void => {
+    const show = model.show(id);
+    if (show) {
+      episodeSheet.load(show);
+      sheets.showEpisodes(true);
+    } else {
+      play(id);
+    }
+  };
+  const libraryView = new LibraryView(doc, model, stamp, openTile, sheets.filterBtn);
 
   // The one control that is not a playback button, so it is not the Controls'
   // business -- but it wants the same double-tap lock, for the same reason:
@@ -206,6 +224,7 @@ function boot(): void {
     soundSheet.root,
     subsSheet.root,
     filterSheet.root,
+    episodeSheet.root,
     libraryView.root,
     presenter.preparing.root,
     presenter.playing.root,
@@ -273,6 +292,19 @@ function boot(): void {
         if (sheets.filterOpen) {
           filterSheet.paint();
         }
+        // The open show, re-read from the library that just arrived: an
+        // episode prepared while the sheet was up appears in it, and a show
+        // with nothing left to offer closes rather than sitting there empty.
+        const current = episodeSheet.current;
+        if (sheets.episodesOpen && current) {
+          const fresh = model.show(current.id);
+          if (fresh) {
+            episodeSheet.load(fresh);
+            episodeSheet.paint();
+          } else {
+            sheets.showEpisodes(false);
+          }
+        }
         if (d.available === false) {
           libraryView.unavailable();
         }
@@ -289,7 +321,7 @@ function boot(): void {
     }
     // Drawn before the POST answers, with the poster the grid already has, so
     // the tap makes a picture of the right film immediately.
-    presenter.preparing.begin(item.title, id);
+    presenter.preparing.begin(fullTitle(item), id);
     presenter.views.show("preparing");
     void api
       .play(id)

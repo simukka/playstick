@@ -31,6 +31,7 @@ anything on the stick this database happens not to know about -- which is what
 `remove_one` exists for.
 """
 
+import logging
 import time
 
 from .. import paths
@@ -45,6 +46,8 @@ from .device_client import DeviceError  # noqa: E402
 # cannot be chunked, because reconcile deletes what a batch does not mention
 # and the last chunk would delete every earlier one.
 SYNC_MAX = 5000
+
+LOG = logging.getLogger(__name__)
 
 
 def film_payload(db, ident):
@@ -78,6 +81,9 @@ def film_payload(db, ident):
         "tmdb_id": row["tmdb_id"],
         "hidden": bool(row["hidden"]),
         "genres": kids["genres"],
+        "series": row["series"],
+        "season": row["season"],
+        "episode": row["episode"],
         "subtitles": kids["subtitles"],
         "audio": [{"n": t["n"], "rel": t["rel"], "lang": t["lang"],
                    "title": t["title"], "channels": t["channels"],
@@ -106,6 +112,8 @@ def push_one(client, db, ident, progress=None):
     is_new = row["pushed_at"] is None
 
     say("telling the stick about %s..." % payload["title"])
+    LOG.info("pushing %s (%s)%s", payload["title"], ident,
+             "" if is_new else ", which it has heard of before")
     client.sync_films([payload], reconcile=False)
 
     uploaded = _push_poster(client, db, ident, say, is_new)
@@ -142,6 +150,7 @@ def _push_poster(client, db, ident, say, is_new):
         if have.get(ident) == row["etag"]:
             return False
     say("uploading the poster...")
+    LOG.info("uploading the poster for %s: %d bytes", ident, len(row["bytes"]))
     client.put_thumb(ident, row["bytes"], row["mime"])
     return True
 
@@ -157,15 +166,18 @@ def push_pending(client, db, progress=None):
             progress(text)
 
     rows = prepared.unpushed(db)
+    LOG.info("%d film(s) prepared here and not yet on the stick", len(rows))
     sent, failed = [], []
     for number, row in enumerate(rows, 1):
         say("[%d/%d] %s" % (number, len(rows), row["title"]))
         try:
             push_one(client, db, row["item_id"])
         except DeviceError as exc:
+            LOG.warning("%s did not go: %s", row["title"], exc)
             failed.append((row["title"], str(exc)))
         else:
             sent.append(row["title"])
+    LOG.info("pushed %d film(s), %d did not go", len(sent), len(failed))
     return {"sent": len(sent), "failed": failed}
 
 
@@ -193,6 +205,8 @@ def push_all(client, db, reconcile=True, progress=None):
             "batch but the last." % (len(films), SYNC_MAX))
 
     say("sending %d film(s)..." % len(films))
+    LOG.info("re-sending the whole library: %d film(s), reconcile=%s",
+             len(films), bool(reconcile))
     result = client.sync_films(films, reconcile=reconcile)
 
     say("checking posters...")
@@ -210,6 +224,9 @@ def push_all(client, db, reconcile=True, progress=None):
             say("poster %d of %d" % (uploaded, len(ids)))
         prepared.mark_pushed(db, ident, now)
 
+    LOG.info("the stick wrote %s film(s) and removed %s; %d poster(s) "
+             "uploaded, %d already there", result.get("written", 0),
+             result.get("removed", 0), uploaded, skipped)
     return {"written": result.get("written", 0),
             "removed": result.get("removed", 0),
             "posters": uploaded, "skipped": skipped}
@@ -223,6 +240,7 @@ def remove_one(client, db, ident):
     a second admin machine's work, or anything synced before this database
     existed. That is a great deal of somebody's evening to lose to a tidy-up.
     """
+    LOG.info("asking the stick to forget %s", ident)
     client.delete_films([ident])
 
 
@@ -254,5 +272,9 @@ def pull_overrides(client, db):
         if all(before.get(k) == v for k, v in wanted.items()):
             continue
         prepared.set_override(db, ident, **wanted)
+        LOG.info("took %s's edits from the stick: %s", ident,
+                 ", ".join(sorted(wanted)))
         changed += 1
+    LOG.info("%d film(s) had edits on the stick this machine did not have",
+             changed)
     return changed

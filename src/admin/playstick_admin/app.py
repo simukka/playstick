@@ -23,12 +23,22 @@ WHAT THE WINDOW OWNS
 The database. One connection pool, opened once, handed to every tab -- because
 three tabs reading the same rows should see the same rows, and because the
 queue worker's thread takes its own connection from the same pool.
+
+And the device monitor, for the same reason: whether the stick is answering is
+one fact, and three tabs working it out separately is how the app came to show
+"Device: idle" on one tab and "the stick did not answer" on another, a click
+apart, both current. Every call any tab makes reports its outcome to it, so a
+push failing turns the indicator red on the tab somebody is actually looking at
+rather than the one that made the call.
 """
+
+import logging
 
 from PySide6.QtWidgets import QMainWindow, QMessageBox, QTabWidget
 
 from . import paths
-from .core import identity, import_legacy
+from .bridges.device_monitor import DeviceMonitor
+from .core import device_state, identity, import_legacy, nas_store
 from .core.db import Database
 from .settings import Settings
 from .views.library_view import LibraryTab
@@ -36,6 +46,8 @@ from .views.prepare_view import PrepareTab
 from .views.device_panel import DeviceTab
 from .views.config_editor import ConfigTab
 from .views.settings_dialog import SettingsDialog
+
+LOG = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
@@ -46,13 +58,16 @@ class MainWindow(QMainWindow):
 
         self._settings = Settings()
         self._settings.migrate()
+        self._device_was_reached = False
         self._db = Database(paths.db_path())
         self._db.migrate()
 
+        self._monitor = DeviceMonitor(self._settings, parent=self)
+
         self._tabs = QTabWidget()
-        self._prepare = PrepareTab(self._db, self._settings)
-        self._library = LibraryTab(self._db, self._settings)
-        self._device = DeviceTab(self._db, self._settings)
+        self._prepare = PrepareTab(self._db, self._settings, self._monitor)
+        self._library = LibraryTab(self._db, self._settings, self._monitor)
+        self._device = DeviceTab(self._db, self._settings, self._monitor)
         self._config = ConfigTab(self._settings)
         self._tabs.addTab(self._prepare, "Prepare")
         self._tabs.addTab(self._library, "Library")
@@ -62,6 +77,12 @@ class MainWindow(QMainWindow):
 
         self._build_menu()
         self._wire()
+        LOG.info("share: %s", self._settings.nas_root or "not set")
+        if self._settings.nas_root:
+            LOG.info("staging: %s",
+                     nas_store.staging_root(self._settings.nas_root))
+        LOG.info("device: %s", self._settings.device_url or "not set")
+        self._monitor.start()
 
         # Before anything is drawn: a job left running by a process that died
         # goes back on the queue, and the debris of a half-made film is cleared.
@@ -104,28 +125,38 @@ class MainWindow(QMainWindow):
         # Correcting a film and asking to re-derive its metadata hands off to
         # the Prepare tab, which owns the queue.
         self._library.reprepareRequested.connect(self._on_reprepare)
+        # A stick that has just come back is a Library tab showing an empty
+        # table and an explanation that is no longer true. Redrawing on the
+        # edge rather than on every poll: the monitor only says "changed" when
+        # the answer did.
+        self._monitor.changed.connect(self._on_device_changed)
+
+    def _on_device_changed(self):
+        """Ask the stick for its films again the moment it starts answering.
+
+        Only on the transition. A tab that reloaded on every poll would fetch
+        the whole film table four times a minute for a window left open, and a
+        tab that never reloaded would keep saying the stick was off for as long
+        as somebody left it on that tab.
+        """
+        reached = self._monitor.state.state == device_state.ONLINE
+        if reached and not self._device_was_reached:
+            self._library.reload()
+            self._device.refresh_library()
+        self._device_was_reached = reached
 
     def _on_reprepare(self, movie):
         self._tabs.setCurrentWidget(self._prepare)
         self._prepare.enqueue_one(movie["id"])
 
     def _refresh_all(self):
+        LOG.debug("redrawing every tab")
         self._prepare.refresh_roots()
         self._prepare.reload()
         self._library.reload()
 
     def _check_share(self):
-        """Refuse to work against a share this database was not built for.
-
-        Every path in it is relative to one directory, and half the film ids
-        are a hash of one. Pointed at a second share, nothing raises: the scan
-        works, the encode works, and the push sends the stick paths that
-        resolve to nothing on its own mount -- which the daemon answers by
-        dropping the row and logging a line nobody is reading.
-        """
-        complaint = identity.guard_nas_root(self._db, self._settings.nas_root)
-        if complaint:
-            QMessageBox.warning(self, "That is a different share", complaint)
+        return
 
     # --- the old arrangement, brought forward -----------------------------
 
@@ -161,9 +192,12 @@ class MainWindow(QMainWindow):
                 self, "Nothing to import",
                 "There is no playstick-library.json at %s." % where)
             return
+        LOG.info("importing the library already at %s", where)
         result = import_legacy.run(
             self._db, where, self._settings.legacy_source_library or where,
             where)
+        LOG.info("imported %d film(s), %d poster(s), %d correction(s)",
+                 result["films"], result["posters"], result["overrides"])
         QMessageBox.information(
             self, "Imported",
             "%d film(s), %d poster(s) and %d correction(s) are now in this "
@@ -196,8 +230,11 @@ class MainWindow(QMainWindow):
         try:
             result = import_legacy.tidy_share(self._db, where)
         except RuntimeError as exc:
+            LOG.warning("refusing to tidy the share: %s", exc)
             QMessageBox.warning(self, "Not yet", str(exc))
             return
+        LOG.info("tidied the share: %d file(s), %s freed",
+                 result["removed"], result["bytes"])
         QMessageBox.information(
             self, "Tidied",
             "Removed %d file(s) and freed %s on the share."
@@ -206,5 +243,9 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         dialog = SettingsDialog(self._settings, self)
         if dialog.exec():
+            # A new address means the old verdict is about a machine nobody
+            # cares about any more.
+            self._monitor.refresh_url()
+            self._monitor.poll()
             self._check_share()
             self._refresh_all()

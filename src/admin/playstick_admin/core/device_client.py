@@ -3,12 +3,48 @@
 Standard library only, to match the rest of the project. Every call is bounded
 by a timeout and raises DeviceError on anything other than a clean response, so
 the UI can show "the stick is not answering" instead of hanging.
+
+EVERY CALL IS LOGGED HERE, AND ONLY HERE
+
+This is the one place all traffic to the stick passes through, so it is the one
+place worth instrumenting: a read at DEBUG, a write at INFO, and a failure at
+WARNING with the reason and how long it waited. Anything above this that logged
+as well would produce two lines per request that agree until somebody changes
+one of them.
+
+The reads are at DEBUG because the poll is a read every few seconds and would
+otherwise be the whole log. The writes are at INFO because there are not many
+of them and each one changes what a child sees on the grid.
 """
 
 import json
+import logging
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+LOG = logging.getLogger(__name__)
+
+# Requests that change something on the stick. Worth a line each; the rest are
+# the app asking questions and are only interesting when something is wrong.
+WRITES = ("POST", "PUT", "DELETE")
+
+# How much of an error body to carry. The daemon answers a bad request with a
+# sentence, but anything else in the way -- a proxy, a captive portal, or
+# http.server itself on an unsupported method -- answers with a page of HTML.
+# That page ends up in a log line, in a status bar, and in a message box, none
+# of which have room for it, and the one useful word is in the first hundred
+# characters.
+DETAIL_LIMIT = 200
+
+
+def brief(text, limit=DETAIL_LIMIT):
+    """One line of it, at most. Newlines collapse rather than being dropped, so
+    an HTML page becomes a run-on sentence instead of a paragraph break in the
+    middle of a log."""
+    flat = " ".join((text or "").split())
+    return flat if len(flat) <= limit else flat[:limit - 3] + "..."
 
 
 class DeviceError(Exception):
@@ -44,6 +80,8 @@ class DeviceClient:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        sent = len(data) if data else 0
+        started = time.monotonic()
         try:
             with urllib.request.urlopen(
                     req, timeout=timeout or self.timeout) as resp:
@@ -54,10 +92,18 @@ class DeviceClient:
                 detail = exc.read().decode("utf-8", "replace")
             except OSError:
                 pass
+            LOG.warning("%s %s -> HTTP %s after %.1fs %s", method, path,
+                        exc.code, time.monotonic() - started, brief(detail))
             raise DeviceError("%s %s: HTTP %s %s"
-                              % (method, path, exc.code, detail.strip())) from exc
+                              % (method, path, exc.code, brief(detail))) from exc
         except (urllib.error.URLError, OSError) as exc:
+            LOG.warning("%s %s did not answer after %.1fs: %s", method, path,
+                        time.monotonic() - started, exc)
             raise DeviceError("%s %s: %s" % (method, path, exc)) from exc
+        LOG.log(logging.INFO if method in WRITES else logging.DEBUG,
+                "%s %s -> %d bytes in %.1fs%s", method, path, len(answer),
+                time.monotonic() - started,
+                " (sent %d)" % sent if sent else "")
         if not answer:
             return {}
         try:
@@ -169,12 +215,17 @@ class DeviceClient:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 kind = (resp.headers.get("Content-Type") or "").lower()
                 if "svg" in kind:
+                    LOG.debug("GET /api/thumb/%s -> the placeholder", film_id)
                     return b""
-                return resp.read()
-        except urllib.error.HTTPError:
+                data = resp.read()
+        except urllib.error.HTTPError as exc:
+            LOG.debug("GET /api/thumb/%s -> HTTP %s", film_id, exc.code)
             return b""
         except (urllib.error.URLError, OSError) as exc:
+            LOG.warning("GET /api/thumb/%s did not answer: %s", film_id, exc)
             raise DeviceError("GET /api/thumb/%s: %s" % (film_id, exc)) from exc
+        LOG.debug("GET /api/thumb/%s -> %d bytes", film_id, len(data))
+        return data
 
     def clear_thumb(self, film_id):
         """Forget a poster, so the device extracts a frame instead. The way to

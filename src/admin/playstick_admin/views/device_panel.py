@@ -1,8 +1,5 @@
 """The Device tab: what the stick is doing, and giving it its library.
 
-Status is polled on a timer; every call runs on a worker thread so an
-unreachable stick shows "offline" instead of freezing the window.
-
 THIS TAB IS NOT HOW FILMS GET ONTO THE DEVICE ANY MORE. It was, briefly: the
 preparer worked a whole library and this carried the result over in one press.
 Films now reach the stick one at a time, as each preparation finishes, from the
@@ -21,6 +18,17 @@ that this machine does not know about -- another admin machine's work, or
 anything synced before this database existed. That is the right thing after a
 rebuild and the wrong thing at almost any other moment, so it asks first.
 
+WHERE THE POLL WENT
+
+This tab used to own a timer and ask the stick how it was every four seconds,
+and keep the answer. It does not any more: the DeviceMonitor polls, and this is
+one of the things listening. Whether the stick answered is not a fact about
+this tab -- the Library tab needs it to explain an empty table, and a push needs
+it to explain itself -- so it is shown by the same indicator in both places.
+
+What this tab still wants from a poll is the part only a remote control cares
+about: what is playing, how loud, and whether the lamp is on.
+
 There was a second metadata editor here, a combo box and six fields writing to
 /api/admin/item. It is gone. The Library tab edits the device directly now --
 with the plot, the TMDb search and a real per-field reset, none of which the
@@ -29,10 +37,11 @@ differing in what they could express and in which of them somebody remembered
 to change.
 """
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
+from .device_status_bar import DeviceStatusBar
 from ..core import prepared, sync
 from ..core.device_client import DeviceClient
 from ..bridges import net_worker
@@ -43,15 +52,14 @@ class DeviceTab(QWidget):
     # its films and posters from the device -- is out of date.
     libraryChanged = Signal()
 
-    def __init__(self, db, settings, parent=None):
+    def __init__(self, db, settings, monitor, parent=None):
         super().__init__(parent)
         self._db = db
         self._settings = settings
+        self._monitor = monitor
         self._threads = set()
         self._build()
-        self._timer = QTimer(self)
-        self._timer.setInterval(4000)
-        self._timer.timeout.connect(self._poll_status)
+        monitor.status.connect(self._on_status)
 
     def _client(self):
         return DeviceClient(self._settings.device_url)
@@ -59,9 +67,10 @@ class DeviceTab(QWidget):
     def _build(self):
         outer = QVBoxLayout(self)
 
-        self._status = QLabel("Device: unknown")
-        self._status.setStyleSheet("font-weight: bold;")
-        outer.addWidget(self._status)
+        outer.addWidget(DeviceStatusBar(self._monitor))
+
+        self._playing = QLabel("")
+        outer.addWidget(self._playing)
 
         self._detail = QLabel("")
         self._detail.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -82,7 +91,8 @@ class DeviceTab(QWidget):
         ]
         for i, (label, fn) in enumerate(buttons):
             btn = QPushButton(label)
-            btn.clicked.connect(lambda _=False, f=fn: self._do(f))
+            btn.clicked.connect(
+                lambda _=False, f=fn, name=label: self._do(f, label=name.lower()))
             grid.addWidget(btn, i // 3, i % 3)
         outer.addWidget(controls)
 
@@ -130,14 +140,15 @@ class DeviceTab(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # Faster polling while the remote control is the thing on screen: a
+        # four-second-old "paused" is wrong in a way somebody's finger notices.
+        self._monitor.set_active(True)
         if self._settings.device_url:
-            self._poll_status()
             self.refresh_library()
-            self._timer.start()
 
     def hideEvent(self, event):
         super().hideEvent(event)
-        self._timer.stop()
+        self._monitor.set_active(False)
 
     # --- helpers -----------------------------------------------------------
 
@@ -145,24 +156,31 @@ class DeviceTab(QWidget):
         self._threads.add(thread)
         thread.finished.connect(lambda: self._threads.discard(thread))
 
-    def _do(self, fn, on_ok=None):
+    def _do(self, fn, on_ok=None, label="device"):
+        """One device call on a worker thread, its outcome reported to the
+        indicator either way.
+
+        Reads and remote-control presses are not syncs -- nothing is being
+        written to the stick's library -- but whether they got through is the
+        same evidence a sync gives, and the freshest there is.
+        """
         if not self._settings.device_url:
             QMessageBox.information(self, "No device", "Set the device URL first.")
             return
-        job, thread = net_worker.call(fn)
+        job, thread = net_worker.call(fn, label=label)
+        job.done.connect(lambda _result: self._monitor.note_reached())
         if on_ok:
             job.done.connect(on_ok)
-        job.failed.connect(lambda msg: self._status.setText("Device: offline (%s)" % msg))
+        job.failed.connect(self._monitor.note_unreachable)
         self._track(thread)
         thread.start()
 
-    def _poll_status(self):
-        self._do(lambda: self._client().status(), self._on_status)
-
     def _on_status(self, status):
+        """What the remote control needs out of a poll. Whether the poll
+        answered at all is the monitor's business, and the indicator's."""
         state = status.get("state", "?")
         title = status.get("title") or ""
-        self._status.setText("Device: %s %s" % (state, ("- " + title) if title else ""))
+        self._playing.setText("%s%s" % (state, (" -- " + title) if title else ""))
         bits = []
         if status.get("duration"):
             bits.append("dur %ss" % int(status.get("duration") or 0))
@@ -182,7 +200,8 @@ class DeviceTab(QWidget):
         and an edit saved in the Library tab both change it."""
         if not self._settings.device_url:
             return
-        self._do(lambda: self._client().admin_library(), self._on_library)
+        self._do(lambda: self._client().admin_library(), self._on_library,
+                 label="device-library")
 
     def _on_library(self, reply):
         films = reply.get("films") or []
@@ -211,8 +230,10 @@ class DeviceTab(QWidget):
         if not self._require_device():
             return
         self._push_btn.setEnabled(False)
+        self._monitor.sync_begin("sending the films that were waiting")
 
         def done(result):
+            self._monitor.sync_done()
             self._push_btn.setEnabled(True)
             text = "Sent %d film(s)." % result["sent"]
             if result["failed"]:
@@ -222,13 +243,18 @@ class DeviceTab(QWidget):
             self.refresh_library()
             self.libraryChanged.emit()
 
+        def failed(msg):
+            self._monitor.sync_end(msg)
+            self._push_btn.setEnabled(True)
+            self._library_status.setText("Could not push: %s" % msg)
+
         job, thread = net_worker.call_with_progress(
-            lambda say: sync.push_pending(self._client(), self._db, say))
+            lambda say: sync.push_pending(self._client(), self._db, say),
+            label="push-pending")
         job.done.connect(done)
-        job.failed.connect(lambda msg: (
-            self._push_btn.setEnabled(True),
-            self._library_status.setText("Could not push: %s" % msg)))
+        job.failed.connect(failed)
         job.progress.connect(self._library_status.setText)
+        job.progress.connect(self._monitor.sync_say)
         self._track(thread)
         thread.start()
 
@@ -253,8 +279,10 @@ class DeviceTab(QWidget):
             return
         self._sync_btn.setEnabled(False)
         self._library_status.setText("Re-sending...")
+        self._monitor.sync_begin("re-sending the whole library")
 
         def done(result):
+            self._monitor.sync_done()
             self._sync_btn.setEnabled(True)
             self._library_status.setText(
                 "Sent %d film(s)%s. %d poster(s) uploaded, %d already there."
@@ -265,15 +293,17 @@ class DeviceTab(QWidget):
             self.libraryChanged.emit()
 
         def failed(msg):
+            self._monitor.sync_end(msg)
             self._sync_btn.setEnabled(True)
             self._library_status.setText("Could not re-send: %s" % msg)
 
         job, thread = net_worker.call_with_progress(
             lambda say: sync.push_all(self._client(), self._db, reconcile=True,
-                                      progress=say))
+                                      progress=say), label="push-all")
         job.done.connect(done)
         job.failed.connect(failed)
         job.progress.connect(self._library_status.setText)
+        job.progress.connect(self._monitor.sync_say)
         self._track(thread)
         thread.start()
 
@@ -284,6 +314,24 @@ class DeviceTab(QWidget):
         return False
 
     def _pull_overrides(self):
-        self._do(lambda: sync.pull_overrides(self._client(), self._db),
-                 lambda changed: self._library_status.setText(
-                     "Took %d edit(s) from the stick." % changed))
+        """Reading the stick's edits, which is a read -- but it is one somebody
+        pressed a button for and waits on, so it is worth showing as traffic."""
+        if not self._require_device():
+            return
+        self._monitor.sync_begin("reading the stick's edits")
+        job, thread = net_worker.call(
+            lambda: sync.pull_overrides(self._client(), self._db),
+            label="pull-edits")
+
+        def done(changed):
+            self._monitor.sync_done()
+            self._library_status.setText("Took %d edit(s) from the stick." % changed)
+
+        def failed(msg):
+            self._monitor.sync_end(msg)
+            self._library_status.setText("Could not read the edits: %s" % msg)
+
+        job.done.connect(done)
+        job.failed.connect(failed)
+        self._track(thread)
+        thread.start()

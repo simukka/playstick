@@ -222,6 +222,38 @@ class Syncing(AdminTest):
         self.assertEqual(resp.status, 400)
 
 
+class Episodes(AdminTest):
+    """A series is many rows on the device and one tile on the phone. The page
+    folds them; what it needs from here is the three fields, intact."""
+
+    def test_an_episode_reaches_the_grid_with_its_place_in_the_series(self):
+        self.sync([entry(FILM, rel="Bluey/S01E02.mkv", title="Hospital",
+                         series="Bluey", season=1, episode=2),
+                   entry(OTHER, rel="Ponyo/Ponyo.mkv")])
+        by_id = {i["id"]: i for i in
+                 self.assertJson(self.fetch("/api/library"))["items"]}
+        self.assertEqual(
+            (by_id[FILM]["series"], by_id[FILM]["season"],
+             by_id[FILM]["episode"]), ("Bluey", 1, 2))
+        # A film says nothing about series at all, which is what an older
+        # page has always been sent.
+        self.assertNotIn("series", by_id[OTHER])
+
+    def test_an_episode_with_no_usable_numbers_is_a_film(self):
+        """The picker has nowhere to put an episode of no season, so half an
+        episode is synced as a whole film rather than as a broken one."""
+        self.sync([entry(FILM, series="Bluey", season="first", episode=2)])
+        item = self.assertJson(self.fetch("/api/library"))["items"][0]
+        self.assertNotIn("series", item)
+        self.assertIsNone(self.real_library.rows()[0]["series"])
+
+    def test_the_playing_screen_names_the_series(self):
+        self.sync([entry(FILM, rel="Bluey/S01E02.mkv", title="Hospital",
+                         series="Bluey", season=1, episode=2)])
+        self.assertEqual(self.real_library.get(FILM)["full_title"],
+                         "Bluey S1 E2 · Hospital")
+
+
 class RemovingOneFilm(AdminTest):
     """POST /api/admin/films/delete, and why it is not reconcile.
 

@@ -12,10 +12,13 @@ not currently mounted is skipped rather than being an error -- an external drive
 that is unplugged is an ordinary Tuesday.
 """
 
+import logging
 import os
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtCore import QFileSystemWatcher
+
+LOG = logging.getLogger(__name__)
 
 # A ceiling on how deep to watch, so pointing at a huge tree does not add tens of
 # thousands of watches. The preparer only descends a few levels anyway.
@@ -41,6 +44,10 @@ class LibraryWatcher(QObject):
         for root in self._roots:
             if os.path.isdir(root):
                 self._add_tree(root)
+        LOG.debug("watching %d director%s under %d source(s)",
+                  len(self._watcher.directories()),
+                  "y" if len(self._watcher.directories()) == 1 else "ies",
+                  len(self._roots))
 
     def _clear(self):
         dirs = self._watcher.directories()
@@ -59,7 +66,8 @@ class LibraryWatcher(QObject):
         if paths:
             self._watcher.addPaths(paths)
 
-    def _on_dir_changed(self, _path):
+    def _on_dir_changed(self, path):
+        LOG.debug("%s changed; a re-scan is queued", path)
         # A directory changing may mean a new sub-directory to watch. Re-add the
         # tree (addPaths ignores ones already watched) and debounce the re-scan.
         for root in self._roots:

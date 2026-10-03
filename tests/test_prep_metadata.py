@@ -460,3 +460,45 @@ class StateCache(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EpisodeOf(unittest.TestCase):
+    """Which series, season and episode a path is. The stick folds a series
+    into one poster on these three, so a wrong one is an episode filed under
+    the wrong show, or a film hidden inside somebody's box set."""
+
+    def test_the_shapes_episodes_are_named_in(self):
+        cases = {
+            "Bluey/Bluey.S01E02.Hospital.1080p.WEB-DL.mkv":
+                ("Bluey", 1, 2, "Hospital"),
+            "Friends/friends.1x02.the.one.mkv": ("Friends", 1, 2, "The One"),
+            "TV/Detectorists/Series 2/03.mkv": ("Detectorists", 2, 3, ""),
+            "The Expanse (2015)/Season 01/The Expanse - S01E01 - Dulcinea.mkv":
+                ("The Expanse", 1, 1, "Dulcinea"),
+            "Show/Specials/E01 Christmas.mkv": ("Show", 0, 1, "Christmas"),
+            "Doctor.Who.2005.S03E07.mkv": ("Doctor Who", 3, 7, ""),
+        }
+        for rel, want in cases.items():
+            with self.subTest(rel=rel):
+                got = prep.episode_of(rel)
+                self.assertEqual((got["series"], got["season"], got["episode"],
+                                  got["episode_title"]), want)
+
+    def test_films_are_not_episodes(self):
+        for rel in ("Movies/Die Hard (1988).mkv", "1920x1080 test.mkv",
+                    "Star Wars Episode 1 The Phantom Menace.mkv",
+                    "12x12 A Cabin Story (2020).mkv"):
+            with self.subTest(rel=rel):
+                self.assertIsNone(prep.episode_of(rel))
+
+    def test_an_episode_with_no_show_to_name_is_not_folded(self):
+        """A bare "s02e10.mkv" at the top of a source has no series to put it
+        in, and a tile called nothing is worse than the file as a film."""
+        self.assertIsNone(prep.episode_of("s02e10.mkv"))
+
+    def test_episodes_shelve_together_under_the_show(self):
+        keys = [prep.episode_sort_title(prep.episode_of(rel)) for rel in (
+            "The Expanse/S02E01.mkv", "The Expanse/S01E10.mkv",
+            "The Expanse/S01E02.mkv")]
+        self.assertEqual(sorted(keys), [keys[2], keys[1], keys[0]])
+        self.assertTrue(keys[0].startswith("expanse "))

@@ -40,12 +40,11 @@ class Fixture(unittest.TestCase):
         self.dir = self._tmp.name
         self.addCleanup(self._tmp.cleanup)
         self.nas = os.path.join(self.dir, "nas")
-        self.staging = os.path.join(self.dir, "staging")
         os.makedirs(self.nas)
-        os.makedirs(self.staging)
+        self.staging = nas_store.staging_root(self.nas)
 
     def staged(self, rel, body=b"x" * 64):
-        path = os.path.join(nas_store.staging_for(self.staging, FILM),
+        path = os.path.join(nas_store.staging_for(self.nas, FILM),
                             rel.replace("/", os.sep))
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as handle:
@@ -67,7 +66,7 @@ class WhatMoves(Fixture):
     def test_the_layout_on_the_share_matches_the_one_in_staging(self):
         for rel in self.rels():
             self.staged(rel)
-        moved = nas_store.place(self.staging, self.nas, FILM, self.rels())
+        moved = nas_store.place(self.nas, FILM, self.rels())
         self.assertEqual(moved, 64 * 3)
         for rel in self.rels():
             self.assertTrue(os.path.isfile(
@@ -78,7 +77,7 @@ class WhatMoves(Fixture):
         # mount with actimeo=60, and a wrong Content-Length is a phone that
         # stops halfway through a film.
         self.staged(MEDIA % FILM)
-        nas_store.place(self.staging, self.nas, FILM, [MEDIA % FILM])
+        nas_store.place(self.nas, FILM, [MEDIA % FILM])
         leftovers = []
         for dirpath, _d, files in os.walk(self.nas):
             leftovers += [f for f in files if f.endswith(".part")]
@@ -97,7 +96,7 @@ class WhatMoves(Fixture):
             return real(src, dest)
 
         with mock.patch.object(nas_store, "_move_one", spy):
-            nas_store.place(self.staging, self.nas, FILM, self.rels())
+            nas_store.place(self.nas, FILM, self.rels())
         self.assertTrue(order[-1].endswith(".mp4"),
                         "the film should be the last thing to cross")
 
@@ -105,7 +104,7 @@ class WhatMoves(Fixture):
         # place_media() writes a film that needed no encode straight onto the
         # share: a copy has no reason to go via local disk and would cost two.
         self.staged(SUB % FILM)
-        moved = nas_store.place(self.staging, self.nas, FILM,
+        moved = nas_store.place(self.nas, FILM,
                                 ["Hook (1991)/Hook.mkv", SUB % FILM])
         self.assertEqual(moved, 64)
 
@@ -123,7 +122,7 @@ class WhatMoves(Fixture):
             return real(src, dest)
 
         with mock.patch.object(os, "replace", cross_device):
-            nas_store.place(self.staging, self.nas, FILM, self.rels())
+            nas_store.place(self.nas, FILM, self.rels())
         for rel in self.rels():
             self.assertTrue(os.path.isfile(
                 os.path.join(self.nas, rel.replace("/", os.sep))), rel)
@@ -138,7 +137,7 @@ class AFailedMoveLeavesTheShareUsable(Fixture):
                     os, "replace",
                     side_effect=OSError(errno.EXDEV, "cross-device")):
                 with self.assertRaises(nas_store.NasError):
-                    nas_store.place(self.staging, self.nas, FILM,
+                    nas_store.place(self.nas, FILM,
                                     [MEDIA % FILM])
         self.assertFalse(os.path.exists(
             os.path.join(self.nas, (MEDIA % FILM).replace("/", os.sep)) + ".part"))
@@ -158,7 +157,7 @@ class AFailedMoveLeavesTheShareUsable(Fixture):
 
         with mock.patch.object(nas_store, "_move_one", fail_on_the_film):
             with self.assertRaises(nas_store.NasError):
-                nas_store.place(self.staging, self.nas, FILM, self.rels())
+                nas_store.place(self.nas, FILM, self.rels())
         self.assertTrue(os.path.isfile(
             os.path.join(self.nas, (SUB % FILM).replace("/", os.sep))))
 
@@ -238,28 +237,59 @@ class RemovalTouchesOnlyWhatPreparingMade(Fixture):
             os.path.join(self.nas, ".playstick", "audio", FILM)))
 
 
-class Space(Fixture):
-    def test_a_move_that_will_not_fit_is_refused_before_it_starts(self):
-        # ENOSPC six gigabytes into a copy over CIFS costs an hour and leaves
-        # debris, and it is entirely predictable.
-        self.assertIsNone(nas_store.check_space(self.nas, 1024))
-        complaint = nas_store.check_space(self.nas, 1 << 62)
-        self.assertIn("needs about", complaint)
-
-
 class Staging(Fixture):
     def test_the_debris_of_a_crash_is_cleared_but_a_resume_is_kept(self):
         self.staged(MEDIA % FILM)
         os.makedirs(os.path.join(self.staging, "b" * 16))
-        self.assertEqual(nas_store.sweep_staging(self.staging, keep=[FILM]), 1)
+        self.assertEqual(nas_store.sweep_staging(self.nas, keep=[FILM]), 1)
         self.assertTrue(os.path.isdir(
-            nas_store.staging_for(self.staging, FILM)))
+            nas_store.staging_for(self.nas, FILM)))
+
+    def test_staging_is_a_dot_folder_on_the_share_and_nowhere_else(self):
+        # It was once a setting, and set to the share itself the startup sweep
+        # deleted every film folder in it. Derived, it cannot be pointed
+        # anywhere a film collection lives.
+        self.assertEqual(self.staging, os.path.join(self.nas, ".playstick-staging"))
+        self.assertEqual(nas_store.staging_for(self.nas, FILM),
+                         os.path.join(self.staging, FILM))
+
+    def test_a_sweep_never_reaches_the_films_beside_it(self):
+        hook = os.path.join(self.nas, "Hook (1991)", "Hook.mkv")
+        os.makedirs(os.path.dirname(hook))
+        with open(hook, "wb") as handle:
+            handle.write(b"film")
+        # A film id as a folder name on the share proper, which staging must
+        # not mistake for its own.
+        lookalike = os.path.join(self.nas, "c" * 16, "film.mkv")
+        os.makedirs(os.path.dirname(lookalike))
+        with open(lookalike, "wb") as handle:
+            handle.write(b"film")
+        os.makedirs(os.path.join(self.staging, "b" * 16))
+        self.assertEqual(nas_store.sweep_staging(self.nas), 1)
+        self.assertTrue(os.path.isfile(hook))
+        self.assertTrue(os.path.isfile(lookalike))
+
+    def test_a_sweep_only_ever_removes_what_staging_itself_made(self):
+        # Even inside staging, only a directory named the way staging_for()
+        # names one -- never something somebody put there by hand.
+        os.makedirs(self.staging)
+        mine = os.path.join(self.staging, "Hook (1991)")
+        os.makedirs(mine)
+        with open(os.path.join(self.staging, "notes.txt"), "wb") as handle:
+            handle.write(b"x")
+        os.makedirs(os.path.join(self.staging, "b" * 16))
+        self.assertEqual(nas_store.sweep_staging(self.nas), 1)
+        self.assertTrue(os.path.isdir(mine))
+        self.assertTrue(os.path.isfile(os.path.join(self.staging, "notes.txt")))
+
+    def test_no_share_means_no_sweep(self):
+        self.assertEqual(nas_store.sweep_staging(""), 0)
 
     def test_the_poster_is_read_rather_than_moved(self):
         # The stick serves posters from its own database and has never opened
         # one off the mount.
         self.staged(".playstick/posters/%s.jpg" % FILM, body=b"jpegbytes")
-        data, mime = nas_store.read_poster(self.staging, FILM)
+        data, mime = nas_store.read_poster(self.nas, FILM)
         self.assertEqual(data, b"jpegbytes")
         self.assertEqual(mime, "image/jpeg")
 

@@ -40,18 +40,6 @@ def db_path():
             or os.path.join(state_dir(), "admin.db"))
 
 
-def default_staging():
-    """Where a film is prepared before it moves onto the share.
-
-    A cache and not state: everything in it is either half-made or already
-    copied somewhere that matters, and a cleaner deleting it costs at most one
-    encode. The queue survives in the database either way.
-    """
-    base = (os.environ.get("XDG_CACHE_HOME")
-            or os.path.join(os.path.expanduser("~"), ".cache"))
-    return os.path.join(base, "playstick-admin", "staging")
-
-
 def tmdb_cache_path():
     """The preparer's TMDb cache, here rather than on the share.
 

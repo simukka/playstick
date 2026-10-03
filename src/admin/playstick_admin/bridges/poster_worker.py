@@ -15,10 +15,15 @@ streams at all. Four parallel poster fetches would be this app deciding it
 matters more than whatever is on the projector.
 """
 
+import logging
+
 from PySide6.QtCore import QObject, QThread, Signal
 
+from . import lifetime
 from ..core import posters
 from ..core.device_client import DeviceError
+
+LOG = logging.getLogger(__name__)
 
 
 class PosterWorker(QObject):
@@ -35,20 +40,27 @@ class PosterWorker(QObject):
         self._stop = False
 
     def run(self):
+        lifetime.name_thread("posters")
+        LOG.debug("fetching %d poster(s) from the stick", len(self._wanted))
+        got = 0
         try:
             for film_id, etag in self._wanted:
                 if self._stop:
                     break
                 try:
                     path = posters.fetch(self._client, film_id, etag)
-                except DeviceError:
+                except DeviceError as exc:
                     # A stick that went away mid-fetch stops the run rather
                     # than producing one failure per remaining film. The rows
                     # keep whatever poster they already had.
+                    LOG.warning("stopped fetching posters after %d: %s",
+                                got, exc)
                     break
                 if path:
+                    got += 1
                     self.ready.emit(film_id, path)
         finally:
+            LOG.debug("%d poster(s) drawn", got)
             self.finished.emit()
 
     def stop(self):
@@ -67,4 +79,5 @@ def start(client, wanted):
     worker.finished.connect(thread.quit)
     worker.finished.connect(worker.deleteLater)
     thread.finished.connect(thread.deleteLater)
+    lifetime.hold(worker, thread)
     return worker, thread

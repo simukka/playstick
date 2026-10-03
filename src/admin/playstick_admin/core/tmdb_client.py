@@ -59,3 +59,11 @@ class TmdbSearch:
         if why:
             raise TmdbError(why)
         return meta
+
+    def lookup(self, title, year=None, duration=None):
+        """The preparer's own gated match, as (meta, why) -- so a film nobody
+        has pinned is shown the answer a preparation would reach, or the
+        sentence saying it would not reach one."""
+        meta, why = self._client.lookup(title, year, duration)
+        self._client.save()
+        return meta, why

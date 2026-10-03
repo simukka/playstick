@@ -1,5 +1,5 @@
-// The bottom sheets: one scrim, three sheets (sound, subtitles and filter),
-// never more than one open. Each opener closes the others rather than stacking,
+// The bottom sheets: one scrim, four sheets (sound, subtitles, filter and a
+// series' episodes), never more than one open. Each opener closes the others rather than stacking,
 // because a sheet is most of the screen and a second over it would leave the
 // first reachable only by dismissing something that looks identical.
 //
@@ -129,12 +129,14 @@ export interface SheetManagerDeps {
   sound: HTMLElement;
   subs: HTMLElement;
   filter: HTMLElement;
+  episodes: HTMLElement;
   onSoundOpen: () => void;
   onSubsOpen: () => void;
   onFilterOpen: () => void;
+  onEpisodesOpen: () => void;
 }
 
-type SheetName = "sound" | "subs" | "filter";
+type SheetName = "sound" | "subs" | "filter" | "episodes";
 
 export class SheetManager {
   /** The chrome, mounted by the composition root. */
@@ -142,18 +144,24 @@ export class SheetManager {
   readonly audioBtn: HTMLElement;
   readonly subsBtn: HTMLElement;
   readonly filterBtn: HTMLElement;
-  // Kept as a map rather than as three fields: "open this one, close the
+  // Kept as a map rather than as a field per sheet: "open this one, close the
   // others" is one rule, and written pairwise it becomes one rule per pair --
   // which is how the third sheet would have introduced a case nobody wrote.
   private readonly roots: Record<SheetName, HTMLElement>;
   private readonly opened: Record<SheetName, () => void>;
 
   constructor(doc: Document, deps: SheetManagerDeps) {
-    this.roots = { sound: deps.sound, subs: deps.subs, filter: deps.filter };
+    this.roots = {
+      sound: deps.sound,
+      subs: deps.subs,
+      filter: deps.filter,
+      episodes: deps.episodes,
+    };
     this.opened = {
       sound: deps.onSoundOpen,
       subs: deps.onSubsOpen,
       filter: deps.onFilterOpen,
+      episodes: deps.onEpisodesOpen,
     };
 
     // Left empty: main.ts paints it with the speaker or the crossed-out speaker
@@ -194,6 +202,9 @@ export class SheetManager {
   get filterOpen(): boolean {
     return this.isOpen("filter");
   }
+  get episodesOpen(): boolean {
+    return this.isOpen("episodes");
+  }
 
   show(name: SheetName, on: boolean): void {
     for (const key of Object.keys(this.roots) as SheetName[]) {
@@ -217,6 +228,9 @@ export class SheetManager {
   }
   showFilter(on: boolean): void {
     this.show("filter", on);
+  }
+  showEpisodes(on: boolean): void {
+    this.show("episodes", on);
   }
 
   closeAll(): void {

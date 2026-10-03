@@ -61,15 +61,16 @@ def record(db, ident, movie, media_rel, source_rel, bytes_on_nas=0,
             "INSERT INTO prepared (item_id, media_rel, source_rel, title, "
             "  sort_title, year, rating, plot, duration, width, height, "
             "  vcodec, acodec, tmdb_id, tmdb_score, metadata_source, "
-            "  poster_source, hidden, notes, bytes_on_nas, prepared_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "  poster_source, hidden, notes, bytes_on_nas, prepared_at, "
+            "  series, season, episode) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT (item_id) DO UPDATE SET "
             + ", ".join("%s = excluded.%s" % (c, c) for c in (
                 "media_rel", "source_rel", "title", "sort_title", "year",
                 "rating", "plot", "duration", "width", "height", "vcodec",
                 "acodec", "tmdb_id", "tmdb_score", "metadata_source",
                 "poster_source", "hidden", "notes", "bytes_on_nas",
-                "prepared_at"))
+                "prepared_at", "series", "season", "episode"))
             # A re-prepare has not been pushed yet, whatever the old row said.
             + ", pushed_at = NULL",
             (ident, media_rel, source_rel, movie.get("title") or ident,
@@ -80,7 +81,8 @@ def record(db, ident, movie, media_rel, source_rel, bytes_on_nas=0,
              movie.get("tmdb_score"), movie.get("metadata_source"),
              movie.get("poster_source"), 1 if movie.get("hidden") else 0,
              json.dumps(movie.get("verify_notes") or []), int(bytes_on_nas),
-             now))
+             now, movie.get("series") or None, movie.get("season"),
+             movie.get("episode")))
 
         # The children are replaced wholesale rather than reconciled row by
         # row -- they are small, they have no identity worth preserving, and a

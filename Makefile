@@ -37,6 +37,15 @@ help:
 	@echo "  make admin        install (first run) and launch the desktop admin app"
 	@echo "  make admin-clean  remove the admin virtualenv"
 	@echo ""
+	@echo "The admin app logs everything it does to this terminal: scans, each"
+	@echo "film prepared and how long it took, every file moved onto the share,"
+	@echo "every request to the stick, and anything that failed. The ffmpeg"
+	@echo "progress line is in there too, redrawn in place."
+	@echo "  PLAYSTICK_ADMIN_LOG=debug  every request and its timing as well"
+	@echo "  PLAYSTICK_ADMIN_LOG=quiet  warnings and failures only"
+	@echo "  make admin ADMIN_ARGS=-v   the same as debug, for one run"
+	@echo "  make admin 2>&1 | tee admin.log   keep a whole run"
+	@echo ""
 	@echo "Both at once, which is the whole loop: run 'make gui' in one"
 	@echo "terminal and 'make admin' in another, then in the admin app's"
 	@echo "Settings set the device URL to http://localhost:8080 and the NAS"
@@ -113,6 +122,12 @@ clean:
 # lives in its own virtualenv rather than the dependency-light device runtime.
 # Auto-created on first `make admin`; editable install so a code edit needs no
 # reinstall. Delete with `make admin-clean` or run pip install -e src/admin again.
+#
+# -u because the app log and the preparer's ffmpeg progress share stderr, and a
+# pipe -- `make admin | tee` -- would otherwise buffer the log into blocks while
+# the progress line, which flushes itself, arrived on time. The two would then
+# disagree about the order they happened in, which is the one thing a log of a
+# six-hour encode has to get right.
 $(ADMIN_VENV):
 	python3 -m venv $(ADMIN_VENV)
 	$(ADMIN_PY) -m pip install --upgrade pip
@@ -120,7 +135,7 @@ $(ADMIN_VENV):
 
 .PHONY: admin
 admin: $(ADMIN_VENV)
-	$(ADMIN_PY) -m playstick_admin
+	$(ADMIN_PY) -u -m playstick_admin $(ADMIN_ARGS)
 
 .PHONY: admin-clean
 admin-clean:

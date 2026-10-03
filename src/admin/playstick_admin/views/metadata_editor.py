@@ -43,10 +43,11 @@ class MetadataEditor(QWidget):
     savedOverride = Signal()
     reprepareRequested = Signal(dict)
 
-    def __init__(self, db, settings, parent=None):
+    def __init__(self, db, settings, monitor, parent=None):
         super().__init__(parent)
         self._db = db
         self._settings = settings
+        self._monitor = monitor
         self._movie = None
         self._pending_tmdb_id = None
         self._search_thread = None
@@ -234,18 +235,29 @@ class MetadataEditor(QWidget):
         worker thread here would mean Save returning before the grid changed --
         which is the one thing this button is for. The client's own timeout
         bounds it.
+
+        It still reports itself to the shared indicator, and being synchronous
+        means only half of that shows: nothing repaints while this thread is
+        inside urlopen, so "syncing" is never seen. The other half is the half
+        that matters -- a stick that did not answer turns the indicator red on
+        both tabs, at the moment it happened, instead of staying green until
+        some later poll notices.
         """
         url = self._settings.device_url
         if not url:
             return
+        self._monitor.sync_begin("saving an edit on the stick")
         try:
             DeviceClient(url).admin_item(film_id, fields)
         except DeviceError as exc:
+            self._monitor.sync_end(str(exc))
             QMessageBox.warning(
                 self, "Saved here, not on the device",
                 "The edit is in this machine's library and the next "
                 "preparation will use it, but the stick did not answer:"
                 "\n\n%s" % exc)
+        else:
+            self._monitor.sync_done()
 
     def _save_and_reprepare(self):
         """Save, then re-derive what the film is called on the share.

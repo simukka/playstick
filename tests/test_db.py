@@ -21,7 +21,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from support import LIBRARY_DIR, real_store          # noqa: E402
+from support import LIBRARY_DIR, TMP, real_store     # noqa: E402
 
 
 FILM = "0123456789abcdef"
@@ -71,6 +71,27 @@ class Schema(unittest.TestCase):
         leave orphans behind that no query would ever show."""
         db, _library, _thumbs = real_store("fk")
         self.assertEqual(db.one("PRAGMA foreign_keys")[0], 1)
+
+    def test_a_version_one_file_gains_the_episode_columns(self):
+        """A device in a cupboard runs whatever schema it last started with.
+        Its films must survive the step forward, and simply read as films."""
+        import sqlite3
+        from playstick.db import Database, SCHEMA
+        path = os.path.join(TMP, "old-v1.sqlite")
+        conn = sqlite3.connect(path)
+        conn.executescript(SCHEMA)
+        conn.execute("INSERT INTO film (id, source_rel, media_rel, title, "
+                     "updated_at) VALUES (?, 'P/P.mkv', 'P/P.mkv', 'Ponyo', 0)",
+                     (FILM,))
+        conn.execute("PRAGMA user_version=1")
+        conn.commit()
+        conn.close()
+        db = Database(path)
+        with mock.patch("playstick.db.log"):
+            self.assertEqual(db.migrate(), 2)
+        row = db.one("SELECT title, series, season, episode FROM film")
+        db.close()
+        self.assertEqual(tuple(row), ("Ponyo", None, None, None))
 
     def test_it_is_in_wal(self):
         """A poster extraction landing a blob must not block six phones polling

@@ -124,10 +124,20 @@ def upsert_item(db, ident, source_id, rel, abs_path, nas_rel=None, size=0,
         "ON CONFLICT (id) DO UPDATE SET "
         "  abs_path = excluded.abs_path, size = excluded.size, "
         "  mtime = excluded.mtime, seen_at = excluded.seen_at, "
-        # A file that came back is not missing any more. Everything else the
-        # user or the queue put there is left exactly as it was.
+        # A file that came back is not missing any more, and a file discovery
+        # used to reject and now accepts -- an episode, before episodes were
+        # offered -- is not excluded any more. Everything else the user or the
+        # queue put there is left exactly as it was.
         "  state = CASE WHEN item.state = 'missing' THEN 'available' "
-        "               ELSE item.state END")
+        "               WHEN item.state = 'excluded' "
+        "                    AND excluded.state <> 'excluded' "
+        "               THEN 'available' "
+        "               ELSE item.state END, "
+        "  title = CASE WHEN item.state = 'excluded' "
+        "                    AND excluded.state <> 'excluded' "
+        "               THEN excluded.title ELSE item.title END, "
+        "  excluded_reason = CASE WHEN excluded.state = 'excluded' "
+        "               THEN item.excluded_reason ELSE NULL END")
     params = (ident, source_id, rel, abs_path, 1 if nas_rel else 0, nas_rel,
               int(size or 0), mtime, title, year, state or AVAILABLE,
               excluded_reason, now)

@@ -44,7 +44,7 @@ a machine that did not change.
 # from somewhere else -- the metadata corrections in `override` and the record
 # of what is on the NAS exist nowhere but here -- so a migration that drops
 # data is a migration that loses it.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 SCHEMA = """
@@ -265,6 +265,19 @@ CREATE TABLE meta (
 """
 
 
+# Episodes. A prepared row that is one episode of a series says which, so the
+# stick can fold a season into one poster rather than twenty-four. All three
+# stay NULL on a film. Columns rather than a table of their own because an
+# episode is still exactly one playable file with one id -- its resume
+# position, its soundtracks and its poster are all per episode, and making the
+# series the row would mean re-plumbing every one of them.
+EPISODES = """
+ALTER TABLE prepared ADD COLUMN series TEXT;
+ALTER TABLE prepared ADD COLUMN season INTEGER;
+ALTER TABLE prepared ADD COLUMN episode INTEGER;
+"""
+
+
 # Applied in order to bring a database forward. Index 0 creates everything from
 # nothing; later entries are the deltas. Keep them append-only.
-MIGRATIONS = (SCHEMA,)
+MIGRATIONS = (SCHEMA, EPISODES)

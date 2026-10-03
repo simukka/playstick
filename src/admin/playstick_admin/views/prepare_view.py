@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFileDialog,
                                QTableView, QVBoxLayout, QWidget)
 
 from . import format as fmt
+from .film_details import FilmDetailsDialog
 from ..bridges import net_worker, queue_worker
 from ..bridges.watcher import LibraryWatcher
 from ..core import catalog, queue, scan
@@ -54,7 +55,6 @@ STATUS = {
     catalog.PREPARING: "preparing",
     catalog.READY: "in library",
     catalog.FAILED: "failed",
-    catalog.MISSING: "the file is gone",
 }
 
 
@@ -174,10 +174,12 @@ class PrepareTab(QWidget):
     libraryChanged = Signal()
     queueChanged = Signal()
 
-    def __init__(self, db, settings, parent=None):
+    def __init__(self, db, settings, monitor, parent=None):
         super().__init__(parent)
         self._db = db
         self._settings = settings
+        self._monitor = monitor
+        self._pushing = False
         self._worker = None
         self._thread = None
         self._threads = set()
@@ -247,6 +249,7 @@ class PrepareTab(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.Stretch)
         self._table.selectionModel().selectionChanged.connect(self._on_select)
+        self._table.doubleClicked.connect(self._show_details)
         layout.addWidget(self._table, 1)
 
         actions = QHBoxLayout()
@@ -310,10 +313,14 @@ class PrepareTab(QWidget):
     def reload(self):
         """Redraw from the database. Cheap, and the only way anything here
         changes: every button writes a row and calls this."""
-        states = None
-        if not self._show_excluded.isChecked():
-            states = [catalog.AVAILABLE, catalog.QUEUED, catalog.PREPARING,
-                      catalog.READY, catalog.FAILED, catalog.MISSING]
+        # Never `missing`: a file a rescan no longer finds is not something
+        # anybody can choose. The row stays in the database -- a prepared
+        # film's row is how it is later taken off the share, and a file that
+        # comes back is revived by the next scan -- it just is not offered.
+        states = [catalog.AVAILABLE, catalog.QUEUED, catalog.PREPARING,
+                  catalog.READY, catalog.FAILED]
+        if self._show_excluded.isChecked():
+            states.append(catalog.EXCLUDED)
         rows = catalog.items(self._db, states=states)
         if self._hide_done.isChecked():
             rows = [r for r in rows if not r["in_library"]]
@@ -385,7 +392,8 @@ class PrepareTab(QWidget):
             self._log.appendPlainText("--- %s ---" % problem)
         job, thread = net_worker.call_with_progress(
             lambda say: scan.scan_all(self._db, self._settings.nas_root,
-                                      self._settings.prep_extra_args, say))
+                                      self._settings.prep_extra_args, say),
+            label="scan")
         job.progress.connect(self._log.appendPlainText)
         job.done.connect(lambda summary: self.reload())
         job.failed.connect(
@@ -423,6 +431,16 @@ class PrepareTab(QWidget):
         if already:
             text += ", %d already queued or in the library" % already
         self._selection_label.setText(text)
+
+    def _show_details(self, index):
+        """Everything known about one film, in a window of its own.
+
+        Not modal, so two films can be compared side by side and the queue can
+        be watched while one is open."""
+        row = self._media.row_at(self._proxy.mapToSource(index).row())
+        if row is None:
+            return
+        FilmDetailsDialog(self._db, self._settings, row["id"], self).show()
 
     def _on_menu(self, point):
         rows = self._selected()
@@ -553,8 +571,42 @@ class PrepareTab(QWidget):
         head = self._current.text().split(" -- ")[0]
         self._current.setText("%s -- %s%s"
                               % (head, phase, (": " + detail) if detail else ""))
+        self._note_push(phase, detail)
+
+    def _note_push(self, phase, detail):
+        """The last step of preparing a film is telling the stick about it,
+        and that is a sync like any other -- but it happens on a tab somebody
+        is probably not looking at, at the end of an encode they walked away
+        from.
+
+        So it is announced to the shared indicator, which means the Library tab
+        shows "syncing" while the film it is about to gain goes over. The phase
+        arrives as a stream of strings rather than a start and a stop, so the
+        edge is found here: the first "pushing" opens it and anything else
+        closes it. Nothing else in the queue's phases can follow a push, so the
+        close is only really the belt to the braces in _on_job_done.
+        """
+        if phase == "pushing":
+            if not self._pushing:
+                self._pushing = True
+                self._monitor.sync_begin(detail or "telling the stick")
+            else:
+                self._monitor.sync_say(detail)
+        elif self._pushing:
+            self._end_push()
+
+    def _end_push(self, error=None, ok=False):
+        if not self._pushing:
+            return
+        self._pushing = False
+        if ok:
+            self._monitor.sync_done()
+        else:
+            self._monitor.sync_end(error)
 
     def _on_job_done(self, result):
+        self._end_push(error=result.get("push_error"),
+                       ok=bool(result.get("pushed")))
         self._log.appendPlainText(
             "--- %s: %s onto the share in %ss%s ---"
             % (result.get("title"), fmt.human_size(result.get("bytes")),
@@ -564,9 +616,15 @@ class PrepareTab(QWidget):
             self.libraryChanged.emit()
 
     def _on_job_failed(self, event):
+        # Ended without a verdict on purpose: a job that failed says nothing
+        # about whether the stick is there. The failure is almost always
+        # ffmpeg, and painting the indicator red for it would be a lie told in
+        # the one colour people trust.
+        self._end_push()
         self._current.setText("%s failed: %s" % (event["title"], event["error"]))
 
     def _on_queue_drained(self):
+        self._end_push()
         self._worker = None
         self._thread = None
         self._stop_btn.setEnabled(False)

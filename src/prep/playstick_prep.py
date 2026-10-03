@@ -746,7 +746,17 @@ def decode_window(path, start, length, timeout, label=None):
     argv = [FFMPEG, "-nostdin", "-v", "error", "-hide_banner"]
     if start > 0:
         argv += ["-ss", "%.3f" % start]
-    argv += ["-i", path, "-t", "%.3f" % length, "-an", "-sn", "-dn", "-f", "null"]
+    # -enc_time_base -1 keeps the demuxer's timebase on the way into the null
+    # muxer. Without it ffmpeg re-stamps each frame in units of one frame
+    # (1001/24000 s), and a Matroska file -- whose timestamps are whole
+    # milliseconds -- that starts half a frame in rounds two frames onto the
+    # same tick: "non monotonically increasing dts to muxer ... 2 >= 2", once
+    # every few frames, from a film that decodes perfectly. That is the null
+    # muxer complaining about our arithmetic, not the decoder about the file,
+    # and it was failing good films at the verify step. -1 rather than "demux"
+    # because it is the spelling every ffmpeg since 4.3 accepts.
+    argv += ["-i", path, "-t", "%.3f" % length, "-an", "-sn", "-dn",
+             "-enc_time_base", "-1", "-f", "null"]
     watching = None
     if label:
         argv, watching = with_progress(argv, label, length)
@@ -920,6 +930,90 @@ def year_from_path(rel):
     if parent and not EPISODE_DIR_RE.match(parent):
         return guess_year(parent)
     return None
+
+
+# The markers episode_of() reads numbers out of. EPISODE_RE above answers "is
+# this television" and is deliberately broad; these answer "which episode", and
+# only the shapes that actually carry a season AND an episode are here -- a
+# "Part 1 of 3" says neither, and a guess would file it under the wrong season.
+SXXEYY_RE = re.compile(
+    r"(?:^|[^a-z0-9])s(\d{1,2})[ ._-]?e(\d{1,3})(?:[ ._-]?e\d{1,3})*"
+    r"(?=[^a-z0-9]|$)", re.IGNORECASE)
+NXNN_RE = re.compile(r"[ ._-](\d{1,2})x(\d{2,3})(?=[^a-z0-9]|$)", re.IGNORECASE)
+SEASON_DIR_NUM_RE = re.compile(
+    r"^(?:season|series|staffel|s)[ ._-]?(\d{1,2})$", re.IGNORECASE)
+SPECIALS_DIR_RE = re.compile(r"^specials?$", re.IGNORECASE)
+# "03.mkv", "E03 - The Hunt.mkv", "Episode 3.mkv" -- the episode number a file
+# in a season folder opens with, when the folder is all that says which season.
+LEADING_EPISODE_RE = re.compile(
+    r"^(?:e|ep|episode)?[ ._-]?(\d{1,3})(?=[^0-9]|$)", re.IGNORECASE)
+
+
+def episode_of(rel):
+    """Which series, season and episode a file is, or None if it is not one.
+
+    Returns {"series", "season", "episode", "episode_title"}. Read from the path
+    relative to the library, because a file called "03.mkv" is only an episode
+    by the folders it sits in.
+
+    The series name comes from the filename where the filename has one --
+    "Bluey.S01E02.Hospital.mkv" -- and from the nearest folder that is not a
+    season folder where it does not. The filename wins because a flat folder
+    of mixed shows is a real layout and its folder name would put every show
+    under one tile.
+    """
+    rel = rel.replace("\\", "/")
+    parts = [p for p in rel.split("/") if p]
+    if not parts:
+        return None
+    stem, ext = os.path.splitext(parts[-1])
+    folders = parts[:-1]
+
+    season = episode = None
+    before = after = ""
+    match = SXXEYY_RE.search(stem) or NXNN_RE.search(stem)
+    if match:
+        season, episode = int(match.group(1)), int(match.group(2))
+        before, after = stem[:match.start()], stem[match.end():]
+    elif folders:
+        parent = folders[-1]
+        number = SEASON_DIR_NUM_RE.match(parent)
+        lead = LEADING_EPISODE_RE.match(stem)
+        if lead and (number or SPECIALS_DIR_RE.match(parent)):
+            season = int(number.group(1)) if number else 0
+            episode = int(lead.group(1))
+            after = stem[lead.end():]
+    if season is None:
+        return None
+
+    # clean_title() takes a FILENAME and drops whatever follows the last dot,
+    # so each fragment goes in with the file's own extension on it -- without
+    # that, "friends.1x02.the.one" would be an episode called "The".
+    series = clean_title(before + ext) if before.strip(" ._-") else ""
+    if not series:
+        for folder in reversed(folders):
+            if SEASON_DIR_NUM_RE.match(folder) or SPECIALS_DIR_RE.match(folder):
+                continue
+            series = clean_title(folder + ext)
+            break
+    if not series:
+        return None
+
+    title = after.strip(" ._-")
+    title = clean_title(title + ext) if title else ""
+    return {"series": series, "season": season, "episode": episode,
+            "episode_title": title}
+
+
+def episode_sort_title(info):
+    """The shelf key for an episode: the series' own, then the numbers.
+
+    So a series sits under its name on the shelf -- "The Expanse" under E -- and
+    its episodes sit together in order, rather than each one being filed by
+    whatever its own episode happens to be called.
+    """
+    return "%s %03d %04d" % (normalize_title(info["series"]), info["season"],
+                             info["episode"])
 
 
 def normalize_title(title):
@@ -2646,6 +2740,12 @@ def device_film(movie):
         "tmdb_id": movie.get("tmdb_id"),
         "hidden": bool(movie.get("hidden")),
         "genres": movie.get("genres") or [],
+        # Set only on an episode. The grid folds every row sharing a series
+        # into one tile and orders them by these two numbers; a film leaves
+        # all three empty and is a tile of its own, as it always was.
+        "series": movie.get("series") or None,
+        "season": movie.get("season"),
+        "episode": movie.get("episode"),
         "subtitles": [{"rel": s["rel"], "lang": s.get("lang") or "und"}
                       for s in movie.get("subtitles") or []
                       if s.get("rel")],

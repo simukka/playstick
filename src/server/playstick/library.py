@@ -56,7 +56,7 @@ EDITABLE = frozenset((
 SYNC_COLUMNS = (
     "id", "source_rel", "media_rel", "title", "sort_title", "year", "rating",
     "plot", "duration", "width", "height", "vcodec", "acodec", "tmdb_id",
-    "hidden", "pos",
+    "hidden", "pos", "series", "season", "episode",
 )
 
 
@@ -217,6 +217,11 @@ class Library:
                 "hidden": bool(row["hidden"]),
                 "plot": row["plot"] or "",
                 "duration": row["duration"],
+                # None on a film. On an episode, what folds it into its
+                # series' tile on the grid and orders it inside the picker.
+                "series": row["series"] or None,
+                "season": row["season"],
+                "episode": row["episode"],
             }
             # The overlay, laid on top. A plain update, which is why EDITABLE
             # keeps paths out of the override table: this is the join, and it
@@ -225,6 +230,7 @@ class Library:
                 if over["field"] in EDITABLE:
                     item[over["field"]] = json.loads(over["value"])
             item["hidden"] = bool(item["hidden"])
+            item["full_title"] = full_title(item)
             items[ident] = item
         return items
 
@@ -476,6 +482,9 @@ class Library:
                 "duration": row["duration"],
                 "tmdb_id": row["tmdb_id"],
                 "hidden": bool(row["hidden"]),
+                "series": row["series"],
+                "season": row["season"],
+                "episode": row["episode"],
                 "genres": [r["genre"] for r in genres.get(ident, ())],
                 "overrides": overrides.get(ident, {}),
                 "thumb_etag": thumb["etag"] if thumb else "",
@@ -515,6 +524,17 @@ class Library:
             self._available = available
             self._scanned_at = time.time()
             self._error = error
+
+
+def full_title(item):
+    """What the playing screen calls a film: its title, or for an episode the
+    series and which episode it is -- "Bluey S1 E2 · Hospital". An episode's
+    own title alone ("Hospital") does not say what is on the projector."""
+    if not item.get("series"):
+        return item["title"]
+    label = "%s S%s E%s" % (item["series"], item.get("season") or 0,
+                            item.get("episode") or 0)
+    return "%s · %s" % (label, item["title"]) if item["title"] else label
 
 
 def _rating(value):

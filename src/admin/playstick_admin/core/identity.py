@@ -1,39 +1,3 @@
-"""What a film is called by the one machine whose opinion is load-bearing.
-
-A film's id is sixteen hex characters, and three separate things on the stick
-hang off it: the poster on the children's grid, every metadata correction
-anybody has made, and where each film got to. None of those is derivable from
-anything else. So an id is not a convenience here -- it is the join between a
-file on this host and a row on a box in another room, and a restructure that
-quietly re-issued them would look exactly like one that had worked, right up
-until somebody noticed every resume position was gone.
-
-WHY THERE ARE TWO RULES AND NOT ONE
-
-Before this, there was one library, and `prep.file_id` hashed a film's path
-relative to it. Every film already on a stick was named that way.
-
-Now there are many sources, and most of them are nowhere near the share. A
-single rule over "path relative to its own source root" would collide the
-moment two sources both offered `Hook/Hook.mkv`, and a single rule over the
-absolute path would re-issue an id for every film already synced -- which is
-the cost above, paid for nothing.
-
-So: a file already under the NAS root keeps the name the old preparer gave it.
-Everything else is named by its absolute path on this host. The two spaces
-cannot collide, because one is a hash of a relative path and the other of an
-absolute one, and neither rule ever sees the other's input.
-
-WHAT THIS COSTS, SAID PLAINLY
-
-Moving a file re-keys it. Under the NAS that was always true. Off the NAS it
-means a film that moves between drives comes back as a new candidate, and the
-old one goes `missing` -- which is honest, and is also the only signal this app
-gets that anything happened. Re-pointing `nas_root` at a different directory
-invalidates every id in the database at once; `guard_nas_root` below is what
-notices, because the failure is otherwise silent and total.
-"""
-
 import os
 
 from .. import paths
@@ -96,18 +60,37 @@ def guard_nas_root(db, nas_root):
     line nobody is reading. The whole library goes quietly missing.
 
     Returns None when the root is fine, or a sentence saying what is wrong.
-    The first root ever seen is recorded rather than questioned.
+    The first root ever seen is recorded rather than questioned -- unless the
+    rows already say which share they were named against, which they do in a
+    database that predates this record.
     """
     if not nas_root:
         return "No NAS root is set. Settings -- the share, as it is mounted here."
     root = os.path.realpath(os.path.expanduser(nas_root))
-    seen = db.get_meta("nas_root_seen")
+    seen = db.get_meta("nas_root_seen") or _root_the_rows_imply(db)
     if not seen:
         db.set_meta("nas_root_seen", root)
         return None
+    db.set_meta("nas_root_seen", seen)
     if seen == root:
         return None
     return ("This database was built against %s and the NAS root is now %s. "
             "Every film in it is named by a path relative to the first, so "
             "nothing here would reach the stick. Point it back, or start a "
             "new database." % (seen, root))
+
+
+def _root_the_rows_imply(db):
+    """The share an item already on it was recorded under, or None.
+
+    An on-NAS row's abs_path is the share joined to its nas_rel, so stripping
+    the one off the other gives back the root it was named against.
+    """
+    row = db.one("SELECT abs_path, nas_rel FROM item "
+                 "WHERE on_nas = 1 AND nas_rel IS NOT NULL LIMIT 1")
+    if row is None:
+        return None
+    suffix = "/" + row["nas_rel"]
+    if not row["abs_path"].endswith(suffix):
+        return None
+    return row["abs_path"][:-len(suffix)]

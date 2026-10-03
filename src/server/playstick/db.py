@@ -47,7 +47,7 @@ from .config import DB_PATH, log
 # bottom of this file; a database at version N is brought forward by running
 # every statement from N onwards. There is no downgrade, and there does not
 # need to be: the whole store is rebuilt by one sync from the admin app.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 SCHEMA = """
@@ -177,9 +177,21 @@ CREATE TABLE meta (
 """
 
 
+# Episodes. Set on a film that is one episode of a series, NULL on everything
+# else. The page folds every row sharing a `series` into one poster and orders
+# them by these numbers. Columns on `film` rather than a series table, because
+# an episode is still one playable file with its own id -- its resume position,
+# its soundtracks and its poster all hang off that id exactly as a film's do.
+EPISODES = """
+ALTER TABLE film ADD COLUMN series TEXT;
+ALTER TABLE film ADD COLUMN season INTEGER;
+ALTER TABLE film ADD COLUMN episode INTEGER;
+"""
+
+
 # Applied in order to bring a database forward. Index 0 creates everything from
 # nothing; later entries are the deltas. Keep them append-only.
-MIGRATIONS = (SCHEMA,)
+MIGRATIONS = (SCHEMA, EPISODES)
 
 
 class Database:

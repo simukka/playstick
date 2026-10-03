@@ -30,8 +30,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src", "admin"))
 sys.path.insert(0, os.path.join(ROOT, "src", "prep"))
 
-from playstick_admin.core import (catalog, identity, nas_store, pipeline,  # noqa: E402
-                                  prepared, queue, scan, sync)
+from playstick_admin.core import (catalog, film_details, identity,  # noqa: E402
+                                  nas_store, pipeline, prepared, queue,
+                                  scan, sync)
 from playstick_admin.core.db import Database                          # noqa: E402
 from playstick_admin.core.device_client import DeviceError            # noqa: E402
 import playstick_prep as prep                                          # noqa: E402
@@ -54,9 +55,8 @@ PROBE = {
 
 
 class FakeSettings:
-    def __init__(self, nas_root, staging, device_url="http://stick"):
+    def __init__(self, nas_root, device_url="http://stick"):
         self.nas_root = nas_root
-        self.staging_dir = staging
         self.device_url = device_url
         self.tmdb_key = ""
         self.tmdb_language = "en-US"
@@ -114,15 +114,14 @@ class Fixture(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.dir = self._tmp.name
         self.nas = os.path.join(self.dir, "nas")
-        self.staging = os.path.join(self.dir, "staging")
         self.incoming = os.path.join(self.dir, "incoming")
-        for path in (self.nas, self.staging, self.incoming):
+        for path in (self.nas, self.incoming):
             os.makedirs(path)
 
         self.db = Database(os.path.join(self.dir, "admin.db"))
         self.db.migrate()
         self.addCleanup(self.db.close)
-        self.settings = FakeSettings(self.nas, self.staging)
+        self.settings = FakeSettings(self.nas)
         self.stick = FakeStick()
         self.encoded = []
 
@@ -245,7 +244,9 @@ class OnlyTheShareGetsFilms(Fixture):
         self.prepare(item)
 
         top = sorted(os.listdir(self.nas))
-        self.assertEqual(top, [".playstick"])
+        self.assertEqual(top, [".playstick", nas_store.STAGING_DIR])
+        # Staging lives on the share, and a finished film leaves nothing in it.
+        self.assertEqual(os.listdir(nas_store.staging_root(self.nas)), [])
         under = sorted(os.listdir(os.path.join(self.nas, ".playstick")))
         # No index, no overrides file, no prep-state, no tmdb cache -- and no
         # posters, which the stick keeps in its own database and has never
@@ -292,14 +293,6 @@ class NothingIsRecordedUntilItHasLanded(Fixture):
             with self.assertRaises(pipeline.PrepareError):
                 self.prepare(item)
         self.assertTrue(nas_store.orphans(self.db, self.nas))
-
-    def test_a_film_that_will_not_fit_is_refused_before_anything_moves(self):
-        item = self.offer(self.incoming, "Hook.mkv")
-        with mock.patch.object(nas_store, "check_space",
-                               return_value="not enough room"):
-            with self.assertRaises(pipeline.PrepareError):
-                self.prepare(item)
-        self.assertFalse(os.path.isdir(os.path.join(self.nas, ".playstick")))
 
     def test_a_missing_file_is_refused_rather_than_probed(self):
         item = self.offer(self.incoming, "Hook.mkv")
@@ -349,6 +342,44 @@ class OneFilmAtATime(Fixture):
         self.assertEqual(len(self.stick.films), 2)
 
 
+class AnEpisodeIsPreparedAsOne(Fixture):
+    def test_it_reaches_the_stick_knowing_its_series(self):
+        item = self.offer(self.incoming, "Bluey", "Season 1",
+                          "Bluey.S01E02.Hospital.mkv")
+        self.prepare(item)
+        sent = self.stick.films[item["id"]]
+        self.assertEqual(
+            (sent["series"], sent["season"], sent["episode"], sent["title"]),
+            ("Bluey", 1, 2, "Hospital"))
+        # Shelved under the show, so the tile sits where Bluey would.
+        self.assertTrue(sent["sort_title"].startswith("bluey "),
+                        sent["sort_title"])
+
+    def test_it_is_not_searched_for_as_a_film(self):
+        """An episode called "Hospital" is a confident TMDb match for a film
+        called Hospital, which is a wrong poster on a child's shelf."""
+        self.settings.tmdb_key = "key"
+        item = self.offer(self.incoming, "Bluey", "Bluey.S01E02.Hospital.mkv")
+        with mock.patch.object(prep, "match_tmdb") as match:
+            self.prepare(item)
+        match.assert_not_called()
+
+    def test_it_keeps_its_place_through_a_metadata_refresh(self):
+        item = self.offer(self.incoming, "Bluey", "Bluey.S01E02.Hospital.mkv")
+        self.prepare(item)
+        prepared.set_override(self.db, item["id"], title="The Hospital")
+        pipeline.refresh_metadata(self.db, item["id"], self.settings, self.stick)
+        sent = self.stick.films[item["id"]]
+        self.assertEqual((sent["series"], sent["title"]),
+                         ("Bluey", "The Hospital"))
+
+    def test_a_film_says_nothing_about_series(self):
+        item = self.offer(self.incoming, "Hook.mkv")
+        self.prepare(item)
+        sent = self.stick.films[item["id"]]
+        self.assertIsNone(sent["series"])
+
+
 class CorrectingAFilm(Fixture):
     def test_a_metadata_change_does_not_re_encode(self):
         # The old app's "save and re-prepare" ran the whole library and relied
@@ -395,6 +426,51 @@ class TakingAFilmBackOut(Fixture):
         self.prepare(item, encode=False)
         pipeline.remove(self.db, item["id"], self.settings, self.stick)
         self.assertTrue(os.path.isfile(item["abs_path"]))
+
+
+class WhatTheDetailsWindowIsShown(Fixture):
+    """core.film_details: everything known about one film, gathered for the
+    window a double-click in the Prepare tab opens."""
+
+    def test_a_film_only_scanned_has_a_catalogue_row_and_nothing_else(self):
+        item = self.offer(self.incoming, "Hook (1991)", "Hook.mkv")
+        details = film_details.gather(self.db, item["id"])
+        self.assertEqual(details["item"]["title"], "Hook")
+        self.assertEqual(details["item"]["source_path"], self.incoming)
+        # The probe is parsed into its own section, not left as a string in
+        # the catalogue row.
+        self.assertNotIn("probe_json", details["item"])
+        self.assertIsNone(details["probe"])
+        self.assertIsNone(details["prepared"])
+        self.assertIsNone(details["poster"])
+        self.assertEqual(details["jobs"], [])
+        self.assertEqual(details["overrides"], {})
+
+    def test_a_prepared_film_shows_what_was_made_and_corrected(self):
+        item = self.offer(self.incoming, "Hook (1991)", "Hook.mkv")
+        self.prepare(item)
+        prepared.set_override(self.db, item["id"], title="Hook!")
+        details = film_details.gather(self.db, item["id"])
+        self.assertEqual(details["probe"]["vcodec"], "h264")
+        self.assertEqual(details["prepared"]["subtitles"][0]["lang"], "eng")
+        self.assertEqual(details["prepared"]["audio"][0]["channels"], 2)
+        self.assertEqual(details["overrides"], {"title": "Hook!"})
+        # Described, never the bytes: this is drawn in a tree.
+        self.assertEqual(details["poster"]["bytes"], len(b"jpegbytes"))
+        self.assertNotIn("data", details["poster"])
+        json.dumps(details)
+
+    def test_an_id_nobody_knows_is_none(self):
+        self.assertIsNone(film_details.gather(self.db, "0" * 16))
+
+    def test_ffprobe_failing_is_a_sentence_not_a_traceback(self):
+        path = self.video(self.incoming, "Hook.mkv")
+        with self.assertRaises(RuntimeError) as caught:
+            film_details.ffprobe(path, binary="/nonexistent/ffprobe")
+        self.assertIn("ffprobe was not found", str(caught.exception))
+        with self.assertRaises(RuntimeError) as caught:
+            film_details.ffprobe(path + ".gone")
+        self.assertIn("is not there any more", str(caught.exception))
 
 
 if __name__ == "__main__":

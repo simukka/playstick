@@ -22,8 +22,9 @@ push is relative to this directory, and pointing it somewhere else invalidates
 the whole database at once -- which is why core.identity.guard_nas_root exists
 and why this module keeps the old keys around only long enough to import from.
 
-`staging_dir` is where a film is prepared before it moves. Local disk on
-purpose: an encode is hours of small writes and the mount is the slow part.
+There is no staging setting. A film is prepared in a dot folder on the share,
+derived from `nas_root` by core.nas_store -- see that module for why it stopped
+being configurable.
 """
 
 import os
@@ -38,7 +39,7 @@ APP = "admin"
 # Bumped when the keys below change shape, so migrate() runs once rather than
 # on every launch. It is not a schema version -- QSettings has no schema -- it
 # is a record of which one-way conversions have already happened.
-SETTINGS_VERSION = 1
+SETTINGS_VERSION = 2
 
 
 class Settings:
@@ -87,16 +88,6 @@ class Settings:
             return ("%s is not writable. The stick mounts the share read-only, "
                     "but this machine is the one that puts films on it." % root)
         return None
-
-    # --- where films are made before they get there ------------------------
-
-    @property
-    def staging_dir(self):
-        return str(self._get("staging_dir", "")) or paths.default_staging()
-
-    @staging_dir.setter
-    def staging_dir(self, value):
-        self._set("staging_dir", value)
 
     # --- the stick ---------------------------------------------------------
 
@@ -198,5 +189,8 @@ class Settings:
             # wrote and where the stick read. Defaulting to it is also what
             # keeps every existing film's id -- see core.identity.
             self.nas_root = legacy
+        # Staging stopped being a setting. Left in the file, the key would
+        # read as though it still did something.
+        self._s.remove("staging_dir")
         self._set("settings_version", SETTINGS_VERSION)
         return True

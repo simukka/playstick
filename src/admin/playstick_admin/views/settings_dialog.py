@@ -63,7 +63,6 @@ class SettingsDialog(QDialog):
         self._nas.edit.textChanged.connect(self._check_nas)
         self._nas_note = QLabel("")
         self._nas_note.setWordWrap(True)
-        self._staging = _PathRow(settings.staging_dir, pick_dir=True)
         self._device = QLineEdit(settings.device_url)
         self._device.setPlaceholderText("http://vivostick.local")
         self._tmdb = QLineEdit(settings.tmdb_key)
@@ -76,7 +75,6 @@ class SettingsDialog(QDialog):
 
         form.addRow("NAS root (the share, as mounted here)", self._nas)
         form.addRow("", self._nas_note)
-        form.addRow("Staging (films are made here first)", self._staging)
         form.addRow("Device URL", self._device)
         form.addRow("TMDb API key", self._tmdb)
         form.addRow("TMDb language", self._tmdb_lang)
@@ -108,7 +106,6 @@ class SettingsDialog(QDialog):
     def _save(self):
         s = self._settings
         s.nas_root = self._nas.edit.text().strip()
-        s.staging_dir = self._staging.edit.text().strip()
         s.device_url = self._device.text().strip()
         s.tmdb_key = self._tmdb.text().strip()
         s.tmdb_language = self._tmdb_lang.text().strip() or "en-US"

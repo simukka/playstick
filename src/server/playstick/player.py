@@ -97,7 +97,10 @@ class Player:
 
     def current_title(self):
         with self._lock:
-            return self._item["title"] if self._item else ""
+            # full_title names the series as well when this is an episode.
+            if not self._item:
+                return ""
+            return self._item.get("full_title") or self._item["title"]
 
     def current_item(self):
         """The whole library entry, for the caller that needs more of it than a

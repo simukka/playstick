@@ -34,6 +34,13 @@ export interface LibraryItem {
   audio_langs?: string[];
   hidden?: boolean;
   has_thumb?: boolean;
+  /** Set only on an episode: the series it belongs to. Every row sharing one
+   * is folded into a single tile on the grid, and the rest are offered by the
+   * episode sheet. Absent on a film, and on a daemon from before episodes. */
+  series?: string | null;
+  /** 0 for specials. Present whenever `series` is. */
+  season?: number | null;
+  episode?: number | null;
 }
 
 export interface Projector {

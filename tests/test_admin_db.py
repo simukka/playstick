@@ -373,15 +373,32 @@ class Scanning(Fixture):
         self.assertEqual(self.scan(source)["found"], 1)
         self.assertEqual([r["rel"] for r in catalog.items(self.db)], ["Hook.mkv"])
 
-    def test_a_box_set_is_recorded_rather_than_silently_dropped(self):
-        # "Where did my box set go" needs an answer that is not "read the
-        # source".
+    def test_a_box_set_is_offered_episode_by_episode(self):
+        # The stick folds a series into one poster, so an episode is an
+        # ordinary row the Prepare tab offers, named for which one it is.
         self.video(self.incoming, "Detectorists", "S01E02.mkv")
+        self.video(self.incoming, "Detectorists", "Series 2", "03.mkv")
+        self.video(self.incoming, "Hook.mkv")
         source = catalog.add_source(self.db, self.incoming)
+        result = self.scan(source)
+        self.assertEqual((result["found"], result["episodic"]), (1, 2))
+        rows = catalog.items(self.db, states=[catalog.AVAILABLE])
+        self.assertEqual(sorted(r["title"] for r in rows),
+                         ["Detectorists S01E02", "Detectorists S02E03", "Hook"])
+
+    def test_an_episode_an_older_scan_excluded_is_offered_now(self):
+        path = self.video(self.incoming, "Detectorists", "S01E02.mkv")
+        source = catalog.add_source(self.db, self.incoming)
+        ident, _ = identity.film_id(self.nas, path)
+        catalog.upsert_item(self.db, ident, source,
+                            "Detectorists/S01E02.mkv", path,
+                            title="S01E02", state=catalog.EXCLUDED,
+                            excluded_reason="episodic television")
         self.scan(source)
-        rows = catalog.items(self.db, states=[catalog.EXCLUDED])
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["excluded_reason"], "episodic television")
+        row = catalog.get_item(self.db, ident)
+        self.assertEqual(row["state"], catalog.AVAILABLE)
+        self.assertIsNone(row["excluded_reason"])
+        self.assertEqual(row["title"], "Detectorists S01E02")
 
     def test_a_rescan_leaves_a_selection_alone(self):
         path = self.video(self.incoming, "Hook.mkv")
@@ -428,6 +445,45 @@ class Scanning(Fixture):
         # The source that found it first keeps it, rather than the row flapping
         # between two parents on every scan.
         self.assertEqual(rows[0]["source_id"], first)
+
+    def test_a_scan_against_a_different_share_refuses_rather_than_rekeys(self):
+        # The crash this replaces: films recorded while nas_root was the share
+        # are named by their path relative to it. Point nas_root somewhere else
+        # and the same file at the same (source, rel) gets a new id, and the
+        # insert died on UNIQUE (source_id, rel) half way through a source.
+        self.video(self.nas, "Hook (1991)", "Hook.mkv")
+        source = catalog.add_source(self.db, self.nas)
+        self.scan(source)
+        before = catalog.items(self.db)[0]["id"]
+
+        elsewhere = os.path.join(self.dir, "smoke-nas")
+        os.makedirs(elsewhere)
+        with self.assertRaises(scan.WrongShare) as caught:
+            scan.scan_source(self.db, catalog.get_source(self.db, source),
+                             elsewhere, self.extra)
+        self.assertIn(os.path.realpath(self.nas), str(caught.exception))
+        rows = catalog.items(self.db)
+        self.assertEqual([r["id"] for r in rows], [before])
+        self.assertEqual(rows[0]["state"], "available")
+
+    def test_a_database_from_before_the_guard_is_still_guarded(self):
+        # A database built before anything recorded which share it was built
+        # against has no `nas_root_seen`. The first root it is shown must not
+        # simply be believed when the rows already say otherwise.
+        self.video(self.nas, "Hook (1991)", "Hook.mkv")
+        source = catalog.add_source(self.db, self.nas)
+        self.scan(source)
+        with self.db.write() as conn:
+            conn.execute("DELETE FROM meta WHERE key = 'nas_root_seen'")
+
+        elsewhere = os.path.join(self.dir, "smoke-nas")
+        os.makedirs(elsewhere)
+        with self.assertRaises(scan.WrongShare):
+            scan.scan_source(self.db, catalog.get_source(self.db, source),
+                             elsewhere, self.extra)
+        # And the share it was really built against is the one now on record.
+        self.assertEqual(self.db.get_meta("nas_root_seen"),
+                         os.path.realpath(self.nas))
 
 
 if __name__ == "__main__":

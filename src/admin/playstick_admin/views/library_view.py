@@ -18,6 +18,15 @@ knows -- the encode's dimensions, the TMDb confidence, what the verifier
 complained about. None of those is on the device because none of them is
 anything the device does.
 
+WHICH IS WHY THE INDICATOR IS AT THE TOP
+
+An empty table here has two very different causes -- the stick holds no films,
+or the stick did not answer -- and they look identical. The count line has
+always said which, in a sentence, in the corner. The indicator says it in the
+place somebody looks first, in the same words and the same colour as the Device
+tab, and it says the third thing the count line never could: that a film is
+going over the wire right now.
+
 TAKING A FILM BACK OUT
 
 This is where a removal starts, because this is the list of what is IN. It goes
@@ -36,6 +45,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView,
                                QWidget)
 
 from . import format as fmt
+from .device_status_bar import DeviceStatusBar
 from .metadata_editor import MetadataEditor
 from ..bridges import net_worker, poster_worker
 from ..core import device_library, pipeline, posters, prepared
@@ -151,10 +161,11 @@ class LibraryTab(QWidget):
     # again.
     removedFilm = Signal()
 
-    def __init__(self, db, settings, parent=None):
+    def __init__(self, db, settings, monitor, parent=None):
         super().__init__(parent)
         self._db = db
         self._settings = settings
+        self._monitor = monitor
         self._model = MoviesModel()
         self._proxy = QSortFilterProxyModel(self)
         self._proxy.setSourceModel(self._model)
@@ -169,6 +180,11 @@ class LibraryTab(QWidget):
 
     def _build(self):
         outer = QVBoxLayout(self)
+
+        # Every row below comes off the stick, so whether the stick answered is
+        # the first thing to say -- and "0 films" and "it did not answer" look
+        # identical in a table.
+        outer.addWidget(DeviceStatusBar(self._monitor))
 
         top = QHBoxLayout()
         self._filter = QLineEdit()
@@ -199,7 +215,7 @@ class LibraryTab(QWidget):
         self._table.selectionModel().selectionChanged.connect(self._on_select)
         splitter.addWidget(self._table)
 
-        self._editor = MetadataEditor(self._db, self._settings)
+        self._editor = MetadataEditor(self._db, self._settings, self._monitor)
         self._editor.savedOverride.connect(self.reload)
         self._editor.savedOverride.connect(self.savedOverride)
         self._editor.reprepareRequested.connect(self.reprepareRequested)
@@ -224,8 +240,11 @@ class LibraryTab(QWidget):
         """
         if not self._settings.device_url:
             return self._draw(None, "")
-        job, thread = net_worker.call(lambda: self._client().admin_library())
+        job, thread = net_worker.call(lambda: self._client().admin_library(),
+                                      label="library")
+        job.done.connect(lambda _reply: self._monitor.note_reached())
         job.done.connect(lambda reply: self._draw(reply.get("films") or [], ""))
+        job.failed.connect(self._monitor.note_unreachable)
         job.failed.connect(lambda msg: self._draw(None, msg))
         self._track(thread)
         thread.start()
@@ -312,11 +331,15 @@ class LibraryTab(QWidget):
             self._remove(movie)
 
     def _clear_poster(self, movie):
+        self._monitor.sync_begin("forgetting the poster for %s"
+                                 % (movie.get("title") or movie["id"]))
         try:
             self._client().clear_thumb(movie["id"])
         except DeviceError as exc:
+            self._monitor.sync_end(str(exc))
             QMessageBox.warning(self, "The stick did not answer", str(exc))
             return
+        self._monitor.sync_done()
         self.reload()
 
     def _remove(self, movie):
@@ -347,10 +370,15 @@ class LibraryTab(QWidget):
             if answer != QMessageBox.Yes:
                 return
 
+        # A removal writes to the stick before it deletes anything here, so
+        # it is traffic like any other push and shows as such.
+        self._monitor.sync_begin("taking %s off the stick" % title)
         job, thread = net_worker.call(
             lambda: pipeline.remove(self._db, movie["id"], self._settings,
-                                    self._client()))
+                                    self._client()), label="remove")
+        job.done.connect(lambda _result: self._monitor.sync_done())
         job.done.connect(self._on_removed)
+        job.failed.connect(self._monitor.sync_end)
         job.failed.connect(
             lambda msg: QMessageBox.warning(self, "Could not remove it", msg))
         self._track(thread)

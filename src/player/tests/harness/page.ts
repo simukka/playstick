@@ -35,7 +35,7 @@ export interface Shell {
 
 /**
  * The grid view and the sheet chrome, wired to each other as main.ts wires them.
- * The three sheets are stand-ins: the manager only ever toggles a class on
+ * The four sheets are stand-ins: the manager only ever toggles a class on
  * them, and each real sheet is exercised by its own test.
  */
 export function makeShell(doc: FakeDocument = makePage(), plays: string[] = []): Shell {
@@ -49,9 +49,11 @@ export function makeShell(doc: FakeDocument = makePage(), plays: string[] = []):
     sound: h(d, "div", { id: "sheet", class: "sheet" }),
     subs: h(d, "div", { id: "subsSheet", class: "sheet" }),
     filter: h(d, "div", { id: "fsheet", class: "sheet" }),
+    episodes: h(d, "div", { id: "esheet", class: "sheet" }),
     onSoundOpen: () => soundPaints++,
     onSubsOpen: () => subsPaints++,
     onFilterOpen: () => filterPaints++,
+    onEpisodesOpen: () => {},
   });
   const library = new LibraryView(
     d,

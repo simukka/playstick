@@ -159,6 +159,22 @@ def _int_or_none(value):
         return None
 
 
+def _episode(entry):
+    """`series`, `season` and `episode` from a synced film, coerced -- all
+    three set, or all three None.
+
+    A series name with no usable numbers is not half an episode: the page
+    would have nowhere to put it in the picker, so it is synced as a film.
+    """
+    series = str(entry.get("series") or "").strip()[:400]
+    season = _int_or_none(entry.get("season"))
+    episode = _int_or_none(entry.get("episode"))
+    if not series or season is None or episode is None \
+            or not 0 <= season < 1000 or not 0 <= episode < 10000:
+        return {"series": None, "season": None, "episode": None}
+    return {"series": series, "season": season, "episode": episode}
+
+
 def _float_or_none(value):
     if isinstance(value, bool) or value is None:
         return None
@@ -487,6 +503,14 @@ class Handler(BaseHTTPRequestHandler):
                     # it on.
                     "audio_langs": sorted({t["lang"] for t
                                            in items[ident].get("audio") or []}),
+                    # Absent on a film. On an episode, the page folds every
+                    # row with the same series into one tile and offers the
+                    # rest in a picker. Additive: an older ui.html shows each
+                    # episode as a tile of its own.
+                    **({"series": items[ident]["series"],
+                        "season": items[ident]["season"],
+                        "episode": items[ident]["episode"]}
+                       if items[ident].get("series") else {}),
                 }
                 for ident in order
             ],
@@ -789,6 +813,9 @@ class Handler(BaseHTTPRequestHandler):
             "acodec": str(entry.get("acodec") or "")[:40] or None,
             "tmdb_id": _int_or_none(entry.get("tmdb_id")),
             "hidden": 1 if entry.get("hidden") else 0,
+            # All three or none: an episode the page cannot place in a season
+            # is a film, which is what it is shown as.
+            **_episode(entry),
             "genres": genres[:20],
             "subtitles": subs,
             "audio": audio,
