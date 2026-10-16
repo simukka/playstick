@@ -23,3 +23,31 @@ Each device pins its audio to the film's master clock, so the whole room stays i
 Two people watching the same film can hear it in different languages at once.
 
 Great for multi-language households, friends, and parties.
+
+## A desktop app to run the library
+
+The heavy lifting happens on your own computer, not the stick. The **Playstick Admin** app (PySide6, `make admin`) 
+scans your folders of films, lets you choose what goes on the stick, and prepares each film in the background: 
+probing, re-encoding where the stick needs it, extracting per-language audio, and matching it on TMDb.
+
+![Prepare tab: choose films from your sources and watch the queue](screenshots/1-prepare.png)
+
+* **Prepare.** Every film on every source, in one sortable table. Select what you want and add it to the library; 
+  the queue works through them one at a time and survives the app being closed.
+* **Library.** What the stick is actually holding, with posters. Fix a title, genre or rating, or correct a bad TMDb match, 
+  and the change goes straight to the stick.
+* **Device.** Whether the stick is reachable, playback and volume controls, and recovery for films that didn't get through.
+* **Config.** Edit the Ansible variables in `group_vars` with a form, and comments in the YAML are preserved.
+
+![Library tab: correct a film's metadata or TMDb match](screenshots/3-library-film.png)
+
+<details>
+<summary>More screenshots</summary>
+
+![Library tab](screenshots/2-library.png)
+![Device tab](screenshots/4-device.png)
+![Config tab](screenshots/5-config.png)
+
+</details>
+
+*The screenshots use a demo library of public-domain films.*
