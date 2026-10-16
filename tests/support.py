@@ -8,11 +8,12 @@ the routing, the JSON shapes and the byte-serving are the shipped code.
 
 TWO THINGS TO KNOW BEFORE ADDING A TEST
 
-The daemon reads its whole configuration from the environment ONCE, at import
-of playstick.config. So this module sets that environment before it imports
-anything from the package, and test modules must reach the package through the
-names re-exported here rather than importing it themselves -- an import that
-beats this one to the punch would bake in the ambient environment instead.
+The daemon reads its whole configuration ONCE, at import of playstick.config,
+from the TOML file PLAYSTICK_SETTINGS names. So this module writes that file
+and sets that variable before it imports anything from the package, and test
+modules must reach the package through the names re-exported here rather than
+importing it themselves -- an import that beats this one to the punch would
+read /etc/playstick/settings.toml, or nothing, instead.
 
 Because config is read once, and because http.py binds its constants with
 `from .config import ...`, changing one for a single test means patching the
@@ -22,6 +23,7 @@ name in the HTTP module's own namespace -- `playstick.http.PHONE_AUDIO`, not
 
 import atexit
 import http.client
+import itertools
 import json
 import os
 import shutil
@@ -37,40 +39,85 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(ROOT, "src", "server")
 # The served page is the built bundle, committed under src/player/dist. It is
-# the daemon's real input (config.py's PLAYSTICK_UI), so the HTTP tests exercise
+# the daemon's real input (config.py's UI_FILE, i.e. [server] ui_file), so the
+# HTTP tests exercise
 # what ships rather than a hand-written stand-in. Rebuild with src/player's
 # `npm run build` after a UI change.
 UI_HTML = os.path.join(ROOT, "src", "player", "dist", "playstick-ui.html")
 
-# Scratch for the two directories the daemon really touches: the poster cache
-# (Thumbs.cached_path resolves against it, and _api_thumb reads it directly)
-# and a stand-in library root for the audio fixtures.
+def _toml(tables):
+    """The three lines of TOML this harness needs, without a writer dependency.
+
+    tomllib reads and does not write, and the alternative -- tomli-w -- would be
+    a third-party package in a suite whose whole claim is that the daemon has
+    none. json.dumps is enough because TOML's basic strings, integers, floats,
+    booleans and flat arrays are spelled exactly as JSON spells them, which is
+    the same property settings.toml.j2 leans on to render the real file.
+    """
+    out = []
+    for name, table in tables.items():
+        out.append("[%s]" % name)
+        for key, value in table.items():
+            out.append("%s = %s" % (key, json.dumps(value)))
+        out.append("")
+    return "\n".join(out)
+
+
+# Scratch for the two things the daemon really touches: the database it keeps
+# everything in, and a stand-in library root for the audio fixtures.
 TMP = tempfile.mkdtemp(prefix="playstick-tests-")
 atexit.register(shutil.rmtree, TMP, ignore_errors=True)
 
-os.environ.update({
-    "PLAYSTICK_UI": UI_HTML,
-    "PLAYSTICK_LIBRARY": os.path.join(TMP, "movies"),
-    # Set-but-empty means "ignore any index", which is the distinction
-    # config.py is careful about. Nothing here scans a library anyway.
-    "PLAYSTICK_INDEX": "",
-    "PLAYSTICK_THUMB_DIR": os.path.join(TMP, "thumbs"),
-    "PLAYSTICK_BUSY_FILE": os.path.join(TMP, "playing"),
-    "PLAYSTICK_RESTORE_FILE": os.path.join(TMP, "restore-airplay"),
-    "PLAYSTICK_ALLOW_NETWORKS": "",
-    "PLAYSTICK_AUDIO": "0",                 # the projector has no speakers
-    "PLAYSTICK_PHONE_AUDIO": "1",
-    # Pacing off by default so the suite is not sleeping through it. The one
-    # test that is ABOUT the pacing patches it back on at a rate of its own.
-    "PLAYSTICK_PHONE_AUDIO_KBPS": "0",
-    "PLAYSTICK_PHONE_AUDIO_BURST": "0",
-    "PLAYSTICK_PHONE_AUDIO_STREAMS": "6",
-    # Empty means airplay_active() answers False without shelling out to ss,
-    # so the interlock is a patch point rather than a dependency on iproute2.
-    "PLAYSTICK_AIRPLAY_PORT": "",
-})
-os.makedirs(os.environ["PLAYSTICK_THUMB_DIR"], exist_ok=True)
-os.makedirs(os.environ["PLAYSTICK_LIBRARY"], exist_ok=True)
+# The settings the daemon will read, written where nothing outside this run can
+# see them. Everything not named here takes config.py's own default, which is
+# the point of writing a partial file: a test that cares about a value sets it,
+# and a value nobody sets is exercised at the default that ships.
+SETTINGS = os.path.join(TMP, "settings.toml")
+LIBRARY_DIR = os.path.join(TMP, "movies")
+# The default database. Most of the HTTP suite never opens it -- the handler
+# reaches the film table through FakeLibrary -- but config.py resolves the path
+# at import whether anything uses it or not, and it must not be /var/lib.
+DB_PATH = os.path.join(TMP, "playstick.db")
+
+with open(SETTINGS, "w") as _handle:
+    _handle.write(_toml({
+        "server": {
+            "ui_file": UI_HTML,
+            # Empty disables the CIDR check, so the tests reach the routes
+            # rather than the 403 in front of them. test_http_api puts it back
+            # for the tests that are about the check itself.
+            "allow_networks": [],
+        },
+        "library": {
+            "path": LIBRARY_DIR,
+        },
+        "database": {"path": DB_PATH},
+        "display": {
+            "busy_file": os.path.join(TMP, "playing"),
+            "restore_file": os.path.join(TMP, "restore-airplay"),
+            "has_audio": False,             # the projector has no speakers
+            # Empty means airplay_active() answers False without shelling out
+            # to ss, so the interlock is a patch point rather than a dependency
+            # on iproute2.
+            "airplay_port": "",
+        },
+        "phone_audio": {
+            "enabled": True,
+            # Pacing off by default so the suite is not sleeping through it.
+            # The one test that is ABOUT the pacing patches it back on at a
+            # rate of its own.
+            "kbps": 0,
+            "burst_seconds": 0,
+            "max_streams": 6,
+        },
+        # No host means NasWatcher.run returns immediately and power is
+        # "unknown", so nothing in the suite opens a socket to a real NAS.
+        # test_nas builds its own watcher with the host it wants.
+        "nas": {"host": ""},
+    }))
+
+os.environ["PLAYSTICK_SETTINGS"] = SETTINGS
+os.makedirs(LIBRARY_DIR, exist_ok=True)
 
 if SERVER not in sys.path:
     sys.path.insert(0, SERVER)
@@ -84,6 +131,13 @@ sys.dont_write_bytecode = True
 
 from playstick import http as api           # noqa: E402
 from playstick import player                # noqa: E402
+from playstick.db import Database           # noqa: E402
+from playstick.library import Library       # noqa: E402
+from playstick.thumbs import Thumbs         # noqa: E402
+# The real etag function, so the fake store below computes the same identity
+# the daemon would. A fake that made its own up would let a 304 test pass
+# against a header no real client would ever be sent.
+from playstick.thumbs import etag_for as real_etag   # noqa: E402
 from playstick.player import Busy           # noqa: E402
 # Re-exported for the same reason as `api`: config is read once at import, and
 # a test module that reached for playstick.* itself could beat this file to it
@@ -94,6 +148,30 @@ from playstick.projector import serial_io   # noqa: E402
 
 
 # -- the fakes
+
+
+class FakeNas:
+    """NasWatcher's two-method surface, plus a record of what was asked.
+
+    The real one opens sockets on a timer; nothing in the HTTP suite wants
+    that, and a test that is about the watcher itself builds a real one against
+    a loopback listener (see test_nas). Here the point is only that the handler
+    reports what it is told and refuses what it is refused.
+    """
+
+    def __init__(self, power="on", can_wake=False):
+        self.power = power
+        self.can_wake = can_wake
+        # What wake() should answer next, and how many times it was called.
+        self.reply = (True, "")
+        self.wakes = 0
+
+    def snapshot(self):
+        return {"power": self.power, "can_wake": self.can_wake}
+
+    def wake(self):
+        self.wakes += 1
+        return self.reply
 
 
 class FakeLibrary:
@@ -165,6 +243,20 @@ class FakePlayer:
         # is four round trips to mpv, and a route that claims to touch nothing
         # has to be held to it.
         self.statuses = 0
+        # The subtitle tracks mpv would report, and which of them is on. The
+        # real ones come out of mpv's track-list; the handler only ever passes
+        # them through, so a list set here is enough to test what it sends.
+        self.subs = []
+        self.sid = 0
+        # Counted rather than recorded in calls, for the same reason status()
+        # is: calls is what the daemon DID, and asking mpv what it has loaded
+        # is not one of those. The count still matters -- /api/status must not
+        # ask while nothing is playing.
+        self.sub_lookups = 0
+        # Where seek() pretends the film is, and how long it is, so the clamp
+        # can be exercised without an mpv.
+        self.position = 0.0
+        self.duration = 0.0
 
     def state(self):
         return self.playing
@@ -219,6 +311,30 @@ class FakePlayer:
 
     def nudge_volume(self, delta):
         self.calls.append(("nudge_volume", delta))
+
+    def seek(self, delta):
+        """The real one clamps to the film and waits for mpv; this one clamps
+        and records. What the handler owes is the coercion and the refusal, and
+        both of those happen before this is reached."""
+        self.calls.append(("seek", delta))
+        target = self.position + float(delta)
+        if self.duration > 5.0:
+            target = min(target, self.duration - 5.0)
+        self.position = max(0.0, target)
+        self.data["position"] = self.position
+        return self.position
+
+    def sub_tracks(self):
+        self.sub_lookups += 1
+        return list(self.subs)
+
+    def set_subtitle(self, track):
+        self.calls.append(("set_subtitle", track))
+        if track and not any(t["n"] == track for t in self.subs):
+            return None
+        self.sid = track
+        self.data["sid"] = track
+        return track
 
 
 class FakeProjectionist:
@@ -335,23 +451,81 @@ class FakeProjector:
 
 
 class FakeThumbs:
-    """Note that the handler does NOT go through this object to find a cached
-    poster -- it calls the real Thumbs.cached_path, which resolves against
-    THUMB_DIR. Only /api/library's has_thumb flag asks the worker."""
+    """The poster store, as a dict.
+
+    The handler goes through this object for everything now -- the bytes, the
+    etag, and the set of films that have one -- where it used to reach past the
+    fake to the real Thumbs.cached_path and a file under THUMB_DIR. That change
+    is the point of the fake being able to hold bytes at all: a test that wants
+    a poster served puts one here rather than writing a JPEG to disk.
+    """
 
     def __init__(self):
         self.requested = []
-        self.have_ids = set()
+        # id -> (bytes, mime, etag)
+        self.stored = {}
         self.pending_count = 0
+        self.cleared = []
+
+    def add(self, ident, data=b"\xff\xd8\xffjpeg", mime="image/jpeg"):
+        """One poster, with the etag the real store would compute for it."""
+        self.stored[ident] = (data, mime, real_etag(data))
+        return self.stored[ident][2]
+
+    def get(self, ident):
+        return self.stored.get(ident)
+
+    def etag(self, ident):
+        found = self.stored.get(ident)
+        return found[2] if found else ""
 
     def have(self, ident):
-        return ident in self.have_ids
+        return ident in self.stored
+
+    def haves(self):
+        return set(self.stored)
+
+    def store(self, ident, data, mime="image/jpeg", source="admin"):
+        self.stored[ident] = (data, mime, real_etag(data))
+        return self.stored[ident][2]
+
+    def clear(self, ident):
+        self.cleared.append(ident)
+        return self.stored.pop(ident, None) is not None
 
     def request(self, ident):
         self.requested.append(ident)
 
     def pending(self):
         return self.pending_count
+
+
+def real_store(name="store"):
+    """A real Database, Library and Thumbs on a scratch file.
+
+    For the tests that are ABOUT the store rather than about the routing -- the
+    schema, the sync, the overrides -- where a fake would only be asserting
+    that the fake works. Each caller gets its own file, so nothing leaks
+    between tests the way one shared database would.
+    """
+    path = os.path.join(TMP, "db-%s-%d.sqlite" % (name, next(_db_counter)))
+    db = Database(path)
+    # A scratch database being created is not news, and thirty-odd of these
+    # lines would be the only thing in the suite's output. The real one logs it
+    # once per start, which is where it belongs.
+    with mock.patch("playstick.db.log"):
+        db.migrate()
+    # Closed at exit rather than per test: nothing here reopens a file, and a
+    # connection left to the garbage collector is a ResourceWarning that would
+    # bury a real one.
+    _open_databases.append(db)
+    library = Library(db)
+    return db, library, Thumbs(db, library, None)
+
+
+_db_counter = itertools.count()
+_open_databases = []
+atexit.register(lambda: [d.close() for d in _open_databases])
 
 
 # -- the server
@@ -384,8 +558,11 @@ class ApiTest(unittest.TestCase):
         self.player = FakePlayer()
         self.projectionist = FakeProjectionist(self.player)
         self.thumbs = FakeThumbs()
+        self.nas = FakeNas()
         handler = type("TestHandler", (api.Handler,), {
+            "db": None,
             "library": self.library,
+            "nas": self.nas,
             "player": self.player,
             "projectionist": self.projectionist,
             "thumbs": self.thumbs,
@@ -415,7 +592,13 @@ class ApiTest(unittest.TestCase):
         conn = conn or self.connect(timeout=timeout)
         payload = None
         headers = dict(headers or {})
-        if body is not None:
+        if isinstance(body, bytes):
+            # Sent as-is. PUT /api/admin/thumb is the one route on this daemon
+            # whose body is not JSON, and a helper that encoded it anyway could
+            # not test it at all.
+            payload = body
+            headers.setdefault("Content-Type", "application/octet-stream")
+        elif body is not None:
             payload = json.dumps(body).encode()
             headers.setdefault("Content-Type", "application/json")
         conn.request(method, path, body=payload, headers=headers)

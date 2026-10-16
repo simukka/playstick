@@ -143,6 +143,12 @@ export class FakeEl {
     return this.attrs.get(k) ?? null;
   }
 
+  // Pointer capture, as no-ops. The skip buttons take it so a hold survives a
+  // thumb sliding off a round control; nothing here has geometry for that to
+  // mean anything, and the code under test only has to be able to call it.
+  setPointerCapture(): void {}
+  releasePointerCapture(): void {}
+
   addEventListener(type: string, fn: (ev: unknown) => void): void {
     const list = this.handlers.get(type) ?? [];
     list.push(fn);
@@ -150,10 +156,11 @@ export class FakeEl {
   }
   removeEventListener(): void {}
 
-  // Drive a handler the way a tap would.
-  fire(type: string): void {
+  // Drive a handler the way a tap would. `extra` carries whatever the event
+  // under test is read for -- a pointerId, so far.
+  fire(type: string, extra: Record<string, unknown> = {}): void {
     for (const fn of this.handlers.get(type) ?? []) {
-      fn({ preventDefault() {} });
+      fn({ preventDefault() {}, pointerId: 1, ...extra });
     }
   }
   click(): void {

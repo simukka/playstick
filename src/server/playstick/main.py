@@ -1,6 +1,5 @@
 """Wiring: build the workers, hand them to the handler, serve."""
 
-import os
 import signal
 import threading
 import time
@@ -8,9 +7,11 @@ from http.server import ThreadingHTTPServer
 
 from .config import (
     BIND, LIBRARY, PORT, PROJECTOR_DEVICE, PROJECTOR_MODEL, PROJECTOR_TIMEOUT,
-    THUMB_DIR, log
+    log
 )
+from .db import Database
 from .library import Library
+from .nas import NasWatcher
 from .thumbs import Thumbs
 from .player import Player
 from .projectionist import Projectionist
@@ -19,10 +20,19 @@ from .http import Handler
 
 
 def main():
-    if not os.path.isdir(THUMB_DIR):
-        os.makedirs(THUMB_DIR, exist_ok=True)
+    # Before anything else and before any thread: every worker below takes a
+    # connection from this, and a worker that opened one against a file with no
+    # tables in it would fail on its first query rather than at start-up where
+    # somebody is watching.
+    db = Database()
+    db.migrate()
 
-    library = Library()
+    library = Library(db)
+    # The library so the watcher can ask for a rescan the moment the NAS
+    # answers again: without it the grid stays empty until the next
+    # scheduled scan, which to whoever pressed the button looks exactly
+    # like the button not having worked.
+    nas = NasWatcher(library=library)
     player = Player()
     # Nothing is opened here: the serial port is opened on the first command,
     # so a projector that is unplugged at boot cannot delay the web UI coming
@@ -34,7 +44,7 @@ def main():
     # extracted over CIFS while a lamp is warming up as well as while a film
     # is running. Thumbs only ever asks for a state, and this answers with the
     # composite one.
-    thumbs = Thumbs(library, projectionist)
+    thumbs = Thumbs(db, library, projectionist)
 
     # Clean up after whatever killed the last run before serving anything.
     player.reconcile()
@@ -51,8 +61,13 @@ def main():
     threading.Thread(target=thumbs.run, args=(stopping,), daemon=True).start()
     threading.Thread(target=projectionist.run, args=(stopping,),
                      daemon=True).start()
+    # Returns immediately when no NAS is configured, so this costs an
+    # unconfigured install one thread that exits.
+    threading.Thread(target=nas.run, args=(stopping,), daemon=True).start()
 
+    Handler.db = db
     Handler.library = library
+    Handler.nas = nas
     Handler.thumbs = thumbs
     Handler.player = player
     Handler.projectionist = projectionist

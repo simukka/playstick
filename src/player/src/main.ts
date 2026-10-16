@@ -9,7 +9,7 @@ import { CLOCK, SYNC, TIMING } from "./config";
 import { ServerClock } from "./clock";
 import { FilmClock } from "./timecode";
 import { SyncController } from "./sync";
-import { LibraryModel } from "./library";
+import { LibraryModel, fullTitle } from "./library";
 import { ApiClient } from "./net";
 import { StatusPresenter } from "./presenter";
 import { LibraryView } from "./library-view";
@@ -18,7 +18,9 @@ import { AudioSession, type AudioElement } from "./audio";
 import { Tunables } from "./tunables";
 import { Telemetry } from "./telemetry";
 import { SoundSheet } from "./sound-sheet";
+import { SubsSheet } from "./subs-sheet";
 import { FilterSheet } from "./filter-sheet";
+import { EpisodeSheet } from "./episode-sheet";
 import { SheetManager } from "./sheet";
 import { TimeDriver } from "./time-driver";
 import { Poller } from "./poller";
@@ -108,15 +110,77 @@ function boot(): void {
     libraryLangs: () => model.facets.langs,
     storage: localStorage,
   });
+  const subsSheet = new SubsSheet(doc, {
+    // The status the POST returns, applied at once: somebody in the dark has
+    // just tapped a language and the tick has to move now, not on the next
+    // poll. A refusal (the film ended between the tap and the packet) becomes
+    // the banner, which is the only account of why nothing happened.
+    choose: (track) => {
+      void api.subtitle(track).then((r) => {
+        if (r.ok) {
+          onStatus(r.data as unknown as Status);
+          subsSheet.paint();
+        } else if (r.data.error) {
+          presenter.banner.show(r.data.error, 6000);
+          sheets.closeAll();
+        }
+      });
+    },
+  });
   const filterSheet = new FilterSheet(doc, model, () => libraryView.render());
+  const episodeSheet = new EpisodeSheet(doc, (id) => {
+    sheets.closeAll();
+    play(id);
+  });
   const sheets = new SheetManager(doc, {
     sound: soundSheet.root,
+    subs: subsSheet.root,
     filter: filterSheet.root,
+    episodes: episodeSheet.root,
     onSoundOpen: () => soundSheet.paint(),
+    onSubsOpen: () => subsSheet.paint(),
     onFilterOpen: () => filterSheet.paint(),
+    onEpisodesOpen: () => episodeSheet.paint(),
   });
 
-  const libraryView = new LibraryView(doc, model, stamp, (id) => play(id), sheets.filterBtn);
+  // A tile is a film to play or a series to choose from. The model knows which,
+  // because it is what folded the episodes into the tile in the first place.
+  const openTile = (id: string): void => {
+    const show = model.show(id);
+    if (show) {
+      episodeSheet.load(show);
+      sheets.showEpisodes(true);
+    } else {
+      play(id);
+    }
+  };
+  const libraryView = new LibraryView(doc, model, stamp, openTile, sheets.filterBtn);
+
+  // The one control that is not a playback button, so it is not the Controls'
+  // business -- but it wants the same double-tap lock, for the same reason:
+  // children press twice, and the daemon answers a second packet with a
+  // refusal the page would then have to explain. The daemon has a cooldown of
+  // its own for the six-phones case; this one is about one thumb.
+  let nasBusyUntil = 0;
+  const wakeNas = (): void => {
+    const now = Date.now();
+    if (now < nasBusyUntil) {
+      return;
+    }
+    nasBusyUntil = now + 800;
+    void api.wakeNas().then((r) => {
+      if (r.ok) {
+        // The status the POST returned, so the banner flips to "waking" now
+        // rather than up to three seconds from now. Somebody is watching it.
+        presenter.apply(r.data as unknown as Status);
+      } else if (r.data.error) {
+        // Held, because it is the only account of why nothing happened and the
+        // next poll is a second away.
+        presenter.banner.show(r.data.error, 6000);
+      }
+    });
+  };
+
   const presenter = new StatusPresenter(doc, {
     reload,
     stamp,
@@ -124,21 +188,26 @@ function boot(): void {
     library: libraryView.root,
     grid: libraryView.gridEl,
     filterBtn: sheets.filterBtn,
+    subsBtn: sheets.subsBtn,
+    wakeNas,
   });
 
-  new Controls(
+  const controls = new Controls(
     {
       toggle: presenter.playing.toggle,
       stop: presenter.playing.stop,
       cancel: presenter.preparing.cancel,
       volDown: presenter.playing.volDown,
       volUp: presenter.playing.volUp,
+      skipBack: presenter.playing.skipBack,
+      skipFwd: presenter.playing.skipFwd,
     },
     api,
     {
       stateOf: () => presenter.state,
       apply: (s) => onStatus(s),
       toLibrary: () => presenter.views.show("library"),
+      onSeekPreview: (pending) => presenter.playing.showSeek(pending),
     },
   );
 
@@ -149,10 +218,13 @@ function boot(): void {
     presenter.banner.root,
     sheets.audioBtn,
     sheets.filterBtn,
+    sheets.subsBtn,
     soundSheet.tapToListen,
     sheets.scrim,
     soundSheet.root,
+    subsSheet.root,
     filterSheet.root,
+    episodeSheet.root,
     libraryView.root,
     presenter.preparing.root,
     presenter.playing.root,
@@ -191,10 +263,19 @@ function boot(): void {
     }
     presenter.apply(s);
     audio.onStatus(s);
+    subsSheet.onStatus(s);
+    if (sheets.subsOpen) {
+      subsSheet.paint();
+    }
     const onGrid =
       s.state !== "playing" && s.state !== "paused" && s.state !== "preparing";
-    if (onGrid && Date.now() - libraryFetchedAt > 10000) {
-      loadLibrary();
+    if (onGrid) {
+      // The film went away -- it ended, or somebody else stopped it. A skip
+      // queued against a timeline that no longer exists must not be sent.
+      controls.pad.clear();
+      if (Date.now() - libraryFetchedAt > 10000) {
+        loadLibrary();
+      }
     }
   }
 
@@ -210,6 +291,19 @@ function boot(): void {
         }
         if (sheets.filterOpen) {
           filterSheet.paint();
+        }
+        // The open show, re-read from the library that just arrived: an
+        // episode prepared while the sheet was up appears in it, and a show
+        // with nothing left to offer closes rather than sitting there empty.
+        const current = episodeSheet.current;
+        if (sheets.episodesOpen && current) {
+          const fresh = model.show(current.id);
+          if (fresh) {
+            episodeSheet.load(fresh);
+            episodeSheet.paint();
+          } else {
+            sheets.showEpisodes(false);
+          }
         }
         if (d.available === false) {
           libraryView.unavailable();
@@ -227,7 +321,7 @@ function boot(): void {
     }
     // Drawn before the POST answers, with the poster the grid already has, so
     // the tap makes a picture of the right film immediately.
-    presenter.preparing.begin(item.title, id);
+    presenter.preparing.begin(fullTitle(item), id);
     presenter.views.show("preparing");
     void api
       .play(id)

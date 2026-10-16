@@ -68,14 +68,15 @@ export class LibraryView {
     doc: Document,
     private readonly model: LibraryModel,
     stamp: (path: string) => string,
-    onPlay: (id: string) => void,
+    /** A tile was tapped: a film's id, or a series' (see LibraryModel.show). */
+    onOpen: (id: string) => void,
     /** The funnel, built by the sheet manager: lit while a filter is on. */
     private readonly filterBtn: HTMLElement,
     now: () => number = Date.now,
   ) {
     this.doc = doc;
     this.gridEl = h(doc, "div", { id: "grid" });
-    this.grid = new Grid(doc, this.gridEl, stamp, onPlay, now);
+    this.grid = new Grid(doc, this.gridEl, stamp, onOpen, now);
     this.empty = h(doc, "div", { id: "empty", hidden: true });
     // Both ways out of an over-filtered grid do the same thing; this is the one
     // that is already under the child's thumb when they find themselves looking

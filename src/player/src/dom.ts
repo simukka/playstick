@@ -111,6 +111,9 @@ export interface TileItem {
   id: string;
   title: string;
   has_thumb?: boolean;
+  /** Whose poster to draw, when it is not the tile's own id: a series tile has
+   * no row of its own on the daemon, and borrows its first episode's. */
+  thumb?: string;
 }
 
 interface Tile {
@@ -166,7 +169,7 @@ export class Grid {
       // no-store, so a fresh request gets the real frame; the &t is which second
       // this tile gave up on the placeholder.
       if (it.has_thumb && !tile.hasThumb) {
-        tile.img.src = this.stamp("/api/thumb/" + it.id) + "&t=" + this.now();
+        tile.img.src = this.stamp("/api/thumb/" + (it.thumb ?? it.id)) + "&t=" + this.now();
       }
       tile.hasThumb = !!it.has_thumb;
 
@@ -189,7 +192,7 @@ export class Grid {
     (root as HTMLButtonElement).type = "button";
 
     const img = this.doc.createElement("img") as HTMLImageElement;
-    img.src = this.stamp("/api/thumb/" + it.id);
+    img.src = this.stamp("/api/thumb/" + (it.thumb ?? it.id));
     img.alt = "";
     img.loading = "lazy";
 

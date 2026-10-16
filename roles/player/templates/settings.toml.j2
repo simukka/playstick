@@ -1,0 +1,193 @@
+{{ ansible_managed | comment }}
+# Every setting the daemon has, rendered from group_vars/all.yml. Nothing here
+# is written by hand and nothing here is read by anything but
+# src/server/playstick/config.py.
+#
+# THE RENDERING TRICK, because it looks like a missing quote and is not:
+# `| to_json` output is already valid TOML for strings, integers, floats,
+# booleans and flat arrays of strings -- TOML basic strings use JSON's escape
+# set. So every line below is `key = {{ '{{' }} var | to_json {{ '}}' }}` and
+# nothing hand-escapes a film title with a quote in it, a regex full of
+# backslashes, or the "20%" that the old Environment= line needed doubled to
+# "20%%" because systemd reads % as a specifier. That whole class of bug went
+# away with the unit lines this file replaced.
+
+[server]
+bind = {{ player_bind | to_json }}
+port = {{ player_port | int | to_json }}
+ui_file = {{ player_ui_file | to_json }}
+allow_networks = {{ player_allow_networks | to_json }}
+
+{# The share, and how often to check it is still there. There is no index and
+   no overlay here any more: the film table lives in the database below, put
+   there by the admin app. What is left is a path to read films from and a
+   probe interval. #}
+[library]
+path = {{ player_library_path | to_json }}
+scan_interval = {{ player_scan_interval | int | to_json }}
+subtitles = {{ player_subtitles | bool | to_json }}
+
+{# The one file this appliance owns and writes. On /var/lib rather than the
+   share, because the share is mounted read-only -- see player_db_path in
+   group_vars/all.yml, and db.py for what it holds. #}
+[database]
+path = {{ player_db_path | to_json }}
+
+{# The daemon learns the NAS exists only so it can say "it is off" and offer to
+   switch it on. It does not mount anything -- that is the automount's job and
+   deliberately stays there. An empty host switches the whole watcher off and
+   the page behaves exactly as it did before the feature existed. #}
+[nas]
+host = {{ nas_server | default('') | to_json }}
+mac = {{ nas_mac | default('') | to_json }}
+mount_unit = {{ nas_mount_unit | default('') | to_json }}
+probe_port = {{ nas_probe_port | int | to_json }}
+probe_timeout = {{ nas_probe_timeout | float | to_json }}
+probe_interval = {{ nas_probe_interval | int | to_json }}
+probe_interval_down = {{ nas_probe_interval_down | int | to_json }}
+probe_interval_waking = {{ nas_probe_interval_waking | int | to_json }}
+wake_broadcast = {{ nas_wake_broadcast | to_json }}
+wake_port = {{ nas_wake_port | int | to_json }}
+wake_cooldown = {{ nas_wake_cooldown | int | to_json }}
+wake_window = {{ nas_wake_window | int | to_json }}
+
+{# Only the extraction is configured here; the posters themselves are rows in
+   the database. This is the fallback for a film the admin app had no poster
+   for -- see thumbs.py. #}
+[thumbs]
+at = {{ player_thumb_at | to_json }}
+timeout = {{ player_thumb_timeout | int | to_json }}
+{# Poster extraction, through the same binary as playback so that ffmpeg never
+   has to be installed: there is no room on the eMMC and no CPU to spare for a
+   second decoder. An array rather than a joined string, so a path with a space
+   in it survives -- the old PLAYSTICK_THUMB_ARGS went through shlex.split. #}
+{% set thumb_argv = [
+     '--no-config',
+     '--really-quiet',
+     '--frames=1',
+     '--aid=no',
+     '--sid=no',
+     '--hwdec=no',
+     '--vf=scale=' ~ player_thumb_width ~ ':-2',
+     '--vo=image',
+     '--vo-image-format=jpg',
+     '--vo-image-jpeg-quality=80',
+   ] %}
+args = {{ thumb_argv | to_json }}
+
+[mpv]
+binary = {{ player_mpv_binary | to_json }}
+socket = {{ player_mpv_socket | to_json }}
+tty = {{ player_mpv_tty | to_json }}
+{# mpv's flags. Built here rather than in the daemon so that policy stays in
+    Ansible and the Python stays mechanism.
+
+    --drm-mode is the one that is easy to miss and expensive to get wrong.
+    kmssink never modesets -- force-modesetting=true fails on this driver, 0 of
+    24 runs -- so UxPlay simply inherits whatever mode the kernel cmdline set.
+    mpv is the first thing on this box that picks its own mode, and left at
+    "preferred" it would pick the connector's preferred mode. On this projector
+    both detailed timings in the base EDID block are interlaced, so that is
+    1920x1080i@60: it would silently undo drm_force_mode and put a deinterlacer
+    back in the path. Pin it to the mode the cmdline already forces.
+
+    --video-sync=audio rather than display-resample: the latter resamples audio
+    against the display clock every frame, and this CPU has no headroom to
+    spend on that. --profile=fast selects bilinear scaling and no dither, which
+    is the right trade on 12 execution units.
+
+    --ao=null is load-bearing beyond "the projector has no speakers", and this
+    is the trap to know about before optimising it. mpv's null AO defaults to
+    untimed=no: it emulates a real device consuming samples in real time, and
+    --video-sync=audio paces the film against that. So time-pos advances at
+    exactly wall-clock rate, and time-pos is what every phone in the room syncs
+    its headphone audio to -- see player_phone_audio.
+
+    The obvious saving on a CPU with no headroom is --aid=no, on the reasonable
+    grounds that decoding an AC3 track nobody can hear is waste. Do not. It
+    moves the master clock out from under the one feature that trusts it. The
+    audio decode it saves is single-digit percent of one core; the failure it
+    causes is everybody's sound drifting away from the picture.
+
+    --framedrop=vo is the reassuring half of the same story: it drops the
+    DISPLAY of a late frame without stalling the clock, so ordinary frame drops
+    desync nobody. Only a demuxer stall does, and the daemon reports that as
+    paused-for-cache so the phones can wait it out.
+
+    --input-terminal=no matters because the daemon hands mpv tty1 on stdin (its
+    DRM backend wants a VT for console switching). Without this mpv would put
+    that terminal into raw mode and act on stray console keystrokes.
+
+    --keep-open=no and --idle=no are load-bearing for the arbitration: mpv must
+    exit at end of file, because its exit is how the daemon learns to give the
+    display back.
+
+    player_mpv_extra_args is split with str.split() rather than the `split`
+    filter, so it does not depend on an ansible-core version, and it still
+    takes the plain space-separated string it always did. #}
+{% set mpv_argv = [
+     '--no-config',
+     '--really-quiet',
+     '--vo=' ~ player_vo,
+     ('--gpu-context=' ~ player_gpu_context) if player_vo in ['gpu', 'gpu-next'] else '',
+     '--drm-device=' ~ (drm_card_path | default('/dev/dri/by-path/pci-' ~ drm_pci_slot ~ '-card', true)),
+     '--drm-connector=' ~ drm_force_connector,
+     '--drm-mode=' ~ (drm_force_mode if drm_force_mode | length > 0 else 'preferred'),
+     '--hwdec=' ~ player_hwdec,
+     '--profile=fast',
+     '--video-sync=audio',
+     '--framedrop=vo',
+     '--interpolation=no',
+     '--osd-level=0',
+     '--no-osc',
+     '--input-terminal=no',
+     '--idle=no',
+     '--keep-open=no',
+     '--sub-auto=fuzzy',
+     '--cache=yes',
+     '--demuxer-max-bytes=48MiB',
+     '--demuxer-max-back-bytes=16MiB',
+     '--cache-on-disk=no',
+     ('--ao=alsa' if player_audio | bool else '--ao=null'),
+     ('--audio-device=' ~ player_audio_device) if (player_audio | bool and player_audio_device | length > 0) else '',
+     ('--audio-channels=' ~ player_audio_channels) if player_audio | bool else '',
+   ] | select | list + (player_mpv_extra_args | default('') | trim).split() %}
+args = {{ mpv_argv | to_json }}
+
+[phone_audio]
+{# Policy here, mechanism in the daemon: the rate limit is a property of this
+   box's single Wi-Fi radio rather than of the code that obeys it. #}
+enabled = {{ player_phone_audio | bool | to_json }}
+kbps = {{ player_phone_audio_kbps | int | to_json }}
+burst_seconds = {{ player_phone_audio_burst_seconds | float | to_json }}
+max_streams = {{ player_phone_audio_max_streams | int | to_json }}
+
+[display]
+busy_file = {{ idle_busy_file | to_json }}
+restore_file = {{ player_restore_file | to_json }}
+airplay_unit = {{ player_airplay_unit | trim | to_json }}
+{# The gate that refuses to start a film while somebody is mirroring. Same
+   port, same question, as the idle clock's blank countdown. #}
+airplay_port = {{ uxplay_port | int | to_json }}
+settle_seconds = {{ player_settle_seconds | float | to_json }}
+has_audio = {{ player_audio | bool | to_json }}
+
+{# The projector, over RS-232C. Policy here, mechanism in the daemon: how long
+   a lamp takes and what counts as somebody using the room are facts about this
+   installation, not about the code that obeys them.
+
+   An empty model is the default and builds a NullProjector, so every line
+   below is inert until somebody sets one -- see the projector section of
+   group_vars/all.yml for why that is the shipped state and what to run before
+   changing it. #}
+[projector]
+model = {{ player_projector_model | to_json }}
+device = {{ player_projector_device | default('') | to_json }}
+input = {{ player_projector_input | default('') | upper | to_json }}
+timeout = {{ player_projector_timeout | float | to_json }}
+warmup_seconds = {{ player_projector_warmup_seconds | float | to_json }}
+ready_seconds = {{ player_projector_ready_seconds | float | to_json }}
+idle_minutes = {{ player_projector_idle_minutes | float | to_json }}
+tick_seconds = {{ player_projector_tick_seconds | float | to_json }}
+wake_on_airplay = {{ player_projector_wake_on_airplay | bool | to_json }}
+airplay_wake_ticks = {{ player_projector_airplay_wake_ticks | int | to_json }}

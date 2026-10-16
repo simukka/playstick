@@ -27,6 +27,51 @@
           `smbclient -L {{ nas_server }} -U <user>`.
         success_msg: "Library share is //{{ nas_server }}/{{ nas_share_unc }}."
 
+    # The MAC is optional -- an empty one costs the wake-on-LAN button and
+    # nothing else -- but a WRONG one is worth catching here. A malformed MAC
+    # produces a packet that leaves the stick, is ignored by every NIC on the
+    # LAN, and looks from the page exactly like a NAS whose wake-on-LAN is
+    # switched off in its own firmware. That is two hours of tcpdump to find a
+    # typo, so it fails in the play instead, where there is room to say which
+    # variable and what shape it wants.
+    # Three patterns rather than one with a backreference, and deliberately so:
+    # a backreference here would have to survive YAML single-quoting AND Jinja's
+    # own string lexer, and getting that wrong is silent -- the pattern still
+    # compiles, it just stops matching. Spelled out, it accepts exactly what
+    # parse_mac() in src/server/playstick/nas.py accepts: colons throughout,
+    # hyphens throughout, or no separator at all. A mixed "00:11-32:aa-bb:cc"
+    # is refused by both, which is the point -- a value this check passes and
+    # the daemon then rejects would hide the button with no explanation.
+    - name: Refuse a MAC address that is not one
+      ansible.builtin.assert:
+        that:
+          - nas_mac | regex_search('^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$')
+            or nas_mac | regex_search('^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$')
+            or nas_mac | regex_search('^[0-9A-Fa-f]{12}$')
+        fail_msg: >-
+          nas_mac is "{{ nas_mac }}", which is not a MAC address. It wants six
+          hex octets -- "00:11:32:aa:bb:cc", "00-11-32-aa-bb-cc" or
+          "001132aabbcc". Find the NAS's with `ping {{ nas_server }}` followed
+          by `arp -n {{ nas_server }}`, or under DSM -> Control Panel ->
+          Network -> Network Interface. Leave it empty to skip wake-on-LAN
+          entirely; the page then reports an unreachable library without
+          offering to do anything about it.
+        success_msg: "Wake-on-LAN will target {{ nas_mac }}."
+      when: nas_mac | default('') | length > 0
+
+    # Not an assert, because nothing here can check it and it is the other half
+    # of the feature: the packet is useless unless the NAS itself is listening
+    # for one. On DSM that is Control Panel -> Hardware & Power -> "Enable WOL
+    # on LAN 1". The symptom of it being off is a packet tcpdump can see
+    # leaving this box and a NAS that stays dark.
+    - name: Note what wake-on-LAN still needs at the other end
+      ansible.builtin.debug:
+        msg: >-
+          Wake-on-LAN is configured for {{ nas_mac }}. It only works if the NAS
+          has WOL enabled in its own settings -- on a Synology, Control Panel ->
+          Hardware & Power -> Enable WOL on LAN 1.
+      when: nas_mac | default('') | length > 0
+
     - name: Install the CIFS mount helper
       ansible.builtin.apt:
         name: cifs-utils

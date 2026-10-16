@@ -48,6 +48,15 @@ TIMECODE_JUMP = 0.5
 TIMECODE_WINDOW = 8
 TIMECODE_MAX_AGE = 4.0
 
+# How close to the end of a film a forward seek is allowed to land.
+#
+# Load-bearing rather than tidy: the argv carries --keep-open=no, because mpv
+# exiting is how the daemon learns to give the display back. A seek past the
+# end is therefore not a seek, it is the film ending -- and a child holding the
+# forward button down for four seconds must arrive near the end still playing,
+# able to hold the other one and come back.
+SEEK_TAIL = 5.0
+
 
 class Player:
     def __init__(self):
@@ -68,6 +77,11 @@ class Player:
         self._timecode = None
         self._window = []
         self._epoch = 0
+        # The film's subtitle tracks as mpv numbers them, or None for "not
+        # asked yet". Asked once per film rather than once per status: the list
+        # cannot change while one file is loaded, and /api/status is on the
+        # path six phones walk every second.
+        self._subs = None
 
     # -- state
 
@@ -83,7 +97,10 @@ class Player:
 
     def current_title(self):
         with self._lock:
-            return self._item["title"] if self._item else ""
+            # full_title names the series as well when this is an episode.
+            if not self._item:
+                return ""
+            return self._item.get("full_title") or self._item["title"]
 
     def current_item(self):
         """The whole library entry, for the caller that needs more of it than a
@@ -149,7 +166,12 @@ class Player:
             # nowhere near the film, precisely so that it never has to write
             # into a library it was given read-only.
             if SUBTITLES:
-                argv += ["--sub-file=" + sub for sub in item.get("subs") or []]
+                argv += ["--sub-file=" + sub["path"] for sub in item.get("subs") or []]
+            # Loaded, and off. Which subtitles are on the projector is a
+            # decision somebody makes from a phone while watching, so nothing
+            # is on the picture until a phone asks for it -- including whatever
+            # text tracks mpv found inside the container itself.
+            argv += ["--sid=no"]
             argv += ["--input-ipc-server=" + MPV_SOCKET, "--", item["path"]]
             if progress:
                 progress("starting")
@@ -168,6 +190,7 @@ class Player:
                     os.close(tty)
             self._item = item
             self._status_cache = (0.0, {})
+            self._subs = None
             # A different film is a different timeline even if the last one
             # ended at the same number of seconds in.
             self._timecode = None
@@ -254,6 +277,7 @@ class Player:
             # handed the one it was already following.
             self._timecode = None
             self._window = []
+            self._subs = None
             try:
                 os.unlink(MPV_SOCKET)
             except OSError:
@@ -388,6 +412,108 @@ class Player:
         self._status_cache = (0.0, {})
         return target
 
+    def seek(self, delta):
+        """Move the film by `delta` seconds. Returns where it landed, or None.
+
+        ABSOLUTE, not relative, and that is the difference between a control
+        that works and one that nearly does. mpv's --hr-seek default is precise
+        for absolute seeks and keyframe-only for relative ones, so a ten-second
+        nudge asked for relatively lands wherever the nearest keyframe happens
+        to be -- which on a two-second GOP is anywhere between four seconds and
+        sixteen. The page promises ten.
+
+        Clamped at both ends here rather than left to mpv. The far end is
+        SEEK_TAIL, above; the near end is 0, because mpv answers a negative
+        absolute seek by refusing rather than by going to the start.
+
+        Then it WAITS for the seek to land, briefly. The caller is an HTTP
+        route that answers with a status payload, and mpv's reply to a seek
+        command means "queued", not "done" -- so without this the page would be
+        told the position it had before it pressed the button, draw it, and
+        correct itself a poll later. This is the same contract set_pause()
+        documents, bought at the cost of a request thread for a few hundred
+        milliseconds. If it does not land in that time we answer anyway; the
+        next poll is a second away and _advance() will have moved the epoch by
+        then either way.
+        """
+        position = self.get_property("time-pos")
+        if position is None:
+            return None
+        duration = self.get_property("duration") or 0
+        target = position + float(delta)
+        if duration > SEEK_TAIL:
+            target = min(target, duration - SEEK_TAIL)
+        target = max(0.0, target)
+        self.command(["seek", round(target, 3), "absolute"])
+        deadline = time.time() + 0.6
+        while time.time() < deadline:
+            landed = self.get_property("time-pos")
+            # A whole second of slack: an absolute seek is precise, but mpv
+            # reports time-pos on frame boundaries and a paused film does not
+            # repaint immediately. This only decides how long to wait.
+            if landed is not None and abs(landed - target) < 1.0:
+                break
+            time.sleep(0.05)
+        # Same as everywhere else: dropping the cache is what makes the next
+        # status re-sample, and _advance() turns the jump it then sees into a
+        # new epoch -- which is how every listening phone learns to re-place
+        # its headphones.
+        self._status_cache = (0.0, {})
+        return target
+
+    def sub_tracks(self):
+        """The film's subtitle tracks, as [{"n", "lang", "title"}].
+
+        Asked of mpv rather than counted off the --sub-file arguments, because
+        those are not the whole list: a container can carry text subtitle
+        tracks of its own and mpv numbers everything it loaded together. The
+        answer is cached for the life of the film -- a loaded file's track list
+        does not change -- and reset by start() and _teardown().
+
+        Language comes from the index where the index knows it. mpv guesses the
+        language of an external file from its name, and while prep's naming
+        (<id>.<lang>.srt) happens to be guessable, a feature that stops working
+        because a filename convention changed is not one worth shipping.
+        """
+        with self._lock:
+            if self._subs is not None:
+                return list(self._subs)
+            item = self._item
+        tracks = self.get_property("track-list")
+        if tracks is None:
+            # mpv has not loaded the file yet. Not cached: "no tracks" and "not
+            # asked yet" are different answers and only one of them is final.
+            return []
+        by_path = {s["path"]: s["lang"]
+                   for s in (item or {}).get("subs") or []}
+        out = []
+        for t in tracks:
+            if t.get("type") != "sub":
+                continue
+            lang = by_path.get(t.get("external-filename") or "") or t.get("lang") or "und"
+            out.append({"n": int(t.get("id") or 0),
+                        "lang": str(lang).lower(),
+                        "title": t.get("title") or ""})
+        with self._lock:
+            if self._item is item:
+                self._subs = out
+        return list(out)
+
+    def set_subtitle(self, track):
+        """Put one subtitle track on the picture, or 0 for none.
+
+        Checked against the list above before anything reaches mpv: the number
+        arrives from an unauthenticated LAN client, and the rule this process
+        follows everywhere is that nothing a client sends is used for more than
+        looking something up in a table it did not write.
+        """
+        track = int(track)
+        if track and not any(t["n"] == track for t in self.sub_tracks()):
+            return None
+        self.command(["set_property", "sid", track if track else "no"])
+        self._status_cache = (0.0, {})
+        return track
+
     def _advance(self, position, at, paused, buffering):
         """Fit one reading onto the published timeline, or begin a new one.
 
@@ -456,6 +582,15 @@ class Player:
                               "rate": rate, "epoch": self._epoch}
             return dict(self._timecode)
 
+    def _sid(self):
+        sid = self.get_property("sid")
+        if sid is None or isinstance(sid, bool):
+            return 0
+        try:
+            return int(sid)
+        except (TypeError, ValueError):
+            return 0
+
     @staticmethod
     def _at_now(data):
         """The sample, with `position` moved to now off the timecode.
@@ -507,6 +642,10 @@ class Player:
             # permanently ahead afterwards, so the page has to know.
             "buffering": bool(self.get_property("paused-for-cache")),
             "volume": self.get_property("volume"),
+            # Which subtitle track is on the picture, 0 for none. mpv answers
+            # `false` rather than a number when there is none, and False is an
+            # int in Python, so the bool check is not decoration.
+            "sid": self._sid(),
         }
         data["timecode"] = self._advance(
             position, (before + after) / 2.0, data["paused"], data["buffering"])

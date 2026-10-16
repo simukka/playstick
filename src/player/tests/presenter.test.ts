@@ -5,7 +5,7 @@ import { makeShell } from "./harness/page";
 import { asDocument } from "./harness/dom";
 import type { Status } from "../src/types";
 
-function present() {
+function present(wakeNas?: () => void) {
   const shell = makeShell();
   const doc = shell.doc;
   const reloads: number[] = [];
@@ -15,6 +15,7 @@ function present() {
     reload,
     stamp: (path) => path + "?v=here",
     now: () => clock,
+    wakeNas,
     ...shell.parts,
   });
   return { doc, p, reloads, setClock: (t: number) => (clock = t) };
@@ -28,6 +29,10 @@ const on = (doc: ReturnType<typeof makeShell>["doc"], id: string) =>
   doc.getElementById(id)!.classList.contains("on");
 const text = (doc: ReturnType<typeof makeShell>["doc"], id: string) =>
   doc.getElementById(id)!.textContent;
+// The banner's message and its optional button are separate elements, so the
+// message is read from bannerMsg rather than from the container: the DOM stub's
+// textContent is its own text, not its descendants', which is deliberate --
+// see the setter in harness/dom.ts.
 
 describe("StatusPresenter view switching", () => {
   it("starts on the library", () => {
@@ -75,20 +80,20 @@ describe("StatusPresenter banners", () => {
     const { doc, p } = present();
     p.apply(status({ state: "playing", projector: { model: "x", power: "on", fault: "no link" } }));
     expect(on(doc, "banner")).toBe(true);
-    expect(text(doc, "banner")).toMatch(/couldn't reach the projector/);
+    expect(text(doc, "bannerMsg")).toMatch(/couldn't reach the projector/);
   });
 
   it("explains an AirPlay takeover and blocks the grid", () => {
     const { doc, p } = present();
     p.apply(status({ state: "airplay" }));
-    expect(text(doc, "banner")).toMatch(/using the projector/);
+    expect(text(doc, "bannerMsg")).toMatch(/using the projector/);
     expect(doc.getElementById("grid")!.classList.contains("blocked")).toBe(true);
   });
 
   it("surfaces a give-up notice from a background prepare", () => {
     const { doc, p } = present();
     p.apply(status({ state: "idle", notice: "gave up preparing Ponyo" }));
-    expect(text(doc, "banner")).toBe("gave up preparing Ponyo");
+    expect(text(doc, "bannerMsg")).toBe("gave up preparing Ponyo");
   });
 
   it("clears the banner on a clean idle", () => {
@@ -96,6 +101,81 @@ describe("StatusPresenter banners", () => {
     p.apply(status({ state: "airplay" }));
     p.apply(status({ state: "idle" }));
     expect(on(doc, "banner")).toBe(false);
+  });
+});
+
+/* The films are unreachable, which before this had exactly one sentence and no
+   remedy. Four situations now, and the two fallbacks matter more than the happy
+   path: a daemon that never heard of wake-on-LAN, and a NAS whose MAC was never
+   configured, must both land on the message the page has always shown rather
+   than on a button that cannot work. */
+describe("StatusPresenter offers to wake the NAS", () => {
+  const unavailable = (over: Partial<Status> = {}) =>
+    status({ state: "unavailable", ...over });
+
+  it("offers the button when the NAS is off and can be woken", () => {
+    const { doc, p } = present(() => {});
+    p.apply(unavailable({ nas: { power: "off", can_wake: true } }));
+    expect(text(doc, "bannerMsg")).toMatch(/the NAS is off/);
+    expect(on(doc, "bannerAct")).toBe(true);
+    expect(text(doc, "bannerAct")).toBe("Turn it on");
+  });
+
+  it("taps through to the daemon", () => {
+    const taps: number[] = [];
+    const { doc, p } = present(() => taps.push(1));
+    p.apply(unavailable({ nas: { power: "off", can_wake: true } }));
+    doc.getElementById("bannerAct")!.click();
+    expect(taps.length).toBe(1);
+  });
+
+  it("says it is waking, and withdraws the button while it does", () => {
+    const { doc, p } = present(() => {});
+    p.apply(unavailable({ nas: { power: "off", can_wake: true } }));
+    p.apply(unavailable({ nas: { power: "waking", can_wake: true } }));
+    expect(text(doc, "bannerMsg")).toMatch(/Waking the NAS up/);
+    expect(on(doc, "bannerAct")).toBe(false);
+  });
+
+  it("keeps the old sentence when the NAS cannot be woken", () => {
+    const { doc, p } = present(() => {});
+    p.apply(unavailable({ nas: { power: "off", can_wake: false } }));
+    expect(text(doc, "bannerMsg")).toMatch(/the NAS may be off/);
+    expect(on(doc, "bannerAct")).toBe(false);
+  });
+
+  it("keeps the old sentence when the daemon sends no nas field at all", () => {
+    const { doc, p } = present(() => {});
+    p.apply(unavailable());
+    expect(text(doc, "bannerMsg")).toMatch(/the NAS may be off/);
+    expect(on(doc, "bannerAct")).toBe(false);
+  });
+
+  it("keeps the old sentence when the state is unknown", () => {
+    /* No NAS configured at all -- the development GUI, and any install without
+       one. Reporting it as "off" would be a claim the daemon cannot make. */
+    const { doc, p } = present(() => {});
+    p.apply(unavailable({ nas: { power: "unknown", can_wake: false } }));
+    expect(text(doc, "bannerMsg")).toMatch(/the NAS may be off/);
+    expect(on(doc, "bannerAct")).toBe(false);
+  });
+
+  it("drops the button once the films come back", () => {
+    /* The banner clearing must take the offer with it: a button left behind
+       would offer to switch on a machine that is already running. */
+    const { doc, p } = present(() => {});
+    p.apply(unavailable({ nas: { power: "off", can_wake: true } }));
+    p.apply(status({ state: "idle", nas: { power: "on", can_wake: true } }));
+    expect(on(doc, "banner")).toBe(false);
+    expect(on(doc, "bannerAct")).toBe(false);
+  });
+
+  it("does not offer a button the page has nothing to wire it to", () => {
+    /* present() without a wakeNas, i.e. a presenter built by something that
+       does not know how to send the request. */
+    const { doc, p } = present();
+    p.apply(unavailable({ nas: { power: "off", can_wake: true } }));
+    expect(on(doc, "bannerAct")).toBe(false);
   });
 });
 
@@ -110,5 +190,44 @@ describe("StatusPresenter reload", () => {
     const { p, reloads } = present();
     p.apply(status({ state: "playing", build: "there" }));
     expect(reloads).toHaveLength(0);
+  });
+});
+
+describe("the CC button", () => {
+  const playing = (over: Partial<Status> = {}) =>
+    status({ state: "playing", subs: [{ n: 1, lang: "eng" }], sub: 0, ...over });
+
+  it("is hidden on the grid", () => {
+    const { doc, p } = present();
+    p.apply(status({ state: "idle" }));
+    expect(on(doc, "subsBtn")).toBe(false);
+  });
+
+  it("appears with the film", () => {
+    const { doc, p } = present();
+    p.apply(playing());
+    expect(on(doc, "subsBtn")).toBe(true);
+  });
+
+  it("stays hidden for a film that has no subtitles to offer", () => {
+    const { doc, p } = present();
+    p.apply(playing({ subs: [] }));
+    expect(on(doc, "subsBtn")).toBe(false);
+  });
+
+  it("lights up while subtitles are actually on", () => {
+    const { doc, p } = present();
+    p.apply(playing());
+    expect(doc.getElementById("subsBtn")!.classList.contains("live")).toBe(false);
+    p.apply(playing({ sub: 1 }));
+    expect(doc.getElementById("subsBtn")!.classList.contains("live")).toBe(true);
+  });
+
+  it("goes away with the film, lit or not", () => {
+    const { doc, p } = present();
+    p.apply(playing({ sub: 1 }));
+    p.apply(status({ state: "idle" }));
+    expect(on(doc, "subsBtn")).toBe(false);
+    expect(doc.getElementById("subsBtn")!.classList.contains("live")).toBe(false);
   });
 });

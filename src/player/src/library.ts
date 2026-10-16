@@ -7,9 +7,65 @@
 // Performance: visible() is memoised behind a dirty flag, so the common poll --
 // which changes nothing about the filter -- re-sorts nothing. A change to the
 // items or any filter invalidates the cache exactly once.
+//
+// EPISODES ARE FOLDED HERE. The daemon sends every episode as a row of its own,
+// because each one is a file with its own id, poster, soundtracks and resume
+// position. The grid shows a series as ONE tile: twenty-four near-identical
+// posters are a wall a child has to scroll past to reach the next film. The tile
+// stands where the series' first episode would, and tapping it opens the
+// episode sheet rather than playing anything.
 import type { LibraryItem } from "./types";
 
 export type SortKey = "name" | "year-desc" | "year-asc";
+
+/** What the grid draws: a film, or a series standing in for its episodes. */
+export type GridItem = LibraryItem & { thumb?: string };
+
+/** The prefix a series tile's id carries. A daemon id is sixteen hex
+ * characters, so the two cannot collide -- and a tap on a series is therefore
+ * never mistaken for a film to send to /api/play. */
+export const SHOW_PREFIX = "show:";
+
+export interface Show {
+  /** The tile's id: SHOW_PREFIX and the series' key. */
+  id: string;
+  title: string;
+  /** Every episode the children may see, by season and then episode, with
+   * specials after the last season. */
+  episodes: LibraryItem[];
+  /** The seasons those episodes fall in, in the same order. */
+  seasons: number[];
+  /** The tile itself, built once per library so the grid's reconciler sees
+   * the same object poll after poll. */
+  tile: GridItem;
+}
+
+export function isEpisode(item: LibraryItem): boolean {
+  return !!item.series && item.season != null && item.episode != null;
+}
+
+/** "Bluey S1 E2 · Hospital": what the playing screen calls an episode, the
+ * same words the daemon's full_title uses. A film is just its title. */
+export function fullTitle(item: LibraryItem): string {
+  if (!isEpisode(item)) {
+    return item.title;
+  }
+  const label = `${item.series} S${item.season} E${item.episode}`;
+  return item.title ? `${label} · ${item.title}` : label;
+}
+
+function showKey(item: LibraryItem): string {
+  // Case and spacing only. Two spellings that differ by more than that are two
+  // shows as far as the page can tell, and guessing otherwise is how one show's
+  // episodes would end up inside another's tile.
+  return String(item.series).trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/** Specials are season 0 but belong after the seasons, not before them: a child
+ * opening a show should land on its first episode. */
+function seasonRank(season: number): number {
+  return season === 0 ? Number.MAX_SAFE_INTEGER : season;
+}
 
 export interface Facets {
   genres: string[];
@@ -43,8 +99,9 @@ export class LibraryModel {
   private _ready = false;
   private _sort: SortKey = "name";
 
-  private cache: LibraryItem[] | null = null;
+  private cache: GridItem[] | null = null;
   private _facets: Facets = { genres: [], langs: [] };
+  private shows = new Map<string, Show>();
 
   get all(): readonly LibraryItem[] {
     return this.items;
@@ -73,7 +130,16 @@ export class LibraryModel {
   setItems(items: LibraryItem[]): void {
     this.items = items;
     this.computeFacets();
+    this.computeShows();
     this.cache = null;
+  }
+
+  /** The series behind a tile id, or undefined when the id is a film's. */
+  show(id: string): Show | undefined {
+    if (id.indexOf(SHOW_PREFIX) !== 0) {
+      return undefined;
+    }
+    return this.shows.get(id.slice(SHOW_PREFIX.length));
   }
 
   setGenre(genre: string): void {
@@ -119,29 +185,52 @@ export class LibraryModel {
     return !!this._genre || this._minScore > 0 || this._ready;
   }
 
-  /** The films the current filter and sort leave on the grid. Memoised. */
-  visible(): readonly LibraryItem[] {
+  /** The tiles the current filter and sort leave on the grid: films, and one
+   * per series any of whose episodes the filter lets through. Memoised. */
+  visible(): readonly GridItem[] {
     if (this.cache !== null) {
       return this.cache;
     }
-    const out: LibraryItem[] = [];
+    const out: GridItem[] = [];
+    const folded = new Set<string>();
     for (const item of this.items) {
-      if (this.matches(item)) {
-        out.push(item);
+      if (!this.matches(item)) {
+        continue;
       }
+      if (isEpisode(item)) {
+        const key = showKey(item);
+        const show = this.shows.get(key);
+        if (show && !folded.has(key)) {
+          folded.add(key);
+          out.push(show.tile);
+        }
+        continue;
+      }
+      out.push(item);
     }
     this.sortInPlace(out);
     this.cache = out;
     return out;
   }
 
-  /** How many films pass an arbitrary predicate, for the filter-sheet counts. */
+  /** How many tiles pass an arbitrary predicate, for the filter-sheet counts. A
+   * series counts once however many of its episodes pass: the count says what
+   * tapping a row would leave on the grid, and that is one poster. */
   count(predicate: (item: LibraryItem) => boolean): number {
     let n = 0;
+    const seen = new Set<string>();
     for (const item of this.items) {
-      if (predicate(item)) {
-        n++;
+      if (!predicate(item)) {
+        continue;
       }
+      if (isEpisode(item)) {
+        const key = showKey(item);
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+      }
+      n++;
     }
     return n;
   }
@@ -166,7 +255,7 @@ export class LibraryModel {
     return true;
   }
 
-  private sortInPlace(items: LibraryItem[]): void {
+  private sortInPlace(items: GridItem[]): void {
     if (this._sort === "name") {
       // The server's order IS this order -- prep files by a normalised title
       // and the daemon keeps it verbatim -- so re-sorting would only introduce
@@ -187,6 +276,57 @@ export class LibraryModel {
       }
       return ya === yb ? byName(a, b) : (ya - yb) * dir;
     });
+  }
+
+  private computeShows(): void {
+    const shows = new Map<string, Show>();
+    for (const item of this.items) {
+      // A hidden episode is out of the picker as well as off the grid -- the
+      // same rule a hidden film gets.
+      if (item.hidden || !isEpisode(item)) {
+        continue;
+      }
+      const key = showKey(item);
+      let show = shows.get(key);
+      if (!show) {
+        show = {
+          id: SHOW_PREFIX + key,
+          title: String(item.series).trim(),
+          episodes: [],
+          seasons: [],
+          tile: { id: SHOW_PREFIX + key, title: "" },
+        };
+        shows.set(key, show);
+      }
+      show.episodes.push(item);
+    }
+    for (const show of shows.values()) {
+      show.episodes.sort(
+        (a, b) =>
+          seasonRank(a.season!) - seasonRank(b.season!) || a.episode! - b.episode!,
+      );
+      for (const ep of show.episodes) {
+        if (show.seasons.indexOf(ep.season!) < 0) {
+          show.seasons.push(ep.season!);
+        }
+      }
+      // The first episode stands for the show: its poster, and its shelf key,
+      // which the preparer derived from the series' name so the tile files
+      // where the show would.
+      const first = show.episodes[0]!;
+      show.tile = {
+        id: show.id,
+        title: show.title,
+        sort_title: first.sort_title,
+        year: first.year,
+        rating: first.rating,
+        genres: first.genres,
+        has_thumb: first.has_thumb,
+        thumb: first.id,
+        series: show.title,
+      };
+    }
+    this.shows = shows;
   }
 
   private computeFacets(): void {

@@ -1,0 +1,69 @@
+"""Interactive TMDb search for the metadata editor.
+
+Wraps playstick_prep.Tmdb so a human can search by hand and pick the right film,
+which is a different question from the preparer's automatic lookup: here there is
+no confidence gate, because the person choosing is the confidence. Shares the
+same on-disk cache as a preparation, so a title looked at here is free there.
+
+That cache used to be written to <output>/.playstick/tmdb-cache.json -- which
+put it on the share. It is a record of what this host asked a website, nothing
+on the stick has ever opened it, and the share is the one filesystem here that
+has to stay small enough to carry. It lives in this app's own state directory
+now, and the argument for it is the same as the one for the admin database.
+"""
+
+import os
+
+from .. import paths
+
+paths.ensure_prep_on_path()
+import playstick_prep as prep  # noqa: E402
+
+
+class TmdbError(Exception):
+    pass
+
+
+class TmdbSearch:
+    def __init__(self, key, language="en-US"):
+        if not key:
+            raise TmdbError("no TMDb key configured")
+        cache = paths.tmdb_cache_path()
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        self._client = prep.Tmdb(key, cache, language)
+
+    def search(self, query, year=None):
+        """Raw candidates for a query, best-known first, mapped to plain rows
+        the UI can show without knowing anything about TMDb."""
+        results = self._client.candidates(query, year) if query else []
+        rows = []
+        for item in results:
+            release = (item.get("release_date") or "")[:4]
+            rows.append({
+                "id": item.get("id"),
+                "title": item.get("title") or item.get("original_title") or "?",
+                "year": int(release) if release.isdigit() else None,
+                "overview": item.get("overview") or "",
+                "rating": item.get("vote_average"),
+                "votes": item.get("vote_count"),
+                "poster_url": (prep.Tmdb.IMG + item["poster_path"])
+                              if item.get("poster_path") else None,
+            })
+        self._client.save()
+        return rows
+
+    def detail(self, tmdb_id):
+        """The full metadata the preparer would write for a chosen id."""
+        meta, why = self._client.fetch_by_id(tmdb_id)
+        self._client.save()
+        if why:
+            raise TmdbError(why)
+        return meta
+
+    def lookup(self, title, year=None, duration=None):
+        """The preparer's own gated match, as (meta, why) -- so a film nobody
+        has pinned is shown the answer a preparation would reach, or the
+        sentence saying it would not reach one."""
+        meta, why = self._client.lookup(title, year, duration)
+        self._client.save()
+        return meta, why

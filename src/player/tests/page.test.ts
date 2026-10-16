@@ -37,6 +37,9 @@ interface Page {
   css(id: string): CSSStyleDeclaration;
   tap(id: string): void;
   sheet: string;
+  /** Every path the page asked for, so a tap can be shown to have reached the
+   * daemon rather than merely to have not thrown. */
+  calls: string[];
 }
 
 let open: JSDOM | null = null;
@@ -52,6 +55,7 @@ afterEach(() => {
  * poll to land. */
 async function boot(status: Partial<Status> = {}, search = ""): Promise<Page> {
   const reported: Status = { state: "idle", ...status } as Status;
+  const calls: string[] = [];
   const dom = new JSDOM(PAGE, {
     runScripts: "dangerously",
     pretendToBeVisual: true,
@@ -60,7 +64,8 @@ async function boot(status: Partial<Status> = {}, search = ""): Promise<Page> {
       // The daemon, in four lines. Nothing here is under test -- net.ts has its
       // own tests -- it only has to answer.
       (win as unknown as { fetch: unknown }).fetch = (url: string) => {
-        const path = String(url).split("?")[0];
+        const path = String(url).split("?")[0] ?? "";
+        calls.push(path);
         const body =
           path === "/api/library"
             ? { available: true, items: ITEMS }
@@ -82,6 +87,7 @@ async function boot(status: Partial<Status> = {}, search = ""): Promise<Page> {
     tap: (id) =>
       doc.getElementById(id)!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })),
     sheet: "",
+    calls,
   };
   // The poll goes out at boot; wait for what it paints rather than for a clock.
   await until(() => !!page.el("grid") && page.el("grid").children.length > 0);
@@ -102,10 +108,13 @@ async function until(cond: () => boolean, ms = 3000): Promise<void> {
 // Every id the views resolve or a test reaches for. A view that stops building
 // one of these is the failure this file exists to catch.
 const IDS = [
-  "banner", "audioBtn", "filterBtn", "tapToListen", "sheetScrim", "sheet", "fsheet",
+  "banner", "bannerMsg", "bannerAct",
+  "audioBtn", "filterBtn", "subsBtn", "tapToListen", "sheetScrim", "sheet",
+  "subsSheet", "subsList", "subsNote", "fsheet",
   "library", "grid", "empty", "emptyClear", "filterChip", "preparing", "prepArt",
   "prepTitle", "prepStep", "prepBar", "prepCancel", "playing", "nowTitle", "nowSub",
-  "bar", "barFill", "toggle", "stop", "volume", "volDown", "volUp", "destList",
+  "bar", "barFill", "barGhost", "seekHint", "transport", "skipBack", "skipFwd",
+  "toggle", "stop", "volume", "volDown", "volUp", "destList",
   "langList", "sheetNote", "syncHead", "syncRow", "syncBack", "syncVal", "syncFwd",
   "syncHint", "syncDebug", "tuneHead", "tuneList", "tuneFoot", "tuneReset", "tuneNote",
   "sortList", "genreHead", "genreList", "scoreHead", "scoreList", "readyHead",
@@ -124,8 +133,8 @@ describe("the page boots", () => {
       .filter((e) => e.tagName !== "SCRIPT")
       .map((e) => e.id);
     expect(order).toEqual([
-      "banner", "audioBtn", "filterBtn", "tapToListen", "sheetScrim",
-      "sheet", "fsheet", "library", "preparing", "playing",
+      "banner", "audioBtn", "filterBtn", "subsBtn", "tapToListen", "sheetScrim",
+      "sheet", "subsSheet", "fsheet", "esheet", "library", "preparing", "playing",
     ]);
   });
 
@@ -247,6 +256,74 @@ describe("the views a film brings up", () => {
     expect(p.el("barFill").style.width).toBe("25%");
     expect(p.el("toggle").innerHTML).toBe("❙❙");
     expect(p.css("volume").display).toBe("flex");
+    // The two skip buttons, in the transport row with the play control between
+    // them. Their presence is the point: no scrub bar, and no way to lose your
+    // place, but the film can still be moved.
+    expect(p.css("transport").display).toBe("flex");
+    expect([...p.el("transport").children].map((e) => e.id)).toEqual([
+      "skipBack", "toggle", "skipFwd",
+    ]);
+    expect(p.css("barGhost").display).toBe("none");
+    expect(p.el("seekHint").textContent).toBe("");
+  });
+
+  it("previews a held skip and sends it once on release", async () => {
+    const p = await boot({
+      state: "playing",
+      id: "a",
+      title: "Akira",
+      duration: 7200,
+      position: 1800,
+      subs: [{ n: 1, lang: "eng" }],
+      sub: 0,
+    } as Partial<Status>);
+    await until(() => p.css("playing").display === "block");
+
+    const fwd = p.el("skipFwd");
+    const down = new p.win.Event("pointerdown", { bubbles: true }) as Event & {
+      pointerId?: number;
+    };
+    down.pointerId = 1;
+    fwd.dispatchEvent(down);
+    expect(p.el("seekHint").textContent).toBe("+0:10 → 30:10");
+    expect(p.css("barGhost").display).toBe("block");
+
+    const up = new p.win.Event("pointerup", { bubbles: true }) as Event & {
+      pointerId?: number;
+    };
+    up.pointerId = 1;
+    fwd.dispatchEvent(up);
+    await until(() => p.calls.includes("/api/seek"), 2000);
+  });
+
+  it("offers the subtitle sheet only when the film has subtitles", async () => {
+    const none = await boot({
+      state: "playing", id: "a", title: "Akira", duration: 7200, subs: [],
+    } as Partial<Status>);
+    await until(() => none.css("playing").display === "block");
+    expect(none.css("subsBtn").display).toBe("none");
+    none.win.close();
+
+    const p = await boot({
+      state: "playing",
+      id: "a",
+      title: "Akira",
+      duration: 7200,
+      subs: [{ n: 1, lang: "eng" }, { n: 2, lang: "fin" }],
+      sub: 0,
+    } as Partial<Status>);
+    await until(() => p.css("subsBtn").display === "inline-flex");
+    p.tap("subsBtn");
+    expect(p.css("subsSheet").display).toBe("block");
+    // The tick rides on the row, so it comes back in the text: nothing is on,
+    // and Off is what is ticked.
+    expect([...p.el("subsList").children].map((e) => e.textContent)).toEqual([
+      "Off\u2713", "English", "Suomi",
+    ]);
+    // The sheets share one scrim and never stack.
+    p.tap("audioBtn");
+    expect(p.css("subsSheet").display).toBe("none");
+    expect(p.css("sheet").display).toBe("block");
   });
 
   it("shows the poster and the daemon's own words while getting ready", async () => {
@@ -261,5 +338,51 @@ describe("the views a film brings up", () => {
     expect(p.el("prepStep").textContent).toBe("Waiting for the lamp…");
     expect(p.el("prepArt").getAttribute("src")).toMatch(/\/api\/thumb\/a/);
     expect(p.el("prepBar").children).toHaveLength(1); // the sweeping fill
+  });
+});
+
+/* The one path a child hits when nothing else on the page can help them: the
+   films are unreachable because the machine they live on is switched off. The
+   unit tests decide WHICH sentence; this decides that the button is really
+   there, really styled, and really reaches the daemon. */
+describe("the offer to switch the NAS on", () => {
+  const nasOff = { state: "unavailable", nas: { power: "off", can_wake: true } };
+
+  it("draws a real, styled, tappable button under the sentence", async () => {
+    const p = await boot(nasOff as Partial<Status>);
+    await until(() => p.css("banner").display === "block");
+    expect(p.el("bannerMsg").textContent).toMatch(/the NAS is off/);
+    // The CSS reached it: without the stylesheet this is "inline", which is
+    // the failure a stub DOM cannot see.
+    expect(p.css("bannerAct").display).toBe("block");
+    expect(p.el("bannerAct").textContent).toBe("Turn it on");
+    expect(p.el("bannerAct").tagName).toBe("BUTTON");
+  });
+
+  it("posts to the daemon when tapped", async () => {
+    const p = await boot(nasOff as Partial<Status>);
+    await until(() => p.css("bannerAct").display === "block");
+    p.tap("bannerAct");
+    await until(() => p.calls.includes("/api/nas/wake"));
+    expect(p.calls.filter((c) => c === "/api/nas/wake")).toHaveLength(1);
+  });
+
+  it("hides the button while the NAS is waking", async () => {
+    const p = await boot({
+      state: "unavailable",
+      nas: { power: "waking", can_wake: true },
+    } as Partial<Status>);
+    await until(() => p.css("banner").display === "block");
+    expect(p.el("bannerMsg").textContent).toMatch(/Waking the NAS up/);
+    expect(p.css("bannerAct").display).toBe("none");
+  });
+
+  it("shows no button at all on a daemon that never heard of the feature", async () => {
+    /* The compatibility branch: no `nas` field in the payload. It must land on
+       the sentence the page has always shown, not on a dead button. */
+    const p = await boot({ state: "unavailable" } as Partial<Status>);
+    await until(() => p.css("banner").display === "block");
+    expect(p.el("bannerMsg").textContent).toMatch(/the NAS may be off/);
+    expect(p.css("bannerAct").display).toBe("none");
   });
 });

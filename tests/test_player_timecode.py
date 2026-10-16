@@ -304,6 +304,174 @@ class Sampling(unittest.TestCase):
         self.assertEqual(self.player.status(), {})
 
 
+class Seeking(unittest.TestCase):
+    """seek(), with mpv replaced by a dict of properties and a command log.
+
+    Two things are being checked and neither is about arithmetic. The first is
+    the clamp at the far end: mpv runs with --keep-open=no, so a seek to the
+    very end of a film is the film ENDING, and a child holding the forward
+    button must not be able to make that happen. The second is the epoch --
+    every listening phone re-places its headphones when the epoch moves, and a
+    seek that did not move it would leave the whole room out of sync with the
+    picture and nothing on the wire to say why.
+    """
+
+    def setUp(self):
+        self.player = player_mod.Player()
+        self.props = {"time-pos": 600.0, "duration": 5400.0, "pause": False,
+                      "paused-for-cache": False, "volume": 50, "sid": False}
+        self.commands = []
+        self.player.get_property = lambda name: self.props.get(name)
+        self.player._proc = _AliveProc()
+        self.addCleanup(setattr, self.player, "_proc", None)
+        self.now = [918273.0]
+        self._real_monotonic = player_mod.time.monotonic
+        self._real_time = player_mod.time.time
+        self._real_sleep = player_mod.time.sleep
+        player_mod.time.monotonic = lambda: self.now[0]
+        player_mod.time.time = lambda: self.now[0]
+        player_mod.time.sleep = lambda dt: self.now.__setitem__(0, self.now[0] + dt)
+        self.addCleanup(setattr, player_mod.time, "monotonic", self._real_monotonic)
+        self.addCleanup(setattr, player_mod.time, "time", self._real_time)
+        self.addCleanup(setattr, player_mod.time, "sleep", self._real_sleep)
+
+        def command(cmd, quiet=False):
+            self.commands.append(cmd)
+            # mpv, landing where it was told to. The real one answers "queued"
+            # and arrives a moment later, which is what the wait exists for.
+            if cmd[0] == "seek":
+                self.props["time-pos"] = cmd[1]
+            return {"error": "success"}
+
+        self.player.command = command
+
+    def test_a_skip_is_an_absolute_seek_to_where_it_should_land(self):
+        """Absolute rather than relative, and that is the difference between a
+        control that works and one that nearly does: mpv seeks relatively to
+        the nearest keyframe, so a ten-second nudge would land anywhere on the
+        GOP. The page promises ten."""
+        self.player.seek(10)
+        self.assertEqual(self.commands, [["seek", 610.0, "absolute"]])
+
+    def test_it_waits_for_the_seek_to_land_before_answering(self):
+        """The route answers with a status, and mpv's reply to a seek means
+        queued rather than done. Without the wait the page would be told the
+        position it had before it pressed the button."""
+        self.assertAlmostEqual(self.player.seek(-100), 500.0)
+        self.assertAlmostEqual(self.props["time-pos"], 500.0)
+
+    def test_a_forward_skip_stops_short_of_the_end(self):
+        self.player.seek(9999)
+        self.assertEqual(self.commands[-1], ["seek", 5395.0, "absolute"])
+
+    def test_a_backward_skip_stops_at_the_start(self):
+        self.player.seek(-9999)
+        self.assertEqual(self.commands[-1], ["seek", 0.0, "absolute"])
+
+    def test_a_film_with_no_duration_yet_is_still_seekable(self):
+        """The first seconds of a film, before mpv has parsed a duration. The
+        near clamp still applies; the far one has nothing to clamp to."""
+        self.props["duration"] = 0
+        self.player.seek(30)
+        self.assertEqual(self.commands[-1], ["seek", 630.0, "absolute"])
+
+    def test_a_player_that_does_not_know_where_it_is_does_not_guess(self):
+        self.props["time-pos"] = None
+        self.assertIsNone(self.player.seek(10))
+        self.assertEqual(self.commands, [])
+
+    def test_the_epoch_moves_so_every_phone_re_places_its_audio(self):
+        before = self.player.status()["timecode"]["epoch"]
+        self.player.seek(600)
+        after = self.player.status()["timecode"]["epoch"]
+        self.assertGreater(after, before)
+        self.assertAlmostEqual(self.player.status()["timecode"]["tc"], 1200.0)
+
+    def test_the_status_cache_does_not_outlive_a_seek(self):
+        """Half a second of cache is what keeps six phones from asking mpv
+        twenty times. It must not be what keeps the phone that just pressed a
+        button from seeing the result."""
+        self.player.status()
+        self.player.seek(120)
+        self.assertAlmostEqual(self.player.status()["position"], 720.0)
+
+
+class Subtitles(unittest.TestCase):
+    """sub_tracks() and set_subtitle(): what mpv has, and which of it is on.
+
+    Asked of mpv rather than counted off the --sub-file arguments, because a
+    container can carry text subtitle tracks of its own and mpv numbers
+    everything it loaded together.
+    """
+
+    TRACKS = [
+        {"id": 1, "type": "video"},
+        {"id": 1, "type": "sub", "lang": "eng", "title": "English",
+         "external": True, "external-filename": "/lib/.playstick/subs/x.eng.srt"},
+        {"id": 2, "type": "sub", "external": True,
+         "external-filename": "/lib/.playstick/subs/x.fin.srt"},
+        {"id": 3, "type": "sub", "lang": "swe", "title": "Svenska"},
+    ]
+
+    def setUp(self):
+        self.player = player_mod.Player()
+        self.props = {"track-list": self.TRACKS}
+        self.lookups = []
+        self.commands = []
+
+        def get_property(name):
+            self.lookups.append(name)
+            return self.props.get(name)
+
+        self.player.get_property = get_property
+        self.player.command = lambda cmd, quiet=False: self.commands.append(cmd)
+        self.player._item = {
+            "id": "x",
+            "subs": [{"path": "/lib/.playstick/subs/x.eng.srt", "lang": "eng"},
+                     {"path": "/lib/.playstick/subs/x.fin.srt", "lang": "fin"}],
+        }
+
+    def test_only_the_subtitle_tracks_come_back(self):
+        self.assertEqual([t["n"] for t in self.player.sub_tracks()], [1, 2, 3])
+
+    def test_the_index_supplies_a_language_mpv_did_not_guess(self):
+        """mpv guesses an external file's language from its name. Prep's naming
+        happens to be guessable, but a feature that stops working because a
+        filename convention changed is not one worth shipping -- so the index's
+        own answer wins where there is one."""
+        self.assertEqual([t["lang"] for t in self.player.sub_tracks()],
+                         ["eng", "fin", "swe"])
+
+    def test_a_track_from_the_container_keeps_mpvs_own_answer(self):
+        embedded = self.player.sub_tracks()[2]
+        self.assertEqual((embedded["lang"], embedded["title"]), ("swe", "Svenska"))
+
+    def test_mpv_is_asked_once_per_film(self):
+        self.player.sub_tracks()
+        self.player.sub_tracks()
+        self.assertEqual(self.lookups.count("track-list"), 1)
+
+    def test_a_file_mpv_has_not_loaded_yet_is_not_cached_as_empty(self):
+        """The first second of a film. "No subtitles" and "not asked yet" are
+        different answers and only one of them is final."""
+        self.props["track-list"] = None
+        self.assertEqual(self.player.sub_tracks(), [])
+        self.props["track-list"] = self.TRACKS
+        self.assertEqual(len(self.player.sub_tracks()), 3)
+
+    def test_choosing_a_track_sets_sid(self):
+        self.assertEqual(self.player.set_subtitle(2), 2)
+        self.assertEqual(self.commands[-1], ["set_property", "sid", 2])
+
+    def test_zero_turns_them_off_by_name(self):
+        self.player.set_subtitle(0)
+        self.assertEqual(self.commands[-1], ["set_property", "sid", "no"])
+
+    def test_a_track_nobody_loaded_never_reaches_mpv(self):
+        self.assertIsNone(self.player.set_subtitle(9))
+        self.assertEqual(self.commands, [])
+
+
 class _AliveProc:
     def poll(self):
         return None

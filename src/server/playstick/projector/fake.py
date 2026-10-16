@@ -10,7 +10,7 @@ sequence -- standby accepts nothing but PON, and the lamp is not on the instant
 PON returns -- and ignores everything else, because those two are what the code
 above it is written around and the rest would only be scenery.
 
-Set PLAYSTICK_PROJECTOR_MODEL=fake to get one. It is never selected on the
+Set model = "fake" under [projector] to get one. It is never selected on the
 appliance: the Ansible default is the real model, and "fake" is not a value any
 template writes.
 """

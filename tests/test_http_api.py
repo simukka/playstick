@@ -302,14 +302,12 @@ class Library(ApiTest):
         self.assertFalse(by_id[FILM]["hidden"])
         self.assertTrue(by_id[OTHER]["hidden"])
 
-    def test_has_thumb_is_true_for_a_poster_from_the_index(self):
-        self.library.add(FILM, "Ponyo", poster="/srv/movies/Ponyo/poster.jpg")
-        item = self.assertJson(self.fetch("/api/library"))["items"][0]
-        self.assertTrue(item["has_thumb"])
-
-    def test_has_thumb_is_true_for_a_frame_already_extracted(self):
+    def test_has_thumb_is_true_once_there_are_bytes_to_serve(self):
+        """One flag for one question, where it used to be two: a poster path on
+        the film OR a file in the cache. Both are rows in the same table now,
+        so the tile does not have to care which kind it is getting."""
         self.library.add(FILM, "Ponyo")
-        self.thumbs.have_ids.add(FILM)
+        self.thumbs.add(FILM)
         item = self.assertJson(self.fetch("/api/library"))["items"][0]
         self.assertTrue(item["has_thumb"])
 
@@ -892,39 +890,288 @@ class Controls(ApiTest):
 
     def test_the_controls_refuse_GET(self):
         for path in ["/api/play", "/api/pause", "/api/stop", "/api/volume",
-                     "/api/rescan"]:
+                     "/api/seek", "/api/subtitle", "/api/rescan"]:
             with self.subTest(path=path):
                 self.assertNotFound(self.fetch(path))
+
+
+class Seek(ApiTest):
+    """Skipping. The page sends one number of seconds, once per gesture --
+    holding the button ramps the jump on the phone and commits on release, so
+    what arrives here is already the whole of it."""
+
+    def playing(self, position=600.0, duration=5400.0):
+        self.player.item = self.library.add(FILM, "Ponyo")
+        self.player.playing = "playing"
+        self.player.position = position
+        self.player.duration = duration
+        self.player.data = {"position": position, "duration": duration}
+
+    def test_a_skip_reaches_the_player_and_answers_with_the_new_position(self):
+        self.playing()
+        body = self.assertJson(self.fetch("/api/seek", method="POST",
+                                          body={"delta": 10}))
+        self.assertEqual(self.player.calls[-1], ("seek", 10.0))
+        self.assertEqual(body["position"], 610.0)
+
+    def test_backwards_is_the_same_route_with_a_sign(self):
+        self.playing()
+        self.fetch("/api/seek", method="POST", body={"delta": -1800})
+        self.assertEqual(self.player.calls[-1], ("seek", -1800.0))
+
+    def test_a_delta_that_is_not_a_number_moves_nothing(self):
+        """Coerced where /api/volume coerces its own, and for the same reason:
+        the player does arithmetic on it, and a ValueError on a request thread
+        is a connection the page never gets an answer on."""
+        self.playing()
+        for value in ["forward", None, [1], {"a": 1}]:
+            with self.subTest(value=value):
+                resp = self.fetch("/api/seek", method="POST",
+                                  body={"delta": value})
+                self.assertEqual(resp.status, 200)
+        self.assertEqual([c for c in self.player.calls if c[0] == "seek"],
+                         [("seek", 0.0)] * 4)
+
+    def test_an_absurd_delta_is_bounded_before_the_player_sees_it(self):
+        self.playing()
+        self.fetch("/api/seek", method="POST", body={"delta": 1e30})
+        self.fetch("/api/seek", method="POST", body={"delta": float("inf")})
+        self.assertEqual([c for c in self.player.calls if c[0] == "seek"],
+                         [("seek", 86400.0), ("seek", 0.0)])
+
+    def test_a_skip_past_the_end_lands_short_of_it(self):
+        """The film must still be playing afterwards. mpv runs with
+        --keep-open=no, so a seek to the very end is not a skip, it is the
+        film ending and the display going back to the grid."""
+        self.playing(position=5000.0, duration=5400.0)
+        body = self.assertJson(self.fetch("/api/seek", method="POST",
+                                          body={"delta": 3600}))
+        self.assertEqual(body["position"], 5395.0)
+
+    def test_a_skip_before_the_start_lands_at_the_start(self):
+        self.playing(position=30.0)
+        body = self.assertJson(self.fetch("/api/seek", method="POST",
+                                          body={"delta": -1800}))
+        self.assertEqual(body["position"], 0.0)
+
+    def test_a_skip_with_nothing_playing_is_refused_with_a_sentence(self):
+        """Two phones can disagree about what is on. The one that pressed a
+        button on a film that has ended is told, rather than left watching a
+        control that silently does nothing."""
+        resp = self.fetch("/api/seek", method="POST", body={"delta": 10})
+        self.assertEqual(resp.status, 409)
+        self.assertTrue(json.loads(resp.body)["error"])
+        self.assertEqual(self.player.calls, [])
+
+    def test_a_paused_film_can_still_be_skipped(self):
+        self.playing()
+        self.player.playing = "paused"
+        self.assertEqual(
+            self.fetch("/api/seek", method="POST", body={"delta": 10}).status,
+            200)
+
+
+class Subtitles(ApiTest):
+    """Which subtitles are on the picture. Shared, not per phone: this is the
+    projector everybody in the room is looking at."""
+
+    def playing(self, subs=None):
+        self.player.item = self.library.add(FILM, "Ponyo")
+        self.player.playing = "playing"
+        self.player.subs = subs if subs is not None else [
+            {"n": 1, "lang": "eng", "title": ""},
+            {"n": 2, "lang": "fin", "title": ""},
+        ]
+
+    def test_status_carries_the_tracks_and_which_one_is_on(self):
+        self.playing()
+        self.player.data = {"sid": 2}
+        body = self.assertJson(self.fetch("/api/status"))
+        self.assertEqual(body["subs"], [{"n": 1, "lang": "eng", "title": ""},
+                                        {"n": 2, "lang": "fin", "title": ""}])
+        self.assertEqual(body["sub"], 2)
+
+    def test_an_idle_daemon_offers_none_and_asks_mpv_nothing(self):
+        body = self.assertJson(self.fetch("/api/status"))
+        self.assertEqual(body["subs"], [])
+        self.assertEqual(body["sub"], 0)
+        self.assertEqual(self.player.sub_lookups, 0)
+
+    def test_choosing_a_track_puts_it_on_and_answers_with_the_new_status(self):
+        self.playing()
+        body = self.assertJson(self.fetch("/api/subtitle", method="POST",
+                                          body={"track": 2}))
+        self.assertIn(("set_subtitle", 2), self.player.calls)
+        self.assertEqual(body["sub"], 2)
+
+    def test_zero_turns_them_off(self):
+        self.playing()
+        self.fetch("/api/subtitle", method="POST", body={"track": 2})
+        body = self.assertJson(self.fetch("/api/subtitle", method="POST",
+                                          body={"track": 0}))
+        self.assertEqual(body["sub"], 0)
+
+    def test_a_track_that_is_not_a_number_is_off_rather_than_a_500(self):
+        self.playing()
+        for value in ["english", None, [1], {"a": 1}]:
+            with self.subTest(value=value):
+                resp = self.fetch("/api/subtitle", method="POST",
+                                  body={"track": value})
+                self.assertEqual(resp.status, 200)
+        self.assertEqual([c for c in self.player.calls if c[0] == "set_subtitle"],
+                         [("set_subtitle", 0)] * 4)
+
+    def test_a_negative_track_never_reaches_the_player_as_one(self):
+        self.playing()
+        self.fetch("/api/subtitle", method="POST", body={"track": -3})
+        self.assertIn(("set_subtitle", 0), self.player.calls)
+
+    def test_a_track_nobody_loaded_leaves_the_picture_alone(self):
+        """Validated against mpv's own list inside the player. The number
+        arrives from an unauthenticated LAN client and is only ever looked up
+        in a table this process built."""
+        self.playing()
+        self.fetch("/api/subtitle", method="POST", body={"track": 2})
+        body = self.assertJson(self.fetch("/api/subtitle", method="POST",
+                                          body={"track": 99}))
+        self.assertEqual(body["sub"], 2)
+
+    def test_choosing_with_nothing_playing_is_refused(self):
+        resp = self.fetch("/api/subtitle", method="POST", body={"track": 1})
+        self.assertEqual(resp.status, 409)
+        self.assertEqual(self.player.calls, [])
+
+
+class Nas(ApiTest):
+    """The button under "Can't reach the movies right now".
+
+    The watcher itself is tested in test_nas.py against real sockets; what is
+    checked here is only the join -- that the state reaches the page, that the
+    tap reaches the watcher, and that a refusal arrives as something the page
+    can show a child.
+    """
+
+    def test_the_status_carries_the_nas_alongside_the_projector(self):
+        self.nas.power = "off"
+        self.nas.can_wake = True
+        body = self.assertJson(self.fetch("/api/status"))
+        self.assertEqual(body["nas"], {"power": "off", "can_wake": True})
+
+    def test_the_state_field_is_left_alone(self):
+        """Deliberately NOT widened to a "nas-off" state. "unavailable" still
+        means "no library", so a page cached from before this existed keeps
+        working exactly as it did -- the same additive rule every field in this
+        payload has followed."""
+        self.library.available = False
+        self.nas.power = "off"
+        self.assertEqual(self.assertJson(self.fetch("/api/status"))["state"],
+                         "unavailable")
+
+    def test_a_tap_reaches_the_watcher_and_answers_with_the_new_status(self):
+        """The convention every other control POST here follows: the phone
+        repaints from the response rather than waiting up to three seconds for
+        the next poll."""
+        self.nas.power = "off"
+        self.nas.can_wake = True
+        # What the real watcher does on a successful wake: the window it opens
+        # is what makes power read "waking" on the very next snapshot.
+        sent = self.nas.wake
+
+        def wake():
+            self.nas.power = "waking"
+            return sent()
+
+        self.nas.wake = wake
+        body = self.assertJson(self.fetch("/api/nas/wake", method="POST"))
+        self.assertEqual(self.nas.wakes, 1)
+        self.assertEqual(body["nas"]["power"], "waking")
+        # A full status, not an acknowledgement.
+        self.assertIn("state", body)
+
+    def test_a_refusal_is_a_409_with_a_sentence_the_page_shows(self):
+        self.nas.reply = (False, "Already waking it up — give it a minute.")
+        res = self.fetch("/api/nas/wake", method="POST")
+        self.assertEqual(self.assertJson(res, 409)["error"],
+                         "Already waking it up — give it a minute.")
+        self.assertEqual(self.nas.wakes, 1)
+
+    def test_it_takes_no_body(self):
+        """There is one NAS and its address is a setting, not something a
+        client may name -- the same rule /api/play follows with film paths."""
+        res = self.fetch("/api/nas/wake", method="POST",
+                         body={"host": "10.0.0.1", "mac": "ff:ff:ff:ff:ff:ff"})
+        self.assertEqual(res.status, 200)
+        self.assertEqual(self.nas.wakes, 1)
+
+    def test_it_refuses_GET(self):
+        self.assertNotFound(self.fetch("/api/nas/wake"))
+
+    def test_it_is_behind_the_network_check(self):
+        """Waking a machine is exactly the kind of thing that should not be
+        reachable from off the LAN."""
+        with patched(ALLOW_NETWORKS=[ipaddress.ip_network("10.99.0.0/16")]):
+            res = self.fetch("/api/nas/wake", method="POST")
+        self.assertEqual(res.status, 403)
+        self.assertEqual(self.nas.wakes, 0)
 
 
 class Thumbs(ApiTest):
     def test_an_unknown_film_has_no_poster(self):
         self.assertNotFound(self.fetch("/api/thumb/" + OTHER))
 
-    def test_a_poster_from_the_index_is_served_and_briefly_cached(self):
-        """A day, not a year: re-running prep can replace this file, and a
-        phone that cached it for a year would never find out."""
-        poster = write_file("posters/ponyo.jpg", b"\xff\xd8\xff\xe0 poster")
-        self.library.add(FILM, "Ponyo", poster=poster)
+    def test_a_stored_poster_is_served_with_its_etag(self):
+        """One answer for both kinds of poster, which is what moving them into
+        the database bought.
+
+        There used to be two: an uploaded poster got a day, because a re-prep
+        could replace the file and a phone holding it for a year would never
+        find out, and an extracted frame got a year and `immutable`, because
+        nothing could. The etag says which bytes these are, so neither has to
+        be guessed at -- a changed poster is a changed etag and one round trip.
+        """
+        tag = self.thumbs.add(FILM, b"\xff\xd8\xff\xe0 poster")
+        self.library.add(FILM, "Ponyo")
         resp = self.fetch("/api/thumb/" + FILM)
         self.assertEqual(resp.status, 200)
         self.assertEqual(resp.header("Content-Type"), "image/jpeg")
         self.assertEqual(resp.header("Cache-Control"), "public, max-age=86400")
+        self.assertEqual(resp.header("ETag"), '"%s"' % tag)
         self.assertEqual(resp.body, b"\xff\xd8\xff\xe0 poster")
 
-    def test_an_extracted_frame_is_immutable(self):
-        """Keyed by a hash of the film, so this URL can only ever mean this
-        image -- which is what lets the grid re-render without refetching."""
+    def test_a_poster_the_phone_already_has_is_answered_with_a_304(self):
+        """The whole point of the etag. Six phones re-poll the grid after every
+        deploy -- the page appends ?v=<build>, which busts their cache -- and
+        without this that is six full poster fetches per film over a radio that
+        is also carrying the film."""
+        tag = self.thumbs.add(FILM, b"\xff\xd8\xff\xe0 poster")
         self.library.add(FILM, "Ponyo")
-        with open(api.Thumbs.cached_path(FILM), "wb") as fh:
-            fh.write(b"\xff\xd8\xff\xe0 frame")
-        self.addCleanup(os.unlink, api.Thumbs.cached_path(FILM))
-        resp = self.fetch("/api/thumb/" + FILM)
+        resp = self.fetch("/api/thumb/" + FILM,
+                          headers={"If-None-Match": '"%s"' % tag})
+        self.assertEqual(resp.status, 304)
+        self.assertEqual(resp.body, b"")
+        self.assertEqual(resp.header("ETag"), '"%s"' % tag)
+
+    def test_a_stale_etag_gets_the_new_bytes(self):
+        """The other half: a poster somebody replaced must actually arrive.
+        A 304 against a tag we no longer hold would leave a wrong poster on
+        every phone until its cache expired."""
+        self.thumbs.add(FILM, b"\xff\xd8\xff\xe0 poster")
+        self.library.add(FILM, "Ponyo")
+        resp = self.fetch("/api/thumb/" + FILM,
+                          headers={"If-None-Match": '"0000000000000000"'})
         self.assertEqual(resp.status, 200)
-        self.assertEqual(resp.header("Content-Type"), "image/jpeg")
-        self.assertEqual(resp.header("Cache-Control"),
-                         "public, max-age=31536000, immutable")
-        self.assertEqual(resp.body, b"\xff\xd8\xff\xe0 frame")
+        self.assertEqual(resp.body, b"\xff\xd8\xff\xe0 poster")
+
+    def test_a_list_of_etags_is_matched_member_by_member(self):
+        """If-None-Match is a LIST, and browsers send one. Comparing the header
+        to the tag as a string would turn every revalidation from a client with
+        more than one cached copy into a full fetch."""
+        tag = self.thumbs.add(FILM, b"\xff\xd8\xff\xe0 poster")
+        self.library.add(FILM, "Ponyo")
+        resp = self.fetch("/api/thumb/" + FILM,
+                          headers={"If-None-Match":
+                                   '"0000000000000000", "%s"' % tag})
+        self.assertEqual(resp.status, 304)
 
     def test_a_film_with_no_poster_gets_a_placeholder_and_queues_the_work(self):
         """The grid never waits. Pulling a frame out of a film over CIFS costs
@@ -948,8 +1195,8 @@ class Thumbs(ApiTest):
         makes putting it in the query safe. The id is still the only thing the
         client sends that this route acts on.
         """
-        poster = write_file("posters/ponyo.jpg", b"\xff\xd8\xff\xe0 poster")
-        self.library.add(FILM, "Ponyo", poster=poster)
+        self.thumbs.add(FILM, b"\xff\xd8\xff\xe0 poster")
+        self.library.add(FILM, "Ponyo")
         plain = self.fetch("/api/thumb/" + FILM)
         for query in ["?v=c20e48476c19", "?v=c20e48476c19&t=1700000000",
                       "?v=", "?v=../../etc/passwd"]:
@@ -965,10 +1212,11 @@ class Thumbs(ApiTest):
         path is what has to name a film."""
         self.assertNotFound(self.fetch("/api/thumb/" + OTHER + "?v=abc"))
 
-    def test_a_poster_the_share_lost_falls_back_rather_than_failing(self):
-        """The index said there was one and the NAS says otherwise. That is a
-        placeholder and a queued extraction, not a 500."""
-        self.library.add(FILM, "Ponyo", poster="/srv/movies/gone/poster.jpg")
+    def test_a_film_in_the_library_with_no_poster_row_falls_back(self):
+        """A film the admin app synced but never uploaded a poster for. That is
+        a placeholder and a queued extraction, not a 500 -- and it is the
+        ordinary case for a library nobody has run the preparer over."""
+        self.library.add(FILM, "Ponyo")
         resp = self.fetch("/api/thumb/" + FILM)
         self.assertEqual(resp.status, 200)
         self.assertEqual(resp.header("Content-Type"), "image/svg+xml")

@@ -34,12 +34,30 @@ export interface LibraryItem {
   audio_langs?: string[];
   hidden?: boolean;
   has_thumb?: boolean;
+  /** Set only on an episode: the series it belongs to. Every row sharing one
+   * is folded into a single tile on the grid, and the rest are offered by the
+   * episode sheet. Absent on a film, and on a daemon from before episodes. */
+  series?: string | null;
+  /** 0 for specials. Present whenever `series` is. */
+  season?: number | null;
+  episode?: number | null;
 }
 
 export interface Projector {
   model: string;
   power: string;
   fault: string;
+}
+
+/** The machine the films live on. Shaped like Projector deliberately: the page
+ * should not need a second vocabulary for a second device. */
+export interface Nas {
+  /** "on" | "off" | "waking" | "unknown". "unknown" means no NAS is configured
+   * -- or none has been probed yet -- and the page says nothing extra. */
+  power: string;
+  /** Whether this daemon could switch it on if asked. False when no MAC is
+   * configured, so the page never offers an action that cannot work. */
+  can_wake: boolean;
 }
 
 export type PlayerState =
@@ -63,11 +81,21 @@ export interface Status {
   audio?: boolean;
   phone_audio?: boolean;
   tracks?: Track[];
+  /** The subtitle tracks mpv loaded for this film, as mpv numbers them. Empty
+   * when it has none -- a walked share with nothing prepped, or a film whose
+   * only subtitles are the image-based kind prep declines to OCR. */
+  subs?: Track[];
+  /** Which of them is on the picture, 0 for none. Shared: subtitles are on the
+   * projector everybody is looking at, unlike the sound, which is per phone. */
+  sub?: number;
   thumbs_pending?: number;
   prepare?: { label?: string } | null;
   notice?: string;
   timecode?: Timecode | null;
   projector?: Projector;
+  /** Absent on a daemon from before wake-on-LAN existed, which is why the
+   * presenter falls back to the plain sentence rather than assuming. */
+  nas?: Nas;
 }
 
 export interface LibraryReply {

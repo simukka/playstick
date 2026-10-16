@@ -383,6 +383,23 @@
   };
 
   // src/library.ts
+  var SHOW_PREFIX = "show:";
+  function isEpisode(item) {
+    return !!item.series && item.season != null && item.episode != null;
+  }
+  function fullTitle(item) {
+    if (!isEpisode(item)) {
+      return item.title;
+    }
+    const label = `${item.series} S${item.season} E${item.episode}`;
+    return item.title ? `${label} · ${item.title}` : label;
+  }
+  function showKey(item) {
+    return String(item.series).trim().replace(/\s+/g, " ").toLowerCase();
+  }
+  function seasonRank(season) {
+    return season === 0 ? Number.MAX_SAFE_INTEGER : season;
+  }
   function scoreOf(item) {
     return parseFloat(String(item.rating));
   }
@@ -403,6 +420,7 @@
       this._sort = "name";
       this.cache = null;
       this._facets = { genres: [], langs: [] };
+      this.shows = /* @__PURE__ */ new Map();
       this.scoreOf = scoreOf;
     }
     get all() {
@@ -426,7 +444,15 @@
     setItems(items) {
       this.items = items;
       this.computeFacets();
+      this.computeShows();
       this.cache = null;
+    }
+    /** The series behind a tile id, or undefined when the id is a film's. */
+    show(id) {
+      if (id.indexOf(SHOW_PREFIX) !== 0) {
+        return void 0;
+      }
+      return this.shows.get(id.slice(SHOW_PREFIX.length));
     }
     setGenre(genre) {
       if (genre && this._facets.genres.indexOf(genre) < 0) {
@@ -463,28 +489,51 @@
     filtersOn() {
       return !!this._genre || this._minScore > 0 || this._ready;
     }
-    /** The films the current filter and sort leave on the grid. Memoised. */
+    /** The tiles the current filter and sort leave on the grid: films, and one
+     * per series any of whose episodes the filter lets through. Memoised. */
     visible() {
       if (this.cache !== null) {
         return this.cache;
       }
       const out = [];
+      const folded = /* @__PURE__ */ new Set();
       for (const item of this.items) {
-        if (this.matches(item)) {
-          out.push(item);
+        if (!this.matches(item)) {
+          continue;
         }
+        if (isEpisode(item)) {
+          const key = showKey(item);
+          const show = this.shows.get(key);
+          if (show && !folded.has(key)) {
+            folded.add(key);
+            out.push(show.tile);
+          }
+          continue;
+        }
+        out.push(item);
       }
       this.sortInPlace(out);
       this.cache = out;
       return out;
     }
-    /** How many films pass an arbitrary predicate, for the filter-sheet counts. */
+    /** How many tiles pass an arbitrary predicate, for the filter-sheet counts. A
+     * series counts once however many of its episodes pass: the count says what
+     * tapping a row would leave on the grid, and that is one poster. */
     count(predicate) {
       let n = 0;
+      const seen = /* @__PURE__ */ new Set();
       for (const item of this.items) {
-        if (predicate(item)) {
-          n++;
+        if (!predicate(item)) {
+          continue;
         }
+        if (isEpisode(item)) {
+          const key = showKey(item);
+          if (seen.has(key)) {
+            continue;
+          }
+          seen.add(key);
+        }
+        n++;
       }
       return n;
     }
@@ -518,6 +567,50 @@
         }
         return ya === yb ? byName(a, b) : (ya - yb) * dir;
       });
+    }
+    computeShows() {
+      const shows = /* @__PURE__ */ new Map();
+      for (const item of this.items) {
+        if (item.hidden || !isEpisode(item)) {
+          continue;
+        }
+        const key = showKey(item);
+        let show = shows.get(key);
+        if (!show) {
+          show = {
+            id: SHOW_PREFIX + key,
+            title: String(item.series).trim(),
+            episodes: [],
+            seasons: [],
+            tile: { id: SHOW_PREFIX + key, title: "" }
+          };
+          shows.set(key, show);
+        }
+        show.episodes.push(item);
+      }
+      for (const show of shows.values()) {
+        show.episodes.sort(
+          (a, b) => seasonRank(a.season) - seasonRank(b.season) || a.episode - b.episode
+        );
+        for (const ep of show.episodes) {
+          if (show.seasons.indexOf(ep.season) < 0) {
+            show.seasons.push(ep.season);
+          }
+        }
+        const first = show.episodes[0];
+        show.tile = {
+          id: show.id,
+          title: show.title,
+          sort_title: first.sort_title,
+          year: first.year,
+          rating: first.rating,
+          genres: first.genres,
+          has_thumb: first.has_thumb,
+          thumb: first.id,
+          series: show.title
+        };
+      }
+      this.shows = shows;
     }
     computeFacets() {
       const genres = /* @__PURE__ */ new Set();
@@ -585,6 +678,21 @@
     }
     volume(delta) {
       return this.post("/api/volume", { delta });
+    }
+    /** Seconds, signed. One request per gesture, not one per press -- see
+     * SeekPad. The daemon clamps to the film and answers with the position it
+     * actually reached, so the bar does not have to guess. */
+    seek(delta) {
+      return this.post("/api/seek", { delta });
+    }
+    /** Which subtitle track is on the picture, 0 for none. */
+    subtitle(track) {
+      return this.post("/api/subtitle", { track });
+    }
+    /** Takes no body: there is one NAS and its address is a setting on the
+     * daemon, not something this page may name. */
+    wakeNas() {
+      return this.post("/api/nas/wake");
     }
   };
 
@@ -654,6 +762,7 @@
     }
     /** Bring the grid into line with `items`, keyed by id, minimal moves. */
     update(items) {
+      var _a;
       const parent = this.parent;
       if (this.tiles.size > items.length) {
         const wanted = /* @__PURE__ */ new Set();
@@ -678,7 +787,7 @@
           tile.title = it.title;
         }
         if (it.has_thumb && !tile.hasThumb) {
-          tile.img.src = this.stamp("/api/thumb/" + it.id) + "&t=" + this.now();
+          tile.img.src = this.stamp("/api/thumb/" + ((_a = it.thumb) != null ? _a : it.id)) + "&t=" + this.now();
         }
         tile.hasThumb = !!it.has_thumb;
         const current = parent.childNodes[idx];
@@ -692,11 +801,12 @@
       return this.tiles.size;
     }
     make(it) {
+      var _a;
       const root = this.doc.createElement("button");
       root.className = "tile";
       root.type = "button";
       const img = this.doc.createElement("img");
-      img.src = this.stamp("/api/thumb/" + it.id);
+      img.src = this.stamp("/api/thumb/" + ((_a = it.thumb) != null ? _a : it.id));
       img.alt = "";
       img.loading = "lazy";
       const label = this.doc.createElement("span");
@@ -729,16 +839,159 @@
     const pct = Math.max(0, Math.min(100, 100 * position / duration));
     return pct.toFixed(1) + "%";
   }
+  function clockTime(seconds) {
+    seconds = Math.max(0, Math.round(seconds));
+    const h2 = Math.floor(seconds / 3600);
+    const m = Math.floor(seconds % 3600 / 60);
+    const s = seconds % 60;
+    const mm = h2 ? String(m).padStart(2, "0") : String(m);
+    return (h2 ? h2 + ":" : "") + mm + ":" + String(s).padStart(2, "0");
+  }
+  function jumpLabel(seconds) {
+    return (seconds < 0 ? "−" : "+") + clockTime(Math.abs(seconds));
+  }
+
+  // src/seek.ts
+  var STEP = 10;
+  var TAU = 3e3 / Math.log(180);
+  var MAX_JUMP = 4 * 3600;
+  var TAIL = 5;
+  var TICK = 60;
+  var FLUSH = 350;
+  function nice(seconds) {
+    if (seconds < 60) {
+      return Math.round(seconds / 5) * 5;
+    }
+    if (seconds < 600) {
+      return Math.round(seconds / 30) * 30;
+    }
+    return Math.round(seconds / 60) * 60;
+  }
+  function jumpFor(heldMs) {
+    const raw = STEP * Math.exp(Math.max(0, heldMs) / TAU);
+    return nice(Math.min(raw, MAX_JUMP));
+  }
+  var SeekPad = class {
+    constructor(deps) {
+      this.deps = deps;
+      /** Seconds queued but not yet sent. Signed. Zero when there is nothing
+       * pending, which is what the view draws its preview from. */
+      this.pending = 0;
+      this.dir = 0;
+      this.base = 0;
+      this.since = 0;
+      this.ticker = null;
+      this.flusher = null;
+    }
+    /** True while a button is down. */
+    get holding() {
+      return this.dir !== 0;
+    }
+    press(dir) {
+      if (this.dir !== 0) {
+        return;
+      }
+      this.stopFlush();
+      this.dir = dir;
+      this.base = this.pending;
+      this.since = this.deps.now();
+      this.set(this.base + dir * STEP);
+      this.ticker = this.deps.schedule(() => this.tick(), TICK);
+    }
+    release() {
+      if (this.dir === 0) {
+        return;
+      }
+      this.stopTick();
+      this.set(this.base + this.dir * jumpFor(this.deps.now() - this.since));
+      this.dir = 0;
+      this.armFlush();
+    }
+    /** The gesture was taken away -- a call arrived, the browser cancelled the
+     * pointer. Whatever the hold had grown to is discarded rather than committed:
+     * an accidental half-hour jump is much worse than a lost one. */
+    abort() {
+      if (this.dir === 0) {
+        return;
+      }
+      this.stopTick();
+      this.dir = 0;
+      this.set(this.base);
+      if (this.pending !== 0) {
+        this.armFlush();
+      }
+    }
+    /** Drop everything without sending -- the film ended, or the view went away
+     * under a finger. */
+    clear() {
+      this.stopTick();
+      this.stopFlush();
+      this.dir = 0;
+      this.set(0);
+    }
+    tick() {
+      if (this.dir === 0) {
+        return;
+      }
+      this.set(this.base + this.dir * jumpFor(this.deps.now() - this.since));
+      this.ticker = this.deps.schedule(() => this.tick(), TICK);
+    }
+    set(pending) {
+      if (pending === this.pending) {
+        return;
+      }
+      this.pending = pending;
+      this.deps.onChange(pending);
+    }
+    armFlush() {
+      this.stopFlush();
+      this.flusher = this.deps.schedule(() => {
+        this.flusher = null;
+        const delta = this.pending;
+        this.set(0);
+        if (delta) {
+          this.deps.send(delta);
+        }
+      }, FLUSH);
+    }
+    stopTick() {
+      if (this.ticker !== null) {
+        this.deps.cancel(this.ticker);
+        this.ticker = null;
+      }
+    }
+    stopFlush() {
+      if (this.flusher !== null) {
+        this.deps.cancel(this.flusher);
+        this.flusher = null;
+      }
+    }
+  };
 
   // src/views.ts
   var PLAY_GLYPH = "▶";
   var PAUSE_GLYPH = "❙❙";
+  var skipIcon = (back) => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (back ? '<path d="M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6"/>' : '<path d="M12 5V1l5 5-5 5V7a6 6 0 1 0 6 6"/>') + '<text x="12" y="16.6" text-anchor="middle" font-size="8" font-weight="700" stroke="none" fill="currentColor" font-family="system-ui, sans-serif">10</text></svg>';
   var BANNER_CSS = `
 #banner {
   display: none; margin: 12px 0 4px; padding: 14px 16px; border-radius: 14px;
   background: #2a2317; color: #ffd79a; font-size: 17px; line-height: 1.35;
 }
 #banner.on { display: block; }
+/* Sized like the other things a child taps rather than like a link in a
+   sentence: this is the whole remedy for an evening with no films, and it is
+   pressed by whoever is holding the phone, standing up, in the dark. */
+#bannerAct {
+  display: none; width: 100%; margin: 12px 0 2px; min-height: 64px;
+  border-radius: 14px; background: var(--accent); color: #06121f;
+  font-size: 20px; font-weight: 650;
+  transition: transform .08s ease;
+}
+#bannerAct.on { display: block; }
+#bannerAct:active { transform: scale(.97); }
+/* The message and the button are separate elements so that setText() can keep
+   its no-churn contract on the text while the button comes and goes. */
+#bannerMsg { display: block; }
 `;
   var PREPARING_CSS = `
 #preparing { text-align: center; }
@@ -786,17 +1039,55 @@
   font-size: 26px; font-weight: 700; margin: 26px 8px 4px; line-height: 1.2;
 }
 #nowSub { color: var(--dim); font-size: 17px; margin-bottom: 26px; }
-#bar { height: 6px; border-radius: 3px; background: #26262e; margin: 0 4px 30px; overflow: hidden; }
-#barFill { height: 100%; width: 0; background: var(--accent); transition: width .8s linear; }
+#bar {
+  position: relative; height: 6px; border-radius: 3px; background: #26262e;
+  margin: 0 4px 10px;
+}
+#barFill {
+  height: 100%; width: 0; background: var(--accent); border-radius: 3px;
+  transition: width .8s linear;
+}
+/* Where a skip would land. Deliberately without #barFill's transition: this one
+   is following a thumb, and easing it would make the number and the marker
+   disagree about where the film is going. */
+#barGhost {
+  position: absolute; top: -5px; width: 3px; height: 16px; border-radius: 2px;
+  background: var(--ink); display: none; margin-left: -1px;
+}
+#barGhost.on { display: block; }
 
+/* Only ever on screen while a skip is pending, so the layout below it must not
+   move when it appears -- hence a reserved line rather than a hidden element. */
+#seekHint {
+  min-height: 24px; margin: 0 4px 6px; font-size: 17px; font-weight: 650;
+  color: var(--accent); font-variant-numeric: tabular-nums;
+}
+
+#transport {
+  display: flex; align-items: center; justify-content: center; gap: min(4vw, 22px);
+}
 #toggle {
-  width: min(46vw, 220px); aspect-ratio: 1; border-radius: 50%;
+  width: min(42vw, 200px); aspect-ratio: 1; border-radius: 50%;
   background: var(--accent); color: #06121f;
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: min(20vw, 96px); line-height: 1;
+  font-size: min(18vw, 88px); line-height: 1;
   transition: transform .08s ease;
+  flex: 0 0 auto;
 }
 #toggle:active { transform: scale(.94); }
+
+/* Big, because they are pressed and HELD by a child in the dark, and a hold
+   that slips off the edge is a jump that does not happen. .held rather than
+   :active: the button captures the pointer, so a thumb that slides off it is
+   still holding it, and :active does not always agree. */
+#skipBack, #skipFwd {
+  width: min(24vw, 108px); aspect-ratio: 1; border-radius: 50%;
+  background: var(--card); color: var(--ink);
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 auto; transition: transform .08s ease, background .12s ease;
+}
+#skipBack svg, #skipFwd svg { width: 58%; height: 58%; display: block; }
+#skipBack.held, #skipFwd.held { background: #2f2f3a; transform: scale(.94); }
 
 #stop {
   display: block; width: 100%; margin: 34px auto 0; max-width: 420px;
@@ -840,17 +1131,33 @@
     constructor(doc, now = Date.now) {
       this.now = now;
       this.hold = 0;
-      this.root = h(doc, "div", { id: "banner" });
+      this.tap = null;
+      this.msg = h(doc, "span", { id: "bannerMsg" });
+      this.act = h(doc, "button", {
+        id: "bannerAct",
+        type: "button",
+        onTap: () => {
+          var _a;
+          return (_a = this.tap) == null ? void 0 : _a.call(this);
+        }
+      });
+      this.root = h(doc, "div", { id: "banner" }, [this.msg, this.act]);
     }
     /**
      * Show a message, or clear it with "". A hold keeps a deliberate message (a
      * refusal) up for its full time rather than letting the next status poll wipe
      * it a second later -- the one message that explains why nothing happened must
      * be readable.
+     *
+     * An action turns the message into an offer. Passing none clears any previous
+     * one, so a banner cannot keep a button belonging to a situation that has
+     * passed -- which for the NAS button would mean offering to switch on a
+     * machine that is already running.
      */
-    show(text, holdMs = 0) {
+    show(text, holdMs = 0, action) {
       if (text) {
-        setText(this.root, text);
+        setText(this.msg, text);
+        this.setAction(action);
         this.root.classList.add("on");
         if (holdMs) {
           this.hold = this.now() + holdMs;
@@ -860,7 +1167,15 @@
       if (this.now() < this.hold) {
         return;
       }
+      this.setAction(void 0);
       this.root.classList.remove("on");
+    }
+    setAction(action) {
+      this.tap = action ? action.onTap : null;
+      if (action) {
+        setText(this.act, action.label);
+      }
+      toggleClass(this.act, "on", !!action);
     }
   };
   var PreparingView = class {
@@ -907,13 +1222,33 @@
   };
   var PlayingView = class {
     constructor(doc) {
+      // The last poll's numbers, kept so a preview drawn between polls has
+      // something to be relative to. The alternative -- handing the position to
+      // showSeek() from the caller -- would put the presenter in the business of
+      // knowing what a skip is.
+      this.position = 0;
+      this.duration = 0;
       this.title = h(doc, "div", { id: "nowTitle" });
       this.sub = h(doc, "div", { id: "nowSub" });
       this.bar = h(doc, "div", { id: "barFill" });
+      this.ghost = h(doc, "div", { id: "barGhost" });
+      this.hint = h(doc, "div", { id: "seekHint" });
       this.toggle = h(doc, "button", {
         id: "toggle",
         aria: "Play or pause",
         html: PAUSE_GLYPH
+      });
+      this.skipBack = h(doc, "button", {
+        id: "skipBack",
+        type: "button",
+        aria: "Back ten seconds, or hold to go further",
+        html: skipIcon(true)
+      });
+      this.skipFwd = h(doc, "button", {
+        id: "skipFwd",
+        type: "button",
+        aria: "Forward ten seconds, or hold to go further",
+        html: skipIcon(false)
       });
       this.stop = h(doc, "button", { id: "stop", text: "STOP" });
       this.volDown = h(doc, "button", { id: "volDown", aria: "Quieter", text: "−" });
@@ -922,8 +1257,9 @@
       this.root = h(doc, "div", { id: "playing", class: "view" }, [
         this.title,
         this.sub,
-        h(doc, "div", { id: "bar" }, [this.bar]),
-        this.toggle,
+        h(doc, "div", { id: "bar" }, [this.bar, this.ghost]),
+        this.hint,
+        h(doc, "div", { id: "transport" }, [this.skipBack, this.toggle, this.skipFwd]),
         this.stop,
         this.volume
       ]);
@@ -938,12 +1274,38 @@
       toggleClass(this.volume, "on", !!s.audio);
       const duration = (_a = s.duration) != null ? _a : 0;
       const position = (_b = s.position) != null ? _b : 0;
+      this.duration = duration;
+      this.position = position;
       if (duration > 0) {
         this.bar.style.width = barWidth(position, duration);
         setText(this.sub, paused ? "Paused" : timeLeft(duration - position));
       } else {
         setText(this.sub, paused ? "Paused" : "Playing");
       }
+    }
+    /**
+     * Draw a skip that has not been sent yet: a marker on the bar where it would
+     * land, and the jump and the destination in words. Zero clears it.
+     *
+     * The number shown is the CLAMPED one. A hold that has run past the end of
+     * the film keeps climbing as a raw total, and a label that promised "+2:14:00"
+     * for a jump the daemon is going to cut to eight minutes would be the page
+     * lying about the one thing this control exists to make legible.
+     */
+    showSeek(pending) {
+      if (!pending || !(this.duration > 0)) {
+        toggleClass(this.ghost, "on", false);
+        setText(this.hint, "");
+        return;
+      }
+      const limit = Math.max(0, this.duration - TAIL);
+      const target = Math.max(0, Math.min(limit, this.position + pending));
+      this.ghost.style.left = barWidth(target, this.duration);
+      toggleClass(this.ghost, "on", true);
+      setText(
+        this.hint,
+        jumpLabel(target - this.position) + " → " + clockTime(target)
+      );
     }
   };
 
@@ -964,11 +1326,14 @@
       });
       this.grid = deps.grid;
       this.reload = deps.reload;
+      this.wakeNas = deps.wakeNas;
+      this.subsBtn = deps.subsBtn;
     }
     apply(s) {
       var _a;
       this.state = s.state;
       this.reload.consider(s.build, s.state);
+      this.paintSubsBtn(s);
       if (s.state === "preparing") {
         this.views.show("preparing");
         this.preparing.apply(s);
@@ -991,10 +1356,60 @@
           "Someone is using the projector to show their phone. The movies come back when they stop."
         );
       } else if (s.state === "unavailable") {
-        this.banner.show("Can't reach the movies right now — the NAS may be off.");
+        this.unreachable(s);
       } else {
         this.banner.show("");
       }
+    }
+    /**
+     * The CC button: shown while a film is up and only when there is something to
+     * offer, lit while subtitles are actually on.
+     *
+     * Here rather than in ViewSwitcher, which owns the funnel, because this is
+     * not a question about which view is drawn. A film with no text subtitles --
+     * an unprepped share, or one whose only subtitles are the image-based kind
+     * prep declines to OCR -- must not get a button that opens a sheet saying
+     * "nothing". The answer only arrives with the poll.
+     */
+    paintSubsBtn(s) {
+      var _a;
+      if (!this.subsBtn) {
+        return;
+      }
+      const up = s.state === "playing" || s.state === "paused";
+      toggleClass(this.subsBtn, "on", up && !!((_a = s.subs) == null ? void 0 : _a.length));
+      toggleClass(this.subsBtn, "live", up && !!s.sub);
+    }
+    /**
+     * The films cannot be reached. Three different sentences, because they ask
+     * for three different things from whoever is holding the phone.
+     *
+     * The old one said "the NAS may be off" and stopped there: accurate, and
+     * useless, because it named the fix and offered no way to apply it. Somebody
+     * had to walk to the NAS and press its button. When the daemon can tell that
+     * the machine really is off AND knows how to wake it, the same sentence gets
+     * the button under it.
+     *
+     * The fallback is the important branch rather than the tidy one: a daemon
+     * from before this existed sends no `nas` field at all, and a NAS whose MAC
+     * was never configured reports can_wake false. Both must land on the message
+     * the page has always shown rather than on a button that does nothing.
+     */
+    unreachable(s) {
+      var _a, _b;
+      if (((_a = s.nas) == null ? void 0 : _a.power) === "waking") {
+        this.banner.show("Waking the NAS up — this takes a minute.");
+        return;
+      }
+      if (((_b = s.nas) == null ? void 0 : _b.power) === "off" && s.nas.can_wake && this.wakeNas) {
+        this.banner.show(
+          "Can't reach the movies — the NAS is off.",
+          0,
+          { label: "Turn it on", onTap: this.wakeNas }
+        );
+        return;
+      }
+      this.banner.show("Can't reach the movies right now — the NAS may be off.");
     }
   };
 
@@ -1045,13 +1460,13 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
 #filterChip .x { color: var(--dim); font-size: 20px; }
 `;
   var LibraryView = class {
-    constructor(doc, model, stamp, onPlay, filterBtn, now = Date.now) {
+    constructor(doc, model, stamp, onOpen, filterBtn, now = Date.now) {
       this.model = model;
       this.filterBtn = filterBtn;
       this.chipText = "";
       this.doc = doc;
       this.gridEl = h(doc, "div", { id: "grid" });
-      this.grid = new Grid(doc, this.gridEl, stamp, onPlay, now);
+      this.grid = new Grid(doc, this.gridEl, stamp, onOpen, now);
       this.empty = h(doc, "div", { id: "empty", hidden: true });
       this.emptyClear = h(doc, "button", {
         id: "emptyClear",
@@ -1133,7 +1548,7 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
       this.api = api;
       this.deps = deps;
       this.busyUntil = 0;
-      var _a;
+      var _a, _b, _c;
       this.now = (_a = deps.now) != null ? _a : Date.now;
       buttons.toggle.addEventListener("click", () => {
         if (!this.guard()) {
@@ -1146,6 +1561,7 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
         if (!this.guard()) {
           return;
         }
+        this.pad.clear();
         this.deps.toLibrary();
         void this.api.stop().then((r) => this.applyIfOk(r));
       };
@@ -1156,6 +1572,54 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
       });
       buttons.volUp.addEventListener("click", () => {
         void this.api.volume(10);
+      });
+      this.pad = new SeekPad({
+        now: this.now,
+        schedule: (_b = deps.schedule) != null ? _b : ((fn, ms) => window.setTimeout(fn, ms)),
+        cancel: (_c = deps.cancelTimer) != null ? _c : ((id) => window.clearTimeout(id)),
+        onChange: (pending) => {
+          var _a2, _b2;
+          return (_b2 = (_a2 = this.deps).onSeekPreview) == null ? void 0 : _b2.call(_a2, pending);
+        },
+        send: (delta) => {
+          void this.api.seek(delta).then((r) => this.applyIfOk(r));
+        }
+      });
+      this.hold(buttons.skipBack, -1);
+      this.hold(buttons.skipFwd, 1);
+    }
+    /**
+     * Bind one skip button.
+     *
+     * Pointer events rather than click, because the whole feature is the
+     * difference between a press and a hold, and a click only reports that both
+     * happened. preventDefault on the down stops the browser turning a long press
+     * into a selection or a callout -- the page already asks for that globally,
+     * but a button being held for three seconds is exactly the case where a
+     * browser reconsiders.
+     *
+     * setPointerCapture is what makes a hold survive a thumb sliding off the
+     * button, which on a round control the size of a coin is most holds. It is
+     * optional-chained because the DOM stub the tests build against has no
+     * business implementing it.
+     */
+    hold(el, dir) {
+      el.addEventListener("pointerdown", (ev) => {
+        var _a, _b;
+        const p = ev;
+        (_a = p.preventDefault) == null ? void 0 : _a.call(p);
+        (_b = el.setPointerCapture) == null ? void 0 : _b.call(el, p.pointerId);
+        toggleClass(el, "held", true);
+        this.pad.press(dir);
+      });
+      const up = () => {
+        toggleClass(el, "held", false);
+        this.pad.release();
+      };
+      el.addEventListener("pointerup", up);
+      el.addEventListener("pointercancel", () => {
+        toggleClass(el, "held", false);
+        this.pad.abort();
       });
     }
     guard() {
@@ -1687,19 +2151,24 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
 
   // src/sheet.ts
   var SHEET_CSS = `
-#filterBtn, #audioBtn {
+#filterBtn, #audioBtn, #subsBtn {
   position: fixed; z-index: 20;
   top: calc(10px + env(safe-area-inset-top));
   width: 52px; height: 52px; border-radius: 50%;
   background: var(--card); color: var(--ink);
   display: none; align-items: center; justify-content: center;
 }
-#filterBtn { right: 72px; }
+/* The funnel and the CC button share a slot, and never collide: the funnel
+   belongs to the grid, the CC button to a film that is playing. */
+#filterBtn, #subsBtn { right: 72px; }
 #audioBtn { right: 12px; }
-#filterBtn.on, #audioBtn.on { display: inline-flex; }
-#filterBtn.live, #audioBtn.live { background: var(--accent); color: #06121f; }
+#filterBtn.on, #audioBtn.on, #subsBtn.on { display: inline-flex; }
+#filterBtn.live, #audioBtn.live, #subsBtn.live {
+  background: var(--accent); color: #06121f;
+}
 #filterBtn svg { width: 24px; height: 24px; display: block; }
 #audioBtn svg { width: 26px; height: 26px; display: block; }
+#subsBtn svg { width: 26px; height: 26px; display: block; }
 
 #sheetScrim {
   position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.6);
@@ -1738,6 +2207,7 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
 .row .sub { display: block; font-size: 14px; color: var(--dim); margin-top: 2px; }
 .row .grow { flex: 1; min-width: 0; }
 `;
+  var CC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5" width="19" height="14" rx="3"/><path d="M10 10.2a2.6 2.6 0 1 0 0 3.6M17.5 10.2a2.6 2.6 0 1 0 0 3.6"/></svg>';
   var FUNNEL_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>';
   function row(doc, label, sub, selected, onTap) {
     const text = h(doc, "span", { class: "grow", text: label });
@@ -1796,56 +2266,85 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
   }
   var SheetManager = class {
     constructor(doc, deps) {
-      this.deps = deps;
-      this.sheet = deps.sound;
-      this.fsheet = deps.filter;
+      this.roots = {
+        sound: deps.sound,
+        subs: deps.subs,
+        filter: deps.filter,
+        episodes: deps.episodes
+      };
+      this.opened = {
+        sound: deps.onSoundOpen,
+        subs: deps.onSubsOpen,
+        filter: deps.onFilterOpen,
+        episodes: deps.onEpisodesOpen
+      };
       this.audioBtn = h(doc, "button", {
         id: "audioBtn",
         aria: "Sound",
-        onTap: () => this.showSound(!this.soundOpen)
+        onTap: () => this.show("sound", !this.isOpen("sound"))
+      });
+      this.subsBtn = h(doc, "button", {
+        id: "subsBtn",
+        aria: "Subtitles",
+        html: CC_ICON,
+        onTap: () => this.show("subs", !this.isOpen("subs"))
       });
       this.filterBtn = h(doc, "button", {
         id: "filterBtn",
         aria: "Filter and sort",
         html: FUNNEL_ICON,
-        onTap: () => this.showFilter(!this.filterOpen)
+        onTap: () => this.show("filter", !this.isOpen("filter"))
       });
       this.scrim = h(doc, "div", {
         id: "sheetScrim",
-        onTap: () => {
-          this.showSound(false);
-          this.showFilter(false);
-        }
+        onTap: () => this.closeAll()
       });
     }
+    isOpen(name) {
+      return this.roots[name].classList.contains("on");
+    }
     get soundOpen() {
-      return this.sheet.classList.contains("on");
+      return this.isOpen("sound");
+    }
+    get subsOpen() {
+      return this.isOpen("subs");
     }
     get filterOpen() {
-      return this.fsheet.classList.contains("on");
+      return this.isOpen("filter");
+    }
+    get episodesOpen() {
+      return this.isOpen("episodes");
+    }
+    show(name, on) {
+      for (const key of Object.keys(this.roots)) {
+        toggleClass(this.roots[key], "on", on && key === name);
+      }
+      toggleClass(
+        this.scrim,
+        "on",
+        Object.keys(this.roots).some((k) => this.isOpen(k))
+      );
+      if (on) {
+        this.opened[name]();
+      }
     }
     showSound(on) {
-      toggleClass(this.sheet, "on", on);
-      if (on) {
-        toggleClass(this.fsheet, "on", false);
-      }
-      this.paintScrim();
-      if (on) {
-        this.deps.onSoundOpen();
-      }
+      this.show("sound", on);
+    }
+    showSubs(on) {
+      this.show("subs", on);
     }
     showFilter(on) {
-      toggleClass(this.fsheet, "on", on);
-      if (on) {
-        toggleClass(this.sheet, "on", false);
-      }
-      this.paintScrim();
-      if (on) {
-        this.deps.onFilterOpen();
-      }
+      this.show("filter", on);
     }
-    paintScrim() {
-      toggleClass(this.scrim, "on", this.soundOpen || this.filterOpen);
+    showEpisodes(on) {
+      this.show("episodes", on);
+    }
+    closeAll() {
+      for (const key of Object.keys(this.roots)) {
+        toggleClass(this.roots[key], "on", false);
+      }
+      toggleClass(this.scrim, "on", false);
     }
   };
 
@@ -2102,6 +2601,72 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
     }
   };
 
+  // src/subs-sheet.ts
+  var SUBS_CSS = `
+#subsNote {
+  color: var(--dim); font-size: 16px; line-height: 1.45; padding: 6px 14px 2px;
+}
+`;
+  var SubsSheet = class {
+    constructor(doc, deps) {
+      this.deps = deps;
+      this.tracks = [];
+      this.current = 0;
+      this.playing = false;
+      this.doc = doc;
+      this.list = h(doc, "div", { id: "subsList" });
+      this.note = h(doc, "div", { id: "subsNote" });
+      this.root = h(
+        doc,
+        "div",
+        {
+          id: "subsSheet",
+          class: "sheet",
+          role: "dialog",
+          modal: true,
+          aria: "Subtitles"
+        },
+        [grip(doc), head(doc, "Subtitles"), this.list, this.note]
+      );
+    }
+    /** Fold a status poll in. Cheap and side-effect-free unless the sheet is
+     * open: the manager repaints it when it opens, and main.ts when a poll lands
+     * while it already is. */
+    onStatus(s) {
+      this.tracks = s.subs || [];
+      this.current = s.sub || 0;
+      this.playing = s.state === "playing" || s.state === "paused";
+    }
+    paint() {
+      this.list.textContent = "";
+      setText(this.note, "");
+      if (!this.playing) {
+        setText(this.note, "Start a film and its subtitles will appear here.");
+        return;
+      }
+      this.list.appendChild(
+        row(this.doc, "Off", "", this.current === 0, () => this.deps.choose(0))
+      );
+      for (const track of this.tracks) {
+        this.list.appendChild(
+          row(
+            this.doc,
+            langName(track.lang, track.title),
+            "",
+            track.n === this.current,
+            () => this.deps.choose(track.n)
+          )
+        );
+      }
+      if (!this.tracks.length) {
+        setText(
+          this.note,
+          "This film has no subtitles the player can show. Run playstick-prep.py over the library to extract them."
+        );
+      }
+    }
+  };
+
   // src/filter-sheet.ts
   var FILTER_CSS = `
 #fsheetNote { color: var(--dim); font-size: 16px; line-height: 1.45; padding: 6px 14px 2px; }
@@ -2255,6 +2820,103 @@ h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .
     }
   };
 
+  // src/episode-sheet.ts
+  var EPISODE_CSS = `
+#esheet h2#esheetTitle {
+  font-size: 22px; font-weight: 650; letter-spacing: .2px; text-transform: none;
+  color: var(--ink); margin: 14px 6px 10px;
+}
+/* Big, for the same reason the rows are -- and a row that scrolls sideways
+   rather than wraps, so a show with nine seasons does not push the episodes
+   off the bottom of the sheet. */
+#esheetSeasons {
+  display: flex; gap: 8px; overflow-x: auto; padding: 2px 6px 10px;
+  -webkit-overflow-scrolling: touch;
+}
+#esheetSeasons button {
+  flex: none; min-height: 48px; padding: 0 18px; border-radius: 24px;
+  background: var(--card); font-size: 17px; font-weight: 600;
+}
+#esheetSeasons button.sel { background: var(--accent); color: #06121f; }
+`;
+  function seasonName(season) {
+    return season === 0 ? "Specials" : "Season " + season;
+  }
+  function episodeName(ep) {
+    const title = (ep.title || "").trim();
+    if (!title || /^episode \d+$/i.test(title)) {
+      return "Episode " + ep.episode;
+    }
+    return ep.episode + ". " + title;
+  }
+  var EpisodeSheet = class {
+    constructor(doc, onPick) {
+      this.onPick = onPick;
+      this.show = null;
+      this.season = 0;
+      this.doc = doc;
+      this.title = h(doc, "h2", { id: "esheetTitle" });
+      this.seasons = h(doc, "div", { id: "esheetSeasons", role: "tablist" });
+      this.list = h(doc, "div", { id: "esheetList" });
+      this.root = h(
+        doc,
+        "div",
+        { id: "esheet", class: "sheet", role: "dialog", modal: true, aria: "Episodes" },
+        [grip(doc), this.title, this.seasons, this.list]
+      );
+    }
+    /** Point the sheet at a show. Called before the manager opens it; the
+     * manager's open hook then paints. Opens on the first season every time --
+     * where somebody left off is the daemon's to know, not this sheet's. */
+    load(show) {
+      var _a;
+      this.show = show;
+      this.season = (_a = show.seasons[0]) != null ? _a : 0;
+    }
+    /** The show on the sheet, for the composition root to refresh after a new
+     * library arrives. */
+    get current() {
+      return this.show;
+    }
+    paint() {
+      var _a;
+      const show = this.show;
+      this.seasons.textContent = "";
+      this.list.textContent = "";
+      if (!show) {
+        setText(this.title, "");
+        return;
+      }
+      setText(this.title, show.title);
+      if (show.seasons.indexOf(this.season) < 0) {
+        this.season = (_a = show.seasons[0]) != null ? _a : 0;
+      }
+      this.seasons.hidden = show.seasons.length < 2;
+      for (const season of show.seasons) {
+        const on = season === this.season;
+        const btn = h(this.doc, "button", {
+          type: "button",
+          role: "tab",
+          class: on ? "sel" : "",
+          text: seasonName(season),
+          onTap: () => {
+            this.season = season;
+            this.paint();
+          }
+        });
+        btn.setAttribute("aria-selected", on ? "true" : "false");
+        this.seasons.appendChild(btn);
+      }
+      for (const ep of show.episodes) {
+        if (ep.season !== this.season) {
+          continue;
+        }
+        const id = ep.id;
+        this.list.appendChild(row(this.doc, episodeName(ep), "", false, () => this.onPick(id)));
+      }
+    }
+  };
+
   // src/time-driver.ts
   var TimeDriver = class {
     constructor(api, clock, cfg, deps) {
@@ -2371,7 +3033,9 @@ button:disabled { opacity: .45; }
     PLAYING_CSS,
     SHEET_CSS,
     SOUND_CSS,
-    FILTER_CSS
+    SUBS_CSS,
+    FILTER_CSS,
+    EPISODE_CSS
   ].join("\n");
   function installStyles(doc) {
     const style = doc.createElement("style");
@@ -2444,45 +3108,102 @@ button:disabled { opacity: .45; }
       libraryLangs: () => model.facets.langs,
       storage: localStorage
     });
+    const subsSheet = new SubsSheet(doc, {
+      // The status the POST returns, applied at once: somebody in the dark has
+      // just tapped a language and the tick has to move now, not on the next
+      // poll. A refusal (the film ended between the tap and the packet) becomes
+      // the banner, which is the only account of why nothing happened.
+      choose: (track) => {
+        void api.subtitle(track).then((r) => {
+          if (r.ok) {
+            onStatus(r.data);
+            subsSheet.paint();
+          } else if (r.data.error) {
+            presenter.banner.show(r.data.error, 6e3);
+            sheets.closeAll();
+          }
+        });
+      }
+    });
     const filterSheet = new FilterSheet(doc, model, () => libraryView.render());
+    const episodeSheet = new EpisodeSheet(doc, (id) => {
+      sheets.closeAll();
+      play(id);
+    });
     const sheets = new SheetManager(doc, {
       sound: soundSheet.root,
+      subs: subsSheet.root,
       filter: filterSheet.root,
+      episodes: episodeSheet.root,
       onSoundOpen: () => soundSheet.paint(),
-      onFilterOpen: () => filterSheet.paint()
+      onSubsOpen: () => subsSheet.paint(),
+      onFilterOpen: () => filterSheet.paint(),
+      onEpisodesOpen: () => episodeSheet.paint()
     });
-    const libraryView = new LibraryView(doc, model, stamp, (id) => play(id), sheets.filterBtn);
+    const openTile = (id) => {
+      const show = model.show(id);
+      if (show) {
+        episodeSheet.load(show);
+        sheets.showEpisodes(true);
+      } else {
+        play(id);
+      }
+    };
+    const libraryView = new LibraryView(doc, model, stamp, openTile, sheets.filterBtn);
+    let nasBusyUntil = 0;
+    const wakeNas = () => {
+      const now = Date.now();
+      if (now < nasBusyUntil) {
+        return;
+      }
+      nasBusyUntil = now + 800;
+      void api.wakeNas().then((r) => {
+        if (r.ok) {
+          presenter.apply(r.data);
+        } else if (r.data.error) {
+          presenter.banner.show(r.data.error, 6e3);
+        }
+      });
+    };
     const presenter = new StatusPresenter(doc, {
       reload,
       stamp,
       now: Date.now,
       library: libraryView.root,
       grid: libraryView.gridEl,
-      filterBtn: sheets.filterBtn
+      filterBtn: sheets.filterBtn,
+      subsBtn: sheets.subsBtn,
+      wakeNas
     });
-    new Controls(
+    const controls = new Controls(
       {
         toggle: presenter.playing.toggle,
         stop: presenter.playing.stop,
         cancel: presenter.preparing.cancel,
         volDown: presenter.playing.volDown,
-        volUp: presenter.playing.volUp
+        volUp: presenter.playing.volUp,
+        skipBack: presenter.playing.skipBack,
+        skipFwd: presenter.playing.skipFwd
       },
       api,
       {
         stateOf: () => presenter.state,
         apply: (s) => onStatus(s),
-        toLibrary: () => presenter.views.show("library")
+        toLibrary: () => presenter.views.show("library"),
+        onSeekPreview: (pending) => presenter.playing.showSeek(pending)
       }
     );
     for (const el of [
       presenter.banner.root,
       sheets.audioBtn,
       sheets.filterBtn,
+      sheets.subsBtn,
       soundSheet.tapToListen,
       sheets.scrim,
       soundSheet.root,
+      subsSheet.root,
       filterSheet.root,
+      episodeSheet.root,
       libraryView.root,
       presenter.preparing.root,
       presenter.playing.root
@@ -2516,9 +3237,16 @@ button:disabled { opacity: .45; }
       }
       presenter.apply(s);
       audio.onStatus(s);
+      subsSheet.onStatus(s);
+      if (sheets.subsOpen) {
+        subsSheet.paint();
+      }
       const onGrid = s.state !== "playing" && s.state !== "paused" && s.state !== "preparing";
-      if (onGrid && Date.now() - libraryFetchedAt > 1e4) {
-        loadLibrary();
+      if (onGrid) {
+        controls.pad.clear();
+        if (Date.now() - libraryFetchedAt > 1e4) {
+          loadLibrary();
+        }
       }
     }
     function loadLibrary() {
@@ -2532,6 +3260,16 @@ button:disabled { opacity: .45; }
         if (sheets.filterOpen) {
           filterSheet.paint();
         }
+        const current = episodeSheet.current;
+        if (sheets.episodesOpen && current) {
+          const fresh = model.show(current.id);
+          if (fresh) {
+            episodeSheet.load(fresh);
+            episodeSheet.paint();
+          } else {
+            sheets.showEpisodes(false);
+          }
+        }
         if (d.available === false) {
           libraryView.unavailable();
         }
@@ -2543,7 +3281,7 @@ button:disabled { opacity: .45; }
       if (!item) {
         return;
       }
-      presenter.preparing.begin(item.title, id);
+      presenter.preparing.begin(fullTitle(item), id);
       presenter.views.show("preparing");
       void api.play(id).then((res) => {
         if (!res.ok) {

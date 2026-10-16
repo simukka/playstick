@@ -135,7 +135,8 @@ class Projectionist:
 
     def current_title(self):
         item = self.current_item()
-        return item["title"] if item else ""
+        # full_title names the series as well when this is an episode.
+        return (item.get("full_title") or item["title"]) if item else ""
 
     def progress(self):
         """The step the page draws, or None when nothing is being prepared."""

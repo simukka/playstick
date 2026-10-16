@@ -1,4 +1,39 @@
 ---
+# EVERY TUNABLE THIS APPLIANCE HAS. One file, on purpose.
+#
+# There used to be five: this one, plus a defaults/main.yml in each of the
+# player, nas, idle and trim roles. A single knob -- say the NAS's MAC address
+# -- then had to be declared in a role, given a value in host_vars, threaded
+# through an Environment= line in the unit template, parsed in config.py, and
+# defaulted again in the dev container and the test harness. Six files for one
+# number is how a setting ends up documented in one place and set in another.
+#
+# So: the roles carry no defaults at all now, and this is where a value is
+# changed. Below it, the chain is mechanical --
+#
+#   group_vars/all.yml            <- you are here
+#     -> roles/player/templates/settings.toml.j2
+#       -> /etc/playstick/settings.toml   on the device
+#         -> src/server/playstick/config.py
+#
+# WHY THIS FILE AND NOT settings.yml AT THE REPO ROOT. Ansible's variable
+# precedence. A root file would have to be pulled in with vars_files:, which
+# ranks ABOVE host_vars/ -- so host_vars/vivostick/local.yml would quietly stop
+# overriding anything, and the committed/site-local split this repo is careful
+# about would invert without an error. group_vars/all.yml sits BELOW host_vars,
+# which is the relationship the design needs.
+#
+# WHAT DOES NOT BELONG HERE. Three tiers, and the boundary is not stylistic:
+#
+#   group_vars/all.yml       decisions about how the appliance behaves. The
+#                            same for everyone. Committed.
+#   host_vars/*/local.yml    facts about one LAN: addresses, the login, the
+#                            share name, the NAS's MAC. Gitignored.
+#   host_vars/*/vault.yml    secrets. Gitignored AND encrypted.
+#
+# And the trap that costs an afternoon: a DIRECTORY named group_vars/all/
+# SHADOWS this file outright, taking every tunable below out of play at once.
+# Do not create one.
 # --- privilege escalation -----------------------------------------------
 # Ubuntu 26.04 makes sudo-rs the default `sudo` via update-alternatives.
 # sudo-rs does not honour the custom prompt ansible passes with -p, so
@@ -212,20 +247,208 @@ enable_zram: true
 # rescue console. Rollback: systemctl unmask --now getty@tty1
 claim_tty1: true
 
+# --- trim ---------------------------------------------------------------
+# Strip the Ubuntu Server install back toward what a kiosk actually needs.
+# Every list here was built from what is genuinely installed and running on
+# the device, not from a generic "debloat Ubuntu" checklist.
+
+trim_enabled: true
+
+# Purged outright. Each one is dead weight on a headless HDMI stick:
+#   apport              crash reporting, nothing to report to
+#   bolt                Thunderbolt; Cherry Trail has none
+#   fwupd               firmware updates; this stick is not flashed from Linux
+#   landscape-common    Canonical fleet management
+#   modemmanager        no WWAN modem
+#   multipath-tools     no multipath SAN
+#   networkd-dispatcher hook runner nothing hooks into
+#   open-iscsi          no iSCSI
+#   packagekit          nothing headless talks to it
+#   plymouth            boot splash on a box whose display is the payload
+#   rsyslog             duplicates journald into /var/log; eMMC writes matter
+#   snapd               no snaps installed
+#   udisks2             no removable-media management wanted
+#   ufw                 not needed (explicit decision)
+#   upower              no battery
+#   kdump-tools         see below -- it reserves nothing and cannot work
+trim_purge_packages:
+  - apport
+  - bolt
+  - fwupd
+  - kdump-tools
+  - landscape-common
+  - modemmanager
+  - multipath-tools
+  - networkd-dispatcher
+  - open-iscsi
+  - packagekit
+  - plymouth
+  - rsyslog
+  - snapd
+  - software-properties-common   # base edits sources directly; not needed
+  - udisks2
+  - ufw
+  - upower
+
+# Asserted against the purge list before anything is removed. These are not
+# suggestions -- removing any of them costs you the device.
+#
+#   lvm2            root is /dev/mapper/ubuntu--vg-ubuntu--lv. Removing this
+#                   makes the system unbootable.
+#   openssh-server  the only way in
+#   netplan.io      network configuration
+#   systemd-*       init, DNS, network
+#   dbus            required by logind and avahi
+#   avahi-daemon    AirPlay discovery is mDNS
+#   chrony          time sync; pairing and TLS care
+#   thermald        kept deliberately: a passively cooled stick doing
+#                   sustained video decode wants thermal management
+trim_protected_packages:
+  - lvm2
+  - openssh-server
+  - openssh-client
+  - netplan.io
+  - systemd
+  - systemd-resolved
+  - systemd-timesyncd
+  - dbus
+  - avahi-daemon
+  - chrony
+  - thermald
+  - sudo
+  - sudo-rs
+
+# Timers that wake a slow CPU to do work nobody asked for. fstrim.timer is
+# deliberately NOT here: TRIM is worth keeping on eMMC.
+trim_disable_timers:
+  - apt-daily.timer
+  - apt-daily-upgrade.timer
+  - motd-news.timer
+  - man-db.timer
+  - dpkg-db-backup.timer
+  - e2scrub_all.timer
+
+# Keep the package (so `apt upgrade` still works) but stop it running on its
+# own. An unattended apt run mid-presentation would wreck a mirroring session
+# on this CPU. The tradeoff: patching becomes manual.
+trim_disable_unattended_upgrades: true
+
+# Disable, do NOT purge. Purging cloud-init can take
+# /etc/netplan/50-cloud-init.yaml with it -- that is the network config, and
+# losing it on a headless device means losing SSH.
+trim_disable_cloud_init: true
+
+# journald is the only log sink once rsyslog is gone. Cap it so it cannot
+# grow into the eMMC.
+trim_journal_max_use: 64M
+
+trim_clean_apt_cache: true
+
+# Modules that cannot bind on this hardware and only emit boot errors onto a
+# console that happens to be the projector:
+#
+#   intel-spi intel-spi: unsupported C0DEN: 0xc
+#   intel-spi intel-spi: probe with driver intel-spi failed with error -22
+#
+# spi-intel drives the BIOS SPI flash. Nothing here needs it, it cannot work
+# on this firmware, and a driver capable of writing the BIOS is not one worth
+# leaving loaded on a kiosk. Both blacklist and install-/bin/true, because
+# blacklist alone does not stop a modalias-triggered load.
+trim_blacklist_modules:
+  - spi_intel_platform
+  - spi_intel
+
+# Quieting the boot console is tempting on a box whose display is the output,
+# but it is OFF by default on purpose: the kernel message that cracked the
+# performance investigation open was
+#   i915 0000:00:02.0: [drm] *ERROR* CPU pipe C FIFO underrun
+# read straight off tty1. Hiding that class of message costs more than the
+# tidier boot screen is worth while anything is still being measured.
+trim_quiet_boot: false
+
+# The installer left the default target at graphical.target. Nothing visibly
+# breaks today (no display manager is installed), but if one ever arrives it
+# would take DRM master and lock kmssink out of the display.
+trim_set_multi_user_target: true
+
+# --- idle screen --------------------------------------------------------
+# The idle screen: what the projector shows when nobody is mirroring.
+#
+# It draws pixels into /dev/fb0 rather than text into /dev/tty1. That is not a
+# style choice -- the console version was built first and froze on screen,
+# because uxplay-kms holds DRM master from startup and the fbdev helper refuses
+# console updates while another master exists. See the header comment in
+# files/uxplay-idle-clock.py and the README section "Idle screen".
+
+idle_enabled: true
+
+idle_fb: /dev/fb0
+
+# Only used to clear leftover console text and hide the cursor; nothing is
+# drawn through it. tty1 is free because claim_tty1 masks getty@tty1.
+idle_tty: /dev/tty1
+
+# Glyphs are parsed from these PSF files directly, so the kernel's own font
+# validation does not apply -- the 32x16 face that fbcon rejects with
+# "Unable to load such font with such kernel version" renders fine here.
+# First readable file wins; the rest are fallbacks if console-setup is slimmed.
+idle_fonts:
+  - /usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz
+  - /usr/share/consolefonts/Lat15-Terminus32x16.psf.gz
+  - /usr/share/consolefonts/Lat15-VGA32x16.psf.gz
+  - /usr/share/consolefonts/Lat15-Fixed16.psf.gz
+
+# 0 = fit the clock to the framebuffer (90% of width, 55% of height, whichever
+# binds first). On 1280x720 with the 16x32 face that lands on scale 12, i.e.
+# 192x384 px digits. Set a number to pin it.
+idle_clock_scale: 0
+
+# strftime format. 24-hour, no seconds: a projector clock that ticks every
+# second is a distraction, and it would redraw 60x more often for nothing.
+idle_time_format: "%H:%M"
+
+# Black the screen after this many idle minutes, to save projector lamp hours.
+# 0 disables blanking. The countdown restarts when a mirroring session ends.
+idle_blank_minutes: 30
+
+# How often to re-check the time and the session state. The screen is only
+# redrawn when HH:MM actually changes.
+idle_poll_seconds: 5
+
+# Second line, under the clock. Empty derives it from uxplay_advert_name plus
+# the hostname UxPlay appends -- i.e. exactly what iOS will list.
+idle_subtitle: ""
+
+# Written by the movie player while it owns the display, so the blank
+# countdown does not run out partway through a film. Empty leaves the clock
+# entirely independent of the player role, which is how it behaves when
+# player_enabled is false.
+idle_busy_file: /run/playstick/playing
+
 # --- NAS ----------------------------------------------------------------
 # The movie library: a read-only SMB/CIFS share, mounted on demand.
 #
-# Both empty is the shipping default and skips the role entirely. THE VALUES
-# GO IN host_vars/vivostick/local.yml, which is gitignored -- this file is in
-# git and an address here would be published with it. Left empty rather than
-# set to a plausible example on purpose: an example address is a live value,
-# and a clone missing local.yml should mount nothing rather than reach for
-# somebody else's NAS.
+# Mounted through a systemd .automount rather than a plain fstab entry. The
+# difference matters on a headless stick: an fstab CIFS entry that cannot reach
+# the server delays boot until it times out, and this device has no console to
+# explain itself with. An .automount unit is satisfied instantly at boot and
+# only attempts the mount when something walks into the directory -- so a NAS
+# that is off, or a network that came up late, costs nothing.
+
+nas_enabled: true
+
+# Server, share and MAC. ALL THREE ARE SITE VALUES AND GO IN
+# host_vars/vivostick/local.yml, which is gitignored -- this file is in git and
+# an address here would be published with it. Declared empty rather than set to
+# a plausible example on purpose: an example address is a live value, and a
+# clone missing local.yml should mount nothing rather than reach for somebody
+# else's NAS. Empty server or share skips the role entirely.
 #
 #   # host_vars/vivostick/local.yml   (see local.yml.example)
 #   nas_server: "10.0.1.5"     # address, not a name: the mount must not
 #                              # depend on mDNS being up at boot
 #   nas_share:  "movies"
+#   nas_mac:    "00:11:32:aa:bb:cc"
 #
 # nas_share is the exported SHARE NAME, not the path the files sit at on the
 # NAS. A Synology shows the folder as /volume1/movies and exports it as
@@ -240,12 +463,103 @@ claim_tty1: true
 #   ./actl 'ansible-playbook site.yml --ask-vault-pass'
 #
 # Both paths are host_vars, and that is load-bearing: vivostick is a HOST in
-# inventory.yml, not a group. group_vars/vivostick/ is never read, and
-# group_vars/all/ is worse than useless -- a directory of that name SHADOWS
-# this file, silently taking every tunable in it out of play.
-# nas_server: ""
-# nas_share: ""
+# inventory.yml, not a group. group_vars/vivostick/ is never read.
+nas_server: ""
+nas_share: ""
+
+# The NAS's wired MAC, for wake-on-LAN. Empty means the daemon will not offer
+# to switch the NAS on: the page still says the films are unreachable, it just
+# has no button under the sentence. Anything that is not six hex octets is
+# refused by the assert in roles/nas/tasks/main.yml rather than sent as a
+# packet nothing answers.
+#
+# Where to find it: `ping <nas_server>` then `arp -n <nas_server>`, or on a
+# Synology, DSM -> Control Panel -> Network -> Network Interface.
+#
+# WAKE-ON-LAN MUST ALSO BE ENABLED ON THE NAS ITSELF. On DSM that is Control
+# Panel -> Hardware & Power -> "Enable WOL on LAN 1". Nothing here can tell
+# whether it is on; the symptom is a packet that leaves this box (tcpdump sees
+# it) and a NAS that stays dark.
+nas_mac: ""
+
+# The share as it goes into the UNC. Surrounding slashes are trimmed so that
+# "video", "/video" and "video/" all mount the same thing; a leading slash is
+# the easy half of the mistake above and is not worth failing a play over.
+# What is left is checked, not guessed at -- see the assert.
+nas_share_unc: "{{ nas_share | regex_replace('^/+', '') | regex_replace('/+$', '') }}"
+
+# Where the share appears. The systemd unit names are derived from this via
+# systemd-escape, so /srv/movies becomes srv-movies.mount / srv-movies.automount.
 nas_mount_point: /srv/movies
+
+# Credentials. Put these in a vault file, not here:
+#   ./actl 'ansible-vault create host_vars/vivostick/vault.yml'
+# and reference them as nas_username / nas_password there.
+#
+# An empty username mounts as guest, which is what a NAS share published
+# without authentication wants.
+nas_username: ""
+nas_password: ""
+nas_domain: ""
+nas_credentials_file: /etc/playstick/nas.cred
+
+# SMB dialect. Pinned rather than negotiated: cifs.ko's autonegotiation starts
+# at the highest dialect and walks down, and each rejected attempt costs a
+# round trip on a link that is already SDIO-attached Wi-Fi. 3.1.1 is what any
+# NAS made since about 2015 speaks. Drop to "2.1" for older firmware; do not
+# drop to "1.0" -- SMB1 is off by default in the kernel for good reasons.
+nas_smb_version: "3.1.1"
+
+# Unmount the share after this many seconds with nothing reading it. Keeps a
+# dropped NAS from leaving a hung mount behind, and lets the Wi-Fi go quiet
+# between films. 0 disables the idle timeout.
+nas_idle_timeout: 600
+
+# Appended verbatim to the mount options, e.g. "sec=ntlmssp" or "nounix".
+nas_mount_options_extra: ""
+
+# --- is the NAS awake? ---------------------------------------------------
+# The daemon watches, so the page can offer to switch it on rather than only
+# reporting that it is off. Everything below is read by src/server/playstick/
+# nas.py; none of it affects the mount.
+
+# TCP rather than ICMP, and the port is the point. A Synology answers ping
+# well before smbd is listening, so a ping-green light would promise films
+# that are not there yet -- and the button's whole job is to be believable.
+# 445 is the port the mount itself will use.
+nas_probe_port: 445
+# Five ASCII round trips on a LAN take under a millisecond. Anything near this
+# means the NAS is not answering rather than answering slowly.
+nas_probe_timeout: 1.0
+# How often to look, in the three situations that matter. Awake is the boring
+# case and gets the cheap cadence; the minute after somebody taps the button is
+# the only moment anyone is actually watching the screen, so it gets the dear
+# one.
+nas_probe_interval: 60         # reachable
+nas_probe_interval_down: 10    # unreachable
+nas_probe_interval_waking: 5   # inside the wake window below
+
+# Where the magic packet goes. A directed broadcast to the NAS's own subnet
+# also works and is tidier on a segmented LAN; 255.255.255.255 is the setting
+# that needs no knowledge of the netmask and is right for a flat home network.
+nas_wake_broadcast: "255.255.255.255"
+# 9 (discard) by convention; 7 (echo) is the other one in the wild. The NAS's
+# NIC matches on the packet's contents, not the port, so this only has to be a
+# port nothing else on the LAN minds receiving.
+nas_wake_port: 9
+# Least seconds between packets, enforced in the daemon rather than in the
+# page. Six phones in a room mashing one button should send one packet.
+nas_wake_cooldown: 60
+# How long after a packet the daemon keeps reporting "waking" -- i.e. how long
+# the page says "this takes a minute" instead of offering the button again.
+# A sleeping Synology answers in about twenty seconds; one that was fully off
+# takes most of two minutes to reach smbd.
+nas_wake_window: 180
+
+# The .mount unit to reset-failed after the NAS comes back. Empty means derive
+# it from nas_mount_point with systemd-escape, which is what the nas role does
+# and is more reliable than writing "srv-movies.mount" out by hand.
+nas_mount_unit: ""
 
 # --- movie player --------------------------------------------------------
 # mpv on a bare DRM plane, driven from a phone browser on the LAN.
@@ -261,6 +575,152 @@ nas_mount_point: /srv/movies
 # direction is a check: a film will not start while somebody is mirroring,
 # because somebody is standing there holding a phone.
 #
+# See the package docstring in src/server/playstick/__init__.py for why the
+# daemon arbitrates the display itself rather than expressing it with
+# Conflicts=. The short version: systemd will stop a conflicting unit but
+# never start it again, and restoring the receiver is a decision.
+
+player_enabled: true
+
+# Which unit owns the display when nothing is playing, i.e. the one to stop
+# for the length of a film and start again afterwards.
+#
+# Derived from uxplay_output_path rather than set, so the daemon cannot end up
+# stopping a unit that was never running while the one that was goes on holding
+# the card -- the film would then play to a black screen and AirPlay would stay
+# up. Falls back to the KMS unit when uxplay_output_path is "none": both unit
+# files exist either way, and the arbiter only ever restores what it actually
+# took away.
+#
+# Override to pin it to a specific unit; the two just have to agree.
+player_airplay_unit: >-
+  uxplay-{{ uxplay_output_path
+            if uxplay_output_path | default('kms') in ['kms', 'cage']
+            else 'kms' }}.service
+
+# Root, and stated plainly rather than worked around. mpv has to become DRM
+# master and the arbiter has to start and stop a system unit; the alternative
+# is a dedicated account in video/render plus a polkit rule for two systemctl
+# verbs, which is more moving parts than it protects on an appliance with one
+# service on it and no firewall. The control that actually matters is that no
+# filesystem path ever crosses the HTTP boundary -- see the module header in
+# src/server/playstick/__init__.py.
+player_user: root
+player_bind: "0.0.0.0"
+
+# 80, so the address is http://vivostick.local/ with nothing to remember after
+# the hostname -- which is the whole ergonomic point of a page a child opens
+# on a phone. Nothing else on this device listens on 80: no web server is
+# installed, and UxPlay is on 7000-7002.
+#
+# Binding below 1024 needs CAP_NET_BIND_SERVICE, which this service has for
+# free because player_user is root for reasons that have nothing to do with
+# the port (mpv needs DRM master; the arbiter needs systemctl). If you ever
+# move it off root, either put the port back above 1024 or add
+# AmbientCapabilities=CAP_NET_BIND_SERVICE to the unit -- the failure is
+# "Permission denied" on bind at startup, in the journal, with no other clue.
+#
+# The daemon's own fallback stays 8080, deliberately: that is the path a
+# developer takes running playstick-web.py by hand as themselves, where 80
+# would fail before printing anything useful.
+player_port: 80
+
+# Advertise the UI as _http._tcp so it is reachable at
+# http://<hostname>.local:<port>/ without anyone typing an IP address.
+# avahi-daemon is already required for AirPlay, so this is free -- and at port
+# 80 the advertised record needs no port at all in a browser.
+player_advertise_mdns: true
+
+# Reject clients outside these networks at the handler. ufw is purged by the
+# trim role by explicit decision, so this is the only filtering there is --
+# and it is thin: it keeps a misconfigured router from exposing the UI, not a
+# determined neighbour off your Wi-Fi. Empty disables the check.
+player_allow_networks:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - 127.0.0.0/8
+
+# --- player: paths on the device -----------------------------------------
+# These used to be written straight into the unit template, which meant the
+# daemon's fallback and the value it was actually given lived in different
+# files and could drift. They are settings like any other now.
+player_ui_file: /usr/local/share/playstick/ui.html
+player_mpv_binary: /usr/bin/mpv
+player_mpv_socket: /run/playstick/mpv.sock
+# mpv's DRM backend opens a VT to arbitrate console switching. Handing it tty1
+# on stdin is what the probe harness already had to do -- uxplay-probe-matrix.sh
+# runs its sweep under `openvt -c 1` because DRM work started from an SSH
+# session has no controlling terminal. Empty disables it.
+player_mpv_tty: /dev/tty1
+# Written before the AirPlay unit is stopped and removed after it is started
+# again. Its presence is how a restarted daemon -- or the unit's ExecStopPost --
+# knows the receiver was taken down by us and owes a restore.
+player_restore_file: /run/playstick/restore-airplay
+
+# --- player: library -----------------------------------------------------
+player_library_path: "{{ nas_mount_point }}"
+
+# WHERE THE LIBRARY ACTUALLY LIVES, which changed.
+#
+# It used to be a JSON index playstick-prep.py wrote onto the share, re-read
+# every scan interval, with a walk of that share as the fallback. Both are
+# gone. The film table, the metadata edits, the posters and the resume
+# positions are rows in one SQLite database on the device, and the desktop
+# admin app puts them there over /api/admin/films.
+#
+# The reason is the mount options two hundred lines up: the share is `ro`. The
+# old edit file lived on it, so every title corrected from the admin view got
+# EROFS and one line in the journal, and was gone at the next restart. A device
+# that is asked to remember things needs somewhere it can write, and /srv is
+# not it.
+#
+# What is still on the share is what SQLite has no business holding: the film,
+# its re-encode, its subtitles and its per-language audio, each named by a
+# library-relative path in a row. Nothing else.
+#
+# /var/lib rather than /var/cache, and the distinction is load-bearing: a cache
+# is something a cleaner may delete, and deleting this loses every correction
+# anybody has made. systemd creates the directory through StateDirectory= in
+# the unit, which is also what makes it writable under ProtectSystem=full.
+player_db_path: /var/lib/playstick/playstick.db
+
+# Whether to LOAD the subtitles the prep tool extracted, so the page can offer
+# them. They live under .playstick/subs/ rather than beside each film, because
+# the share is mounted read-only, so --sub-auto cannot find them and the daemon
+# passes --sub-file explicitly.
+#
+# On does not mean subtitles appear. Every film starts with --sid=no and stays
+# that way until somebody picks a language from the CC button on their phone,
+# which is why this now defaults on: the deploy-time flag used to be the only
+# switch there was, and a choice that belongs to whoever is watching does not
+# belong in a playbook. Off means no film can offer them at all.
+player_subtitles: true
+
+# How often the daemon asks whether the share is still there. One stat of the
+# mount point, which is all `available` on the page has ever meant -- it is
+# what turns the grid into "the films are unreachable" and offers the button
+# that switches the NAS back on.
+#
+# It used to be a recursive walk stat-ing every file over CIFS, which is why it
+# had to be as slow as five minutes. It could be far more frequent now; it is
+# not, because touching an automount is what keeps it mounted, and a NAS that
+# never gets to idle out is a NAS that never spins down.
+player_scan_interval: 300
+
+# --- player: posters -----------------------------------------------------
+# Posters are rows in the database now, not files -- there is no cache
+# directory to configure. A poster the admin app uploaded and a frame this box
+# extracted land in the same table and are served the same way, with an ETag;
+# the settings below are only about the extraction, which is the fallback for a
+# film the admin app had no poster for.
+player_thumb_width: 320
+# A fifth of the way in, so tiles show the film rather than a distributor's
+# logo or a black fade-in.
+player_thumb_at: "20%"
+player_thumb_timeout: 60
+
+# --- player: mpv ---------------------------------------------------------
 # Video output. THIS IS THE ONE TO MEASURE FIRST.
 #
 # It looks like it contradicts uxplay_decoder above, and it does not. That
@@ -287,7 +747,12 @@ nas_mount_point: /srv/movies
 #
 # Settle it, then change these two lines:
 #   ./actl 'ansible-playbook fetch-results.yml -e run_player_probe=true'
+#
+#   drm  = software decode into a dumb buffer.
+#   gpu  = GBM/EGL. Lets --hwdec=vaapi keep frames on the GPU via dmabuf and
+#          does any scaling there too -- probably faster, entirely unproven.
 player_vo: drm                 # drm | gpu | gpu-next
+player_gpu_context: drm
 player_hwdec: "no"             # no | vaapi | vaapi-copy | auto-safe
 
 # Audio is deliberately off, and films therefore play SILENTLY.
@@ -304,11 +769,24 @@ player_hwdec: "no"             # no | vaapi | vaapi-copy | auto-safe
 # platform turns out to be as unreliable as the README warns, a USB audio
 # adapter sidesteps the SoC path entirely and player_audio_device is the only
 # line that changes.
-player_audio: false
-
-# WHICH IS WHY THE PHONES DO THE LISTENING.
 #
-# The line above is not a gap waiting to be filled. The projector is a
+# False also means the page HIDES its volume buttons rather than showing a
+# child two controls that do nothing.
+player_audio: false
+player_audio_device: ""            # e.g. "alsa/hw:0,3"; empty means mpv's default
+player_audio_channels: stereo
+
+player_mpv_extra_args: ""
+
+# Seconds to wait after the AirPlay unit reports inactive before mpv reaches
+# for the card. The fd is closed by the kernel when the process exits, so this
+# is slack rather than a requirement.
+player_settle_seconds: 1.0
+
+# --- player: audio on the phones -----------------------------------------
+# WHICH IS WHERE THE SOUND ACTUALLY COMES FROM.
+#
+# player_audio above is not a gap waiting to be filled. The projector is a
 # Panasonic PT-AE4000 and has no speakers, so even a working HDMI audio path
 # would have nowhere to put the sound. What there is instead: a film plays
 # silently on the screen, and everybody who wants to hear it opens the same web
@@ -322,27 +800,139 @@ player_audio: false
 # subtitles it already writes, and this box only ever serves those bytes.
 # ffmpeg stays uninstalled here.
 #
-# The tunables are player_phone_audio* in roles/player/defaults/main.yml. Three
-# things worth knowing before touching them:
+# Three things worth knowing before touching these:
 #
 #   - It is independent of player_audio in both directions. Turning HDMI audio
 #     on later does not turn this off, and this working does not mean that one
 #     would.
 #   - It is the one endpoint in the daemon that streams file bytes, and the
 #     package docstring in playstick/__init__.py explains how far that reaches.
-#   - Each listener costs the Wi-Fi radio twice what the bitrate suggests,
-#     because the daemon reads the track from the NAS over the same radio it
-#     writes it to the phone on. If a film starts stuttering when somebody
-#     picks a language, player_phone_audio_kbps is the first thing to lower.
 #   - The sync slider in the sheet is per device and lives in that phone's
 #     localStorage, because headphone latency is a property of the headphones
-#     -- wired is ~30 ms behind, AirPods ~200 ms. Anyone who set one before the
-#     round-trip sign fix in sndSample() had dialled out a bias that is now
-#     gone, and should reset it to 0 and re-tune from there.
+#     -- wired is ~30 ms behind, AirPods ~200 ms.
 #
 # And one that is enforced rather than documented: --ao=null is now the master
 # clock the phones sync to. See the mpv argv comment in the unit template
 # before deciding that decoding an inaudible audio track is waste.
+player_phone_audio: true
+
+# Kilobits per second per listener, after the burst below. This is the tunable
+# to reach for first if a film starts stuttering when somebody picks a
+# language, and the reason is worth knowing: every byte crosses this box's one
+# SDIO-attached Wi-Fi radio TWICE -- once reading the track off the NAS, once
+# writing it to the phone -- while the film's own ~4 Mbps CIFS read is on the
+# same radio. Safari will pull a progressive media file as fast as the socket
+# allows unless something paces it.
+#
+# 384 is four times a 96 kbps track: fast enough to refill after a stall,
+# slow enough to leave the film its bandwidth. 0 disables the pacing.
+player_phone_audio_kbps: 384
+
+# Seconds of audio handed over at full speed before the pacing starts, so that
+# playback begins the moment somebody taps rather than after a wait.
+player_phone_audio_burst_seconds: 30
+
+# Concurrent listeners. Each one holds a thread in the daemon for as long as
+# they are listening, so this is a floor under the page staying responsive for
+# everybody else, not a licence limit.
+player_phone_audio_max_streams: 6
+
+# --- player: the projector -----------------------------------------------
+# Switching the screen on, so that a child picking a poster is the whole of
+# what it takes to watch a film.
+#
+# OFF BY DEFAULT, and that is not timidity. With no model set the daemon builds
+# a NullProjector: every step of the sequence is a no-op, the film starts
+# exactly as it did before this feature existed, and an appliance with no
+# serial cable -- or the development GUI, which never has one -- behaves
+# identically. Setting a model is the only thing that turns any of it on.
+#
+#   ""            no projector (default)
+#   pt-ae4000     Panasonic PT-AE4000, over RS-232C
+#   pt-ae3000u    the same driver; the models differ only in which inputs
+#                 answer ER401, and it offers both sets
+#
+# BEFORE SETTING THIS, run scripts/projector-probe.py on the device. It is not
+# a formality: the protocol was ported from an implementation that had only
+# ever been tested against mocks, and the USB adapter in use reports FTDI ID
+# 0403:6015, which is sold both as a real RS-232 cable and as a bare 3.3 V TTL
+# breakout the projector cannot hear. `projector-probe.py status` distinguishes
+# them in about a second, and nothing else does.
+player_projector_model: ""
+
+# The serial port. Empty means "find it": the discovery task below takes the
+# first FTDI adapter under /dev/serial/by-id, which is the same shape as
+# drm_card_path in the graphics role and is there for the same reason -- the
+# path should not have to be written down for the usual case, and should be
+# overridable when the usual case is wrong.
+#
+# by-id rather than /dev/ttyUSB0 because ttyUSB numbering depends on USB
+# enumeration order: a hub that comes up differently after a reboot, or a
+# second serial device, silently moves it. The by-id link is derived from the
+# adapter's own serial number.
+player_projector_device: ""
+
+# Which socket the stick is plugged into, as the manual's IIS parameter.
+#
+#   HD1 HD2 HD3   HDMI 1-3
+#   CP1 CP2       component (CP2 is PT-AE3000U only)
+#   VID SVD       composite, S-video
+#   RG1           computer (PT-AE4000 only)
+#
+# Empty means "leave the input alone", which is right for a projector that
+# auto-selects its live source and is the safe setting if the code turns out to
+# be wrong: an input the projector does not have answers ER401, the daemon logs
+# it and starts the film anyway.
+player_projector_input: HD3
+
+# Minutes with no film and no mirroring before the lamp goes out. 0 never
+# switches it off.
+#
+# What resets the clock is deliberately narrow: a film playing or being
+# prepared, or a confirmed AirPlay session. NOT a phone with the page open --
+# it polls every three seconds, so counting that would mean the projector stays
+# on until every browser tab in the house is closed, and a phone left in a
+# pocket would keep the lamp burning all night.
+player_projector_idle_minutes: 30
+
+# The manual's post-PON blackout, during which the projector ignores every
+# command including the one asking whether it is on yet. Spent sleeping rather
+# than polling, because a timeout inside this window says nothing about the
+# cable. 10 is the documented figure; projector-probe.py measures the real one.
+player_projector_warmup_seconds: 10
+
+# ...and how long after that to keep asking before giving up and starting the
+# film regardless. Generous, because it also has to cover a projector still
+# running its post-POF cool-down, during which PON is refused outright and the
+# only remedy is to ask again. `projector-probe.py cycle` measures both.
+player_projector_ready_seconds: 90
+
+# Seconds to wait for a whole reply. Five ASCII characters at 9600 baud take
+# five milliseconds, so anything approaching this means the projector is not
+# answering rather than answering slowly.
+player_projector_timeout: 1.5
+
+# Whether a mirroring session may switch the projector on as well as a film.
+#
+# THE RISK IS WORTH KNOWING BEFORE LEAVING THIS ON. iOS opens short-lived
+# connections to UxPlay's port merely from having the AirPlay picker on screen
+# -- nobody is mirroring, the list is being drawn -- and a projector that
+# strikes its lamp because somebody across the room glanced at a menu is a
+# projector switching itself on in an empty room. The safeguard is the tick
+# count below rather than this flag; turn this off if the safeguard proves
+# insufficient.
+player_projector_wake_on_airplay: true
+
+# How many consecutive keeper ticks a CONFIRMED mirroring session must survive
+# before the lamp is struck. At the default tick, 2 is about thirty seconds of
+# sustained connection: a glance at the picker does not reach that and a real
+# session does. This is the number to raise if the projector ever switches
+# itself on unbidden.
+player_projector_airplay_wake_ticks: 2
+
+# How often the keeper looks. Nothing it watches changes faster than this, and
+# every tick costs one ss invocation.
+player_projector_tick_seconds: 15
 
 # --- probe --------------------------------------------------------------
 probe_results_dir: /var/log/uxplay-probe
