@@ -20,5 +20,5 @@ export PYBUILD_DISABLE = test
 execute_after_dh_auto_install:
 	install -D -m 0644 src/admin/playstick-admin.desktop \
 		debian/playstick-admin/usr/share/applications/playstick-admin.desktop
-	install -D -m 0644 logo.svg \
+	install -D -m 0644 icon.svg \
 		debian/playstick-admin/usr/share/icons/hicolor/scalable/apps/playstick-admin.svg

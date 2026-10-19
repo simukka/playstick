@@ -1,4 +1,4 @@
-![playstick](logo.svg)
+<p align="center"><img src="logo.svg" alt="playstick" width="440"></p>
 
 **Old tech meets modern software.**
 

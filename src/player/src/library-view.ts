@@ -5,9 +5,13 @@
 // grid reconciler makes it cheaper still by moving nothing.
 import { h, setText, toggleClass, Grid } from "./dom";
 import type { LibraryModel } from "./library";
+import { WORDMARK } from "./brand";
 
 export const LIBRARY_CSS = `
 h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .2px; }
+/* The wordmark, lined up with the round buttons beside it rather than with
+   the text it replaced. */
+h1 svg { display: block; height: 28px; width: auto; margin-top: 6px; }
 #grid {
   display: grid; gap: 14px;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
@@ -93,7 +97,7 @@ export class LibraryView {
       onTap: () => this.clearFilters(),
     });
     this.root = h(doc, "div", { id: "library", class: "view on" }, [
-      h(doc, "h1", { text: "Playstick" }),
+      h(doc, "h1", { html: WORDMARK }),
       this.chip,
       this.gridEl,
       this.empty,
