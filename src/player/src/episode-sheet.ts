@@ -28,6 +28,8 @@ export const EPISODE_CSS = `
   font-size: 16px; font-weight: 600;
 }
 #esheetSeasons button.sel { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* An episode row plays it: an action, not a choice, so no box to tick. */
+#esheet .row::after { display: none; }
 `;
 
 export function seasonName(season: number): string {
