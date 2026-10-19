@@ -54,23 +54,26 @@ The heavy lifting happens on your own computer, not the stick. The **Playstick**
 scans your folders of films, lets you choose what goes on the stick, and prepares each film in the background: 
 probing, re-encoding where the stick needs it, extracting per-language audio, and matching it on TMDb.
 
-![Prepare tab: choose films from your sources and watch the queue](screenshots/1-prepare.png)
+![Prepare: choose films from your sources and watch the queue](screenshots/1-prepare.png)
 
-* **Prepare.** Every film on every source, in one sortable table. Select what you want and add it to the library; 
-  the queue works through them one at a time and survives the app being closed.
-* **Library.** What the stick is actually holding, with posters. Fix a title, genre or rating, or correct a bad TMDb match, 
-  and the change goes straight to the stick.
-* **Device.** Whether the stick is reachable, playback and volume controls, and recovery for films that didn't get through.
-* **Config.** Edit the Ansible variables in `group_vars` with a form, and comments in the YAML are preserved.
+* **Prepare.** Every film on every source, the share included, in one sortable table. Select what you want and add it 
+  to the library; the queue works through them one at a time, survives the app being closed, and can be paused, 
+  reordered or retried from each row's menu.
+* **Library.** What the stick is actually holding, with posters. Double-click a film to fix its title, genre or rating, 
+  or correct a bad TMDb match, and the change goes straight to the stick.
+* **Device.** Whether the stick is reachable, playback and volume controls, recovery for films that didn't get through, 
+  and **Update device** when this machine has something newer to deploy.
+* **Config.** The share, the stick and how to log in to it; the folders films come from; how the appliance behaves; 
+  and the deploy console.
 
-![Library tab: correct a film's metadata or TMDb match](screenshots/3-library-film.png)
+![Library: correct a film's metadata or TMDb match](screenshots/3-library-film.png)
 
 <details>
 <summary>More screenshots</summary>
 
-![Library tab](screenshots/2-library.png)
-![Device tab](screenshots/4-device.png)
-![Config tab](screenshots/5-config.png)
+![Library](screenshots/2-library.png)
+![Device, with an update waiting](screenshots/4-device.png)
+![Config: settings](screenshots/5-config.png)
 
 </details>
 
