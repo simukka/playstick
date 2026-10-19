@@ -22,12 +22,11 @@ three, silently, with a grid that looked perfect afterwards. `film_id` should
 agree, because the rule for a file already on the share is deliberately the old
 rule; where it does not, that is worth saying and not worth acting on.
 
-NOTHING ON THE SHARE IS DELETED HERE
+NOTHING ON THE SHARE IS DELETED
 
-The import is a read. Removing the five files it read is a separate, explicit
-act -- `tidy_share` below -- because the NAS is somebody's, because a rollback
-needs those files, and because an import that quietly deleted its own source
-would be an import nobody could check afterwards.
+The import is a read, and nothing here removes the five files it read: the NAS
+is somebody's, a rollback needs those files, and an import that deleted its own
+source would be an import nobody could check afterwards.
 """
 
 import json
@@ -42,12 +41,6 @@ import playstick_prep as prep  # noqa: E402
 
 INDEX_NAME = "playstick-library.json"
 OVERRIDES_NAME = "playstick-overrides.json"
-
-# What the old arrangement left behind that nothing on the stick ever opened.
-LEAVINGS = (INDEX_NAME, OVERRIDES_NAME,
-            os.path.join(prep.WORK_DIR, prep.STATE_NAME),
-            os.path.join(prep.WORK_DIR, "tmdb-cache.json"))
-LEAVING_DIRS = (os.path.join(prep.WORK_DIR, "posters"),)
 
 
 def find_index(output_dir):
@@ -207,49 +200,3 @@ def _read_poster(output_dir, movie):
     except OSError:
         return None, None
 
-
-def leavings(output_dir):
-    """The files the old arrangement left that nothing reads. Returns
-    [(path, bytes)], largest first -- posters are the size of it."""
-    found = []
-    for name in LEAVINGS:
-        path = os.path.join(output_dir, name)
-        if os.path.isfile(path):
-            found.append((path, os.path.getsize(path)))
-    for name in LEAVING_DIRS:
-        base = os.path.join(output_dir, name)
-        for dirpath, _dirnames, filenames in os.walk(base):
-            for filename in filenames:
-                path = os.path.join(dirpath, filename)
-                try:
-                    found.append((path, os.path.getsize(path)))
-                except OSError:
-                    continue
-    return sorted(found, key=lambda pair: -pair[1])
-
-
-def tidy_share(db, output_dir):
-    """Delete what the import read, now that the database holds it.
-
-    Refuses unless an import has actually happened. Deleting an index before
-    anything had read it would be deleting the library, and the difference is
-    one meta row.
-    """
-    if not already_imported(db):
-        raise RuntimeError(
-            "Nothing has been imported from this share yet, so there is "
-            "nothing here that is safely a duplicate.")
-    removed, freed = 0, 0
-    for path, size in leavings(output_dir):
-        try:
-            os.unlink(path)
-        except OSError:
-            continue
-        removed += 1
-        freed += size
-    for name in LEAVING_DIRS:
-        try:
-            os.rmdir(os.path.join(output_dir, name))
-        except OSError:
-            pass
-    return {"removed": removed, "bytes": freed}

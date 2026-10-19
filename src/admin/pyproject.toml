@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "PySide6>=6.5",
     "ruamel.yaml>=0.17",
+    "keyring>=23",
 ]
 
 [project.scripts]
@@ -26,3 +27,8 @@ packages = [
     "playstick_admin.core",
     "playstick_admin.views",
 ]
+
+# The mark in the sidebar. assets/icon.svg is a symlink to the repo's icon.svg,
+# like playstick_prep.py beside the package; a built wheel carries the file.
+[tool.setuptools.package-data]
+playstick_admin = ["assets/*.svg"]

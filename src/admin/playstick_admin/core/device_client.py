@@ -58,7 +58,7 @@ class DeviceClient:
 
     def _url(self, path):
         if not self.base_url:
-            raise DeviceError("no device URL configured")
+            raise DeviceError("no device IP configured")
         return self.base_url + path
 
     def _request(self, path, method="GET", body=None, raw=None,
@@ -150,10 +150,9 @@ class DeviceClient:
         title, sort_title, year, rating, genres and hidden and rejects the
         rest, so this passes fields straight through.
 
-        This is where a metadata edit LIVES now. It used to be a second,
-        parallel edit to the one the Library tab wrote into the preparer's
-        overrides file, with nothing keeping the two in step; sync.pull_overrides
-        is what carries this one back into that file before a prep run.
+        The Library tab saves an edit here as well as in this machine's
+        database. One made on the stick itself stays there: nothing carries it
+        back.
         """
         return self._request("/api/admin/item", "POST",
                              {"id": film_id, "fields": fields})

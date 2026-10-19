@@ -317,6 +317,12 @@ class Progress:
         # draw at that point and close() is about to wipe the line anyway.
         if fields.get("progress") == "end":
             return
+        # Every block, before the throttle below: that throttle is about how
+        # often a terminal or a log file wants a line, and an embedder's
+        # progress bar wants the position as it moves.
+        if self.total:
+            report_event("progress", label=self.label,
+                         done=position(fields), total=self.total)
         now = time.monotonic()
         if now - self.last < self.interval:
             return
@@ -425,6 +431,13 @@ def with_progress(argv, label, total):
 _stop = threading.Event()
 _child = None            # the ffmpeg/ffprobe subprocess, so it can be ended
 
+# Paused rather than stopped: the admin app's queue can hold an encode where it
+# is -- the machine is wanted for something else for a while -- and carry on
+# from the same frame. SIGSTOP and SIGCONT to the child, which ffmpeg needs no
+# cooperation for. Time spent paused does not count against a step's timeout,
+# or a long enough pause would end the encode it was meant to keep.
+_paused = threading.Event()
+
 
 def cancelled():
     return _stop.is_set()
@@ -433,8 +446,11 @@ def cancelled():
 def request_cancel():
     """Ask a run to stop at the next film boundary. For an embedder that has no
     signals to send -- the Qt admin app calls this from its UI thread. The
-    child ffmpeg, if one is running, is ended the same way Ctrl-C ends it."""
+    child ffmpeg, if one is running, is ended the same way Ctrl-C ends it --
+    resumed first if it was paused, because a stopped process does not act on
+    a SIGTERM until it is running again."""
     _stop.set()
+    request_resume()
     proc = _child
     if proc is not None:
         try:
@@ -446,6 +462,33 @@ def request_cancel():
 def reset_cancel():
     """Clear a previous cancel so the same process can start a fresh run."""
     _stop.clear()
+    _paused.clear()
+
+
+def paused():
+    return _paused.is_set()
+
+
+def request_pause():
+    """Hold the running ffmpeg where it is, and any started while held. Only
+    the child is held: probing and bookkeeping between steps are seconds."""
+    _paused.set()
+    _signal_child(getattr(signal, "SIGSTOP", None))
+
+
+def request_resume():
+    _paused.clear()
+    _signal_child(getattr(signal, "SIGCONT", None))
+
+
+def _signal_child(sig):
+    proc = _child
+    if proc is None or sig is None:
+        return
+    try:
+        proc.send_signal(sig)
+    except OSError:
+        pass
 
 
 def _end_child(proc):
@@ -453,7 +496,10 @@ def _end_child(proc):
     caller is about to unlink a .part file the child still has open, and on a
     network mount deleting a file out from under a writer is how you get a
     half-written one left behind under a temporary name."""
+    sig = getattr(signal, "SIGCONT", None)
     try:
+        if sig is not None:
+            proc.send_signal(sig)       # a paused child acts on nothing else
         proc.terminate()
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
@@ -542,7 +588,12 @@ def _wait_watching(proc, argv, progress, deadline, timeout):
     for thread in threads:
         thread.start()
 
+    last = time.monotonic()
     while True:
+        now = time.monotonic()
+        if deadline is not None and paused():
+            deadline += now - last          # see _paused
+        last = now
         try:
             code = proc.wait(timeout=0.25)
             break
@@ -598,10 +649,18 @@ def run(argv, timeout=None, progress=None):
         return subprocess.CompletedProcess(argv, 127, "", str(exc))
 
     _child = proc
+    # A pause asked for between steps holds the next one from its start.
+    if paused():
+        _signal_child(getattr(signal, "SIGSTOP", None))
     try:
         if progress is not None:
             return _wait_watching(proc, argv, progress, deadline, timeout)
+        last = time.monotonic()
         while True:
+            now = time.monotonic()
+            if deadline is not None and paused():
+                deadline += now - last      # see _paused
+            last = now
             wait = 0.25
             if deadline is not None:
                 left = deadline - time.monotonic()

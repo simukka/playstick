@@ -7,9 +7,6 @@ each film got to. An import that recomputed an id would orphan all three, and
 the grid would look perfect afterwards.
 
 The second thing worth a test is that the import does not delete what it read.
-Tidying the share is a separate act, and it refuses to run until an import has
-actually happened, because an index deleted before anything read it is the
-library.
 """
 
 import json
@@ -168,34 +165,6 @@ class TheImportIsARead(Fixture):
         os.unlink(os.path.join(self.nas, "playstick-library.json"))
         self.assertIsNone(import_legacy.describe(self.nas))
         self.assertEqual(import_legacy.run(self.db, self.nas)["films"], 0)
-
-
-class TidyingUpAfterwards(Fixture):
-    def test_it_refuses_before_an_import(self):
-        # An index deleted before anything read it is the library.
-        with self.assertRaises(RuntimeError):
-            import_legacy.tidy_share(self.db, self.nas)
-        self.assertTrue(os.path.isfile(
-            os.path.join(self.nas, "playstick-library.json")))
-
-    def test_it_takes_only_what_the_stick_never_read(self):
-        self.run_import()
-        import_legacy.tidy_share(self.db, self.nas)
-        for name in ("playstick-library.json", "playstick-overrides.json"):
-            self.assertFalse(os.path.exists(os.path.join(self.nas, name)), name)
-        work = os.path.join(self.nas, ".playstick")
-        self.assertEqual(sorted(os.listdir(work)), ["media"])
-        # And the film itself is still there.
-        self.assertTrue(os.path.isfile(
-            os.path.join(work, "media", "%s.mp4" % PONYO)))
-
-    def test_the_library_still_works_afterwards(self):
-        self.run_import()
-        import_legacy.tidy_share(self.db, self.nas)
-        payload = sync.film_payload(self.db, PONYO)
-        self.assertEqual(payload["title"], "Ponyo")
-        self.assertEqual(payload["media_rel"],
-                         ".playstick/media/%s.mp4" % PONYO)
 
 
 if __name__ == "__main__":

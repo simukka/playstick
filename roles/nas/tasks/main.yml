@@ -72,6 +72,21 @@
           Hardware & Power -> Enable WOL on LAN 1.
       when: nas_mac | default('') | length > 0
 
+    # The password is in the app's keyring and reaches a run only when the app
+    # starts it. A run from a terminal has the username without it, and
+    # writing that out would replace a working credentials file with an empty
+    # password -- the mount fails at the next boot, far from the cause.
+    - name: Refuse to write a login without its password
+      ansible.builtin.assert:
+        that: nas_password | length > 0
+        fail_msg: >-
+          nas_username is "{{ nas_username }}" but there is no password. It is
+          kept in the playstick app's keyring and only handed over when the
+          app runs the deploy -- run it from the Config tab, or add
+          -e nas_password=... to this command.
+        success_msg: "NAS login for {{ nas_username }} supplied."
+      when: nas_username | length > 0
+
     - name: Install the CIFS mount helper
       ansible.builtin.apt:
         name: cifs-utils

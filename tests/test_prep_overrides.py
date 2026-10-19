@@ -112,6 +112,34 @@ class ReporterAndCancel(unittest.TestCase):
         prep.set_reporter(boom)
         prep.report_event("x")          # must not raise
 
+    def test_a_pause_holds_ffmpeg_and_does_not_count_against_its_timeout(self):
+        """Held for longer than the step's timeout, and it still finishes --
+        and a cancel while held still ends it rather than waiting forever."""
+        import threading
+        import time
+        self.addCleanup(prep.reset_cancel)
+
+        def hold(seconds):
+            prep.request_pause()
+            time.sleep(seconds)
+            prep.request_resume()
+
+        holder = threading.Thread(target=hold, args=(1.5,))
+        started = time.monotonic()
+        holder.start()
+        res = prep.run(["sleep", "0.5"], timeout=1.0)
+        holder.join()
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertGreaterEqual(time.monotonic() - started, 1.5)
+
+        prep.request_pause()
+        threading.Timer(0.5, prep.request_cancel).start()
+        started = time.monotonic()
+        res = prep.run(["sleep", "30"], timeout=60)
+        self.assertEqual(res.returncode, 130)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertFalse(prep.paused())
+
     def test_cancel_toggles(self):
         self.assertFalse(prep.cancelled())
         prep.request_cancel()

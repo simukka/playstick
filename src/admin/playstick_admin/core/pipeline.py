@@ -50,19 +50,20 @@ class PrepareError(Exception):
     pass
 
 
-def build_args(source_root, staging, settings):
+def build_args(source_root, staging, settings, extra=""):
     """The preparer's own argument namespace for one film.
 
     Assembled through prep.parse_args rather than by hand so that a new
-    preparer flag reaches this without anybody remembering, and so that
-    `prep_extra_args` means here exactly what it means on the command line.
+    preparer flag reaches this without anybody remembering. `extra` is more of
+    the preparer's own flags; the app passes none, and the tests use it to let
+    their few-kilobyte films through the size and duration floors.
     """
     argv = ["--library", source_root, "--output", staging]
     if settings.tmdb_key:
         argv += ["--tmdb-key", settings.tmdb_key,
                  "--tmdb-language", settings.tmdb_language]
-    if settings.prep_extra_args:
-        argv += shlex.split(settings.prep_extra_args)
+    if extra:
+        argv += shlex.split(extra)
     return prep.parse_args(argv)
 
 
@@ -74,7 +75,7 @@ def _tmdb(args):
     return prep.Tmdb(args.tmdb_key, cache, args.tmdb_language)
 
 
-def prepare(db, item, settings, client=None, report=None):
+def prepare(db, item, settings, client=None, report=None, extra=""):
     """Make one film and put it where the stick can reach it.
 
     `report(phase, text)` is called as it goes -- phase is one of the strings
@@ -101,11 +102,7 @@ def prepare(db, item, settings, client=None, report=None):
     if not os.path.isfile(item["abs_path"]):
         raise PrepareError("%s is not there any more." % item["abs_path"])
 
-    args = build_args(source_root, staging, settings)
-    if settings.ffmpeg:
-        prep.FFMPEG = settings.ffmpeg
-    if settings.ffprobe:
-        prep.FFPROBE = settings.ffprobe
+    args = build_args(source_root, staging, settings, extra)
 
     # --- what can be learned without encoding anything ---------------------
     say("probing", os.path.basename(item["abs_path"]))

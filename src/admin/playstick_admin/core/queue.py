@@ -169,23 +169,39 @@ def recent_failures(db, limit=50):
         (FAILED, limit))
 
 
+def unresolved_failures(db, limit=50):
+    """Each film's last failure, while it is still a failure: not queued again
+    since, and not prepared by a later attempt. What the queue table shows
+    under the waiting jobs, and what "Retry failed" retries -- recent_failures
+    would also offer a film that failed on Monday and succeeded on Tuesday."""
+    return db.query(
+        "SELECT job.*, item.title, item.rel "
+        "FROM job JOIN item ON item.id = job.item_id "
+        "WHERE job.state = ? AND item.state = ? "
+        "AND job.id = (SELECT MAX(j.id) FROM job j "
+        "              WHERE j.item_id = job.item_id AND j.state = ?) "
+        "ORDER BY job.finished_at DESC LIMIT ?",
+        (FAILED, FAILED, FAILED, limit))
+
+
 def counts(db):
     return {row["state"]: row["n"] for row in
             db.query("SELECT state, COUNT(*) AS n FROM job GROUP BY state")}
 
 
 def remove(db, job_id):
-    """Take a waiting job off the queue. A running one is left alone -- stopping
-    that is the worker's business, not the table's."""
+    """Take a waiting job off the queue, or a failed one off the table -- the
+    film goes back to being one somebody can choose. A running one is left
+    alone: stopping that is the worker's business, not the table's."""
     with db.write() as conn:
         row = conn.execute("SELECT item_id, state FROM job WHERE id = ?",
                            (job_id,)).fetchone()
-        if row is None or row["state"] != WAITING:
+        if row is None or row["state"] not in (WAITING, FAILED):
             return False
         conn.execute("DELETE FROM job WHERE id = ?", (job_id,))
         conn.execute(
             "UPDATE item SET state = 'available' WHERE id = ? AND state = ?",
-            (row["item_id"], "queued"))
+            (row["item_id"], "queued" if row["state"] == WAITING else FAILED))
     return True
 
 

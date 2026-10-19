@@ -51,7 +51,7 @@ help:
 	@echo ""
 	@echo "Both at once, which is the whole loop: run 'make gui' in one"
 	@echo "terminal and 'make admin' in another, then in the admin app's"
-	@echo "Settings set the device URL to http://localhost:8080 and the NAS"
+	@echo "Config, Settings set the device IP to localhost:8080 and the NAS"
 	@echo "root to whatever PLAYSTICK_GUI_LIBRARY points at -- both machines"
 	@echo "have to see the same directory, so use a path and not the default"
 	@echo "named volume. Then: Prepare -> Add source, pick films, Add to"
@@ -154,5 +154,5 @@ admin-clean:
 # scripts/build-deb.sh for which releases that rules in, and why one build
 # serves all of them. Docker only; the version is debian/changelog's.
 .PHONY: admin-deb
-admin-deb:
+admin-deb: ui
 	./scripts/build-deb.sh

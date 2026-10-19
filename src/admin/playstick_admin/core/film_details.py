@@ -152,8 +152,8 @@ def frame(path, seconds, binary="", timeout=60):
     try:
         res = subprocess.run(argv, capture_output=True, timeout=timeout)
     except FileNotFoundError:
-        raise RuntimeError("ffmpeg was not found (%s). Settings -- ffmpeg."
-                           % argv[0]) from None
+        raise RuntimeError("ffmpeg was not found (%s). Install it, then "
+                           "start the app again." % argv[0]) from None
     except subprocess.TimeoutExpired:
         raise RuntimeError("ffmpeg gave up after %ds" % timeout) from None
     if res.returncode != 0 or not res.stdout:
@@ -178,8 +178,8 @@ def ffprobe(path, binary="", timeout=120):
         res = subprocess.run(argv, capture_output=True, text=True,
                              timeout=timeout)
     except FileNotFoundError:
-        raise RuntimeError("ffprobe was not found (%s). Settings -- ffprobe."
-                           % argv[0]) from None
+        raise RuntimeError("ffprobe was not found (%s). Install it, then "
+                           "start the app again." % argv[0]) from None
     except subprocess.TimeoutExpired:
         raise RuntimeError("ffprobe gave up after %ds" % timeout) from None
     if res.returncode != 0:

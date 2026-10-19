@@ -16,6 +16,8 @@ from PySide6.QtWidgets import QApplication
 from . import log as log_setup
 from . import paths
 from . import settings as settings_mod
+from . import theme
+from . import tools
 
 LOG = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ def main(argv=None):
     # shell matches this window to its launcher and icon.
     QGuiApplication.setDesktopFileName("playstick")
     app = QApplication(argv)
+    theme.apply(app)
     # Imported here so a headless import of this module (e.g. in a test) does
     # not require the widgets to be constructed.
     from .app import MainWindow
@@ -42,6 +45,7 @@ def main(argv=None):
     LOG.info("playstick starting; logging at %s",
              logging.getLevelName(level))
     LOG.info("library: %s", paths.db_path())
+    tools.configure()
 
     window = MainWindow()
     window.show()

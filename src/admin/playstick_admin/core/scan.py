@@ -61,8 +61,9 @@ def discovery_args(root, extra=""):
     """The preparer's own argument namespace, for discovery alone.
 
     Built through prep.parse_args rather than assembled by hand so that a new
-    discovery flag reaches this without anybody remembering to add it -- and so
-    that `prep_extra_args` means here exactly what it means everywhere else.
+    discovery flag reaches this without anybody remembering to add it. `extra`
+    is more of the preparer's flags: the app passes none, and the tests use it
+    to let their few-kilobyte films through the size and duration floors.
     """
     # First, so that an explicit flag in `extra` still has the last word.
     argv = ["--library", root, "--allow-episodes"]

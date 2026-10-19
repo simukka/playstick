@@ -4,11 +4,10 @@ actl wraps ansible in a Docker container; it takes a single command string and
 runs it against the inventory. This streams combined stdout/stderr line by line
 so the config tab can show a live console.
 
-Privilege prompts: a real deploy uses ansible's -K, which reads the become
-password straight from the controlling tty. A QProcess is not a tty, so those
-commands must be run in a real terminal -- the presets below cover the ones that
-need no password (syntax check, ping, --check dry runs against unprivileged
-tasks). Secrets are never routed through this tool.
+Privilege prompts: a QProcess is not a tty, so nothing run here can answer
+one -- ansible's -K included. A deploy gets the stick's sudo password the way
+it gets the NAS password instead, as a variable in a file actl mounts for that
+one run (core/site_vars.py). Neither is ever on a command line this shows.
 """
 
 import os

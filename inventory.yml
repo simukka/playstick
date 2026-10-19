@@ -1,17 +1,15 @@
 ---
-# The stick is declared here and located next door. ansible_host and
+# The stick is declared here and located elsewhere. ansible_host and
 # ansible_user deliberately do not appear: this file is committed, and an
 # address and a login are facts about one LAN rather than about the appliance.
-# They live in host_vars/vivostick/local.yml, which is gitignored -- copy the
-# template to it and fill it in:
+# They come from the playstick app's Settings, which writes them to a second
+# inventory source that actl mounts -- see ansible.cfg. Then:
 #
-#   cp host_vars/vivostick/local.yml.example host_vars/vivostick/local.yml
 #   ./actl 'ansible -m ping vivostick'
 #
-# Playbook host_vars outrank inventory host vars, so putting them back here
-# would not override that file anyway. site.yml checks it exists before trying
-# to connect: without it Ansible falls back to the inventory name and reports
-# "Could not resolve hostname vivostick", which does not point at the cause.
+# site.yml checks they are there before trying to connect: without them
+# Ansible falls back to the inventory name and reports "Could not resolve
+# hostname vivostick", which does not point at the cause.
 all:
   hosts:
     vivostick:

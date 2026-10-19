@@ -50,5 +50,24 @@ if docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q 'name=rootl
   run_as=(--user root)
 fi
 
+# What is true of this site -- the stick's address and login, the NAS -- is set
+# in the playstick app, which writes it to its state directory. Mounted as a
+# second inventory source (see ansible.cfg), so a run from here reaches the
+# stick too. Before the app has written anything there is an empty one in its
+# place: Ansible warns on every run about a source it cannot parse, and an
+# empty directory is one. site.yml then says which settings are missing.
+state="${XDG_STATE_HOME:-$HOME/.local/state}/playstick"
+if [ ! -e "$state/inventory/site.yml" ]; then
+  mkdir -p -m 0700 "$state/inventory"
+  printf '# Empty until the playstick app writes it from its Settings.\nall: {}\n' \
+    > "$state/inventory/site.yml"
+fi
+mounts=(-v "$state/inventory:/run/playstick/inventory:ro")
+# The key Settings names, through the link the app keeps. Resolved here because
+# a link inside a mount would point at a host path the container cannot see.
+if [ -e "$state/ssh_key" ]; then
+  mounts+=(-v "$(readlink -f "$state/ssh_key"):/run/playstick/ssh_key:ro")
+fi
+
 # The entrypoint is `bash -lc`, so pass the command as a single string.
-exec docker compose run --rm "${run_as[@]}" ansible "$*"
+exec docker compose run --rm "${run_as[@]}" "${mounts[@]}" ansible "$*"

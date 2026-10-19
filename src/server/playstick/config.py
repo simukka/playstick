@@ -319,6 +319,12 @@ PROJECTOR_AIRPLAY_WAKE_TICKS = max(1, int(
 # no NAS -- or the development GUI -- behaves exactly as it did before this
 # existed. That is the same shape as PROJECTOR_MODEL above and for the same
 # reason.
+# Which deploy put this daemon here, as the admin app's scripts/release_id.py
+# computed it. Reported in /api/status and used for nothing else: the app
+# compares it with what it would deploy now. Empty for a stick deployed before
+# this existed, or run by hand.
+RELEASE = _get("release", "id", "")
+
 NAS_HOST = _get("nas", "host", "")
 # The wake-on-LAN target. Parsed at import by nas.py rather than here, because
 # a bad value has to hide the button rather than raise in a request thread.

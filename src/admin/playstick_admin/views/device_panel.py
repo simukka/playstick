@@ -5,7 +5,11 @@ preparer worked a whole library and this carried the result over in one press.
 Films now reach the stick one at a time, as each preparation finishes, from the
 Prepare tab -- which is where somebody is already watching.
 
-What is left here is recovery, and there are exactly two kinds.
+First, whether the stick is running what this machine would deploy -- see
+core/release.py -- and the button that deploys it when it is not. The deploy
+itself runs in Config's console, where its output can be read.
+
+Then recovery, and there are exactly two kinds.
 
 "Push what is waiting" is the ordinary one. A queue that runs for an evening
 will outlast anybody's patience for leaving the stick switched on, and a film
@@ -42,7 +46,7 @@ from PySide6.QtWidgets import (QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 from .device_status_bar import DeviceStatusBar
-from ..core import prepared, sync
+from ..core import prepared, release, sync
 from ..core.device_client import DeviceClient
 from ..bridges import net_worker
 
@@ -51,6 +55,9 @@ class DeviceTab(QWidget):
     # A sync changed what the device holds, so the Library tab -- which reads
     # its films and posters from the device -- is out of date.
     libraryChanged = Signal()
+    # "Update device": the main window asks for the sudo password and hands
+    # the deploy to the Config tab's console.
+    updateRequested = Signal()
 
     def __init__(self, db, settings, monitor, parent=None):
         super().__init__(parent)
@@ -68,6 +75,22 @@ class DeviceTab(QWidget):
         outer = QVBoxLayout(self)
 
         outer.addWidget(DeviceStatusBar(self._monitor))
+
+        software = QGroupBox("Software")
+        row = QHBoxLayout(software)
+        self._release_note = QLabel("Waiting for the stick to answer.")
+        self._release_note.setWordWrap(True)
+        self._update_btn = QPushButton("Update device")
+        self._update_btn.setObjectName("primary")
+        self._update_btn.setToolTip(
+            "Deploy this machine's playstick to the stick: "
+            "ansible-playbook site.yml, in Config's console.")
+        self._update_btn.clicked.connect(self.updateRequested)
+        self._update_btn.setVisible(False)
+        row.addWidget(self._release_note, 1)
+        row.addWidget(self._update_btn)
+        outer.addWidget(software)
+        self._device_release = None
 
         self._playing = QLabel("")
         outer.addWidget(self._playing)
@@ -112,6 +135,7 @@ class DeviceTab(QWidget):
         box.addWidget(self._library_status)
         row = QHBoxLayout()
         self._push_btn = QPushButton("Push what is waiting")
+        self._push_btn.setObjectName("primary")
         self._push_btn.setToolTip(
             "Send every film that is prepared here and that the stick has not "
             "been told about. No ffmpeg: these are already made.")
@@ -122,14 +146,7 @@ class DeviceTab(QWidget):
             "database. Also removes films the stick has that this machine "
             "does not know about.")
         self._sync_btn.clicked.connect(self._resend_everything)
-        pull = QPushButton("Pull edits from the stick")
-        pull.setToolTip(
-            "Copy the stick's metadata edits into this machine's library, so "
-            "the next preparation does not overwrite them. A preparation does "
-            "this on its own; this is for doing it early.")
-        pull.clicked.connect(self._pull_overrides)
         row.addStretch(1)
-        row.addWidget(pull)
         row.addWidget(self._sync_btn)
         row.addWidget(self._push_btn)
         box.addLayout(row)
@@ -165,7 +182,7 @@ class DeviceTab(QWidget):
         same evidence a sync gives, and the freshest there is.
         """
         if not self._settings.device_url:
-            QMessageBox.information(self, "No device", "Set the device URL first.")
+            QMessageBox.information(self, "No device", "Set the device IP first.")
             return
         job, thread = net_worker.call(fn, label=label)
         job.done.connect(lambda _result: self._monitor.note_reached())
@@ -192,6 +209,24 @@ class DeviceTab(QWidget):
         if status.get("notice"):
             bits.append("notice: %s" % status["notice"])
         self._detail.setText("   ".join(bits))
+        self._device_release = status.get("release") or ""
+        self.refresh_release()
+
+    def refresh_release(self):
+        """Compare what the stick last said with what a deploy would put on
+        it. Public because saving Settings changes the second half."""
+        if self._device_release is None:
+            return              # the stick has not answered yet
+        try:
+            mine = release.local(self._settings.repo_root)
+        except Exception as exc:              # a script that will not run
+            self._release_note.setText("Could not work out this machine's "
+                                       "release: %s" % exc)
+            self._update_btn.setVisible(False)
+            return
+        state, sentence = release.compare(self._device_release, mine)
+        self._release_note.setText(sentence)
+        self._update_btn.setVisible(state == "update")
 
     # --- the library -------------------------------------------------------
 
@@ -310,28 +345,5 @@ class DeviceTab(QWidget):
     def _require_device(self):
         if self._settings.device_url:
             return True
-        QMessageBox.information(self, "No device", "Set the device URL first.")
+        QMessageBox.information(self, "No device", "Set the device IP first.")
         return False
-
-    def _pull_overrides(self):
-        """Reading the stick's edits, which is a read -- but it is one somebody
-        pressed a button for and waits on, so it is worth showing as traffic."""
-        if not self._require_device():
-            return
-        self._monitor.sync_begin("reading the stick's edits")
-        job, thread = net_worker.call(
-            lambda: sync.pull_overrides(self._client(), self._db),
-            label="pull-edits")
-
-        def done(changed):
-            self._monitor.sync_done()
-            self._library_status.setText("Took %d edit(s) from the stick." % changed)
-
-        def failed(msg):
-            self._monitor.sync_end(msg)
-            self._library_status.setText("Could not read the edits: %s" % msg)
-
-        job.done.connect(done)
-        job.failed.connect(failed)
-        self._track(thread)
-        thread.start()

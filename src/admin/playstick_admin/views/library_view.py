@@ -1,5 +1,10 @@
 """The library tab: what the stick is holding, and the editor for it.
 
+The editor is a window of its own, opened by double-clicking a film, so the
+list has the page's whole width. One window, not one per film: a second film
+double-clicked replaces the first in it, which is what the side panel it used
+to be did, without the panel taking half the table's width all the time.
+
 ONLY THE STICK, NOW
 
 It used to fall back to a prepared index on this machine when the device was not
@@ -39,10 +44,10 @@ import json
 from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QSize,
                             QSortFilterProxyModel, Qt, Signal)
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QMenu, QMessageBox,
-                               QPushButton, QSplitter, QTableView, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QDialog, QHBoxLayout,
+                               QHeaderView, QLabel, QLineEdit, QMenu,
+                               QMessageBox, QPushButton, QTableView,
+                               QVBoxLayout, QWidget)
 
 from . import format as fmt
 from .device_status_bar import DeviceStatusBar
@@ -52,6 +57,25 @@ from ..core import device_library, pipeline, posters, prepared
 from ..core.device_client import DeviceClient, DeviceError
 
 COLUMNS = ["Title", "Year", "Rating", "Genres", "Match", "Poster", "Notes"]
+
+
+class FilmEditorWindow(QDialog):
+    """The metadata editor, in a window that does not block the app: the list
+    behind it stays usable, and a save redraws it."""
+
+    def __init__(self, editor, parent=None):
+        super().__init__(parent)
+        self.setModal(False)
+        self.resize(620, 820)
+        layout = QVBoxLayout(self)
+        layout.addWidget(editor)
+
+    def show_movie(self, editor, movie):
+        editor.set_movie(movie)
+        self.setWindowTitle(movie.get("title") or movie.get("id") or "Film")
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
 
 class MoviesModel(QAbstractTableModel):
@@ -152,7 +176,7 @@ class MoviesModel(QAbstractTableModel):
 class LibraryTab(QWidget):
     # Emitted when the user asks to re-prepare a single film after correcting it.
     reprepareRequested = Signal(dict)
-    # An edit was saved -- here AND, when a device URL is set, on the stick.
+    # An edit was saved -- here AND, when a device IP is set, on the stick.
     # The window uses it to refresh the Device tab, which is now showing a
     # title somebody just changed.
     savedOverride = Signal()
@@ -198,7 +222,6 @@ class LibraryTab(QWidget):
         top.addWidget(refresh)
         outer.addLayout(top)
 
-        splitter = QSplitter(Qt.Horizontal)
         self._table = QTableView()
         self._table.setModel(self._proxy)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -210,19 +233,22 @@ class LibraryTab(QWidget):
         self._table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._on_menu)
         header = self._table.horizontalHeader()
+        header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(3, QHeaderView.Stretch)
-        self._table.selectionModel().selectionChanged.connect(self._on_select)
-        splitter.addWidget(self._table)
+        # The rest to what they hold. Left at Qt's default hundred pixels each,
+        # they took the width the two stretching columns need.
+        for col, width in ((1, 64), (2, 72), (4, 84), (5, 76), (6, 110)):
+            header.resizeSection(col, width)
+        self._table.setShowGrid(False)
+        self._table.doubleClicked.connect(self._edit_at)
+        outer.addWidget(self._table, 1)
 
         self._editor = MetadataEditor(self._db, self._settings, self._monitor)
         self._editor.savedOverride.connect(self.reload)
         self._editor.savedOverride.connect(self.savedOverride)
         self._editor.reprepareRequested.connect(self.reprepareRequested)
-        splitter.addWidget(self._editor)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        outer.addWidget(splitter, 1)
+        self._editor_window = FilmEditorWindow(self._editor, self)
 
     # --- loading -----------------------------------------------------------
 
@@ -261,7 +287,7 @@ class LibraryTab(QWidget):
                     % waiting) if waiting else ""
             self._count.setText(
                 ("The stick did not answer (%s)." % error if error
-                 else "No device URL set -- File, Settings.") + note)
+                 else "No device IP set -- Config, Settings.") + note)
             return
 
         local = {row["item_id"]: row for row in prepared.all_prepared(self._db)}
@@ -300,13 +326,10 @@ class LibraryTab(QWidget):
 
     # --- selection and actions ---------------------------------------------
 
-    def _on_select(self):
-        rows = self._table.selectionModel().selectedRows()
-        if not rows:
-            self._editor.set_movie(None)
-            return
-        source_row = self._proxy.mapToSource(rows[0]).row()
-        self._editor.set_movie(self._model.movie_at(source_row))
+    def _edit_at(self, index):
+        movie = self._model.movie_at(self._proxy.mapToSource(index).row())
+        if movie:
+            self._editor_window.show_movie(self._editor, movie)
 
     def _on_menu(self, point):
         index = self._table.indexAt(point)
@@ -316,6 +339,8 @@ class LibraryTab(QWidget):
         if not movie:
             return
         menu = QMenu(self)
+        edit = menu.addAction("Edit details...")
+        menu.addSeparator()
         clear = menu.addAction("Forget the poster on the stick")
         # Only for a film the stick actually has one for. A push deliberately
         # leaves posters alone -- so it cannot discard one somebody uploaded --
@@ -325,7 +350,9 @@ class LibraryTab(QWidget):
         menu.addSeparator()
         remove = menu.addAction("Remove from library...")
         chosen = menu.exec(self._table.viewport().mapToGlobal(point))
-        if chosen is clear:
+        if chosen is edit:
+            self._edit_at(index)
+        elif chosen is clear:
             self._clear_poster(movie)
         elif chosen is remove:
             self._remove(movie)
@@ -385,6 +412,11 @@ class LibraryTab(QWidget):
         thread.start()
 
     def _on_removed(self, result):
+        # The editor, if it is showing a film, may be showing this one -- and
+        # a save there would put a film the stick no longer has back into
+        # this machine's corrections. Closed rather than guessed at.
+        self._editor_window.hide()
+        self._editor.set_movie(None)
         self._count.setText("Removed -- %s freed from the share."
                             % fmt.human_size(result.get("bytes", 0)))
         self.reload()

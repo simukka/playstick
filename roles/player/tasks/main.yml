@@ -246,6 +246,17 @@
         group: root
         mode: "0750"
 
+    # What this deploy is, for the app's Device tab to compare against what it
+    # would deploy now -- see scripts/release_id.py. A lookup, so it runs on
+    # the control node over the files actually being deployed, with the site
+    # values the app mounted at the path actl gives them.
+    - name: Work out the release being deployed
+      ansible.builtin.set_fact:
+        player_release: >-
+          {{ lookup('ansible.builtin.pipe', 'python3 '
+             ~ (playbook_dir ~ '/scripts/release_id.py') | quote ~ ' '
+             ~ playbook_dir | quote ~ ' /run/playstick/inventory/site.yml') }}
+
     - name: Install the player settings
       ansible.builtin.template:
         src: settings.toml.j2

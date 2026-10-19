@@ -54,15 +54,17 @@ PROBE = {
 }
 
 
+# The preparer's floors are a feature-length film; the fixtures are a few
+# kilobytes of zeros.
+EXTRA = "--min-size-mb 0 --min-duration 0 --verify none"
+
+
 class FakeSettings:
     def __init__(self, nas_root, device_url="http://stick"):
         self.nas_root = nas_root
         self.device_url = device_url
         self.tmdb_key = ""
         self.tmdb_language = "en-US"
-        self.ffmpeg = ""
-        self.ffprobe = ""
-        self.prep_extra_args = "--min-size-mb 0 --min-duration 0 --verify none"
 
 
 class FakeStick:
@@ -147,7 +149,7 @@ class Fixture(unittest.TestCase):
         path = self.video(root, *parts)
         source = catalog.add_source(self.db, root)
         scan.scan_source(self.db, catalog.get_source(self.db, source), self.nas,
-                         self.settings.prep_extra_args)
+                         EXTRA)
         ident, _rel = identity.film_id(self.nas, path)
         return catalog.get_joined(self.db, ident)
 
@@ -187,7 +189,8 @@ class Fixture(unittest.TestCase):
 
     def prepare(self, item, **kw):
         with self.preparer(**kw):
-            return pipeline.prepare(self.db, item, self.settings, self.stick)
+            return pipeline.prepare(self.db, item, self.settings, self.stick,
+                                    extra=EXTRA)
 
 
 class PathsAreRelativeToTheShare(Fixture):

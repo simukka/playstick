@@ -85,6 +85,7 @@ class MetadataEditor(QWidget):
 
         buttons = QHBoxLayout()
         self._save_btn = QPushButton("Save overrides")
+        self._save_btn.setObjectName("primary")
         self._save_btn.clicked.connect(self._save)
         self._clear_btn = QPushButton("Clear overrides")
         self._clear_btn.clicked.connect(self._clear)

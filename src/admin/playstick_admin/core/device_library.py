@@ -17,8 +17,7 @@ WHAT IS STILL A JOIN, AND WHY IT HAS TO BE
 /api/admin/library reports each film's base row and its edits SEPARATELY --
 unlike /api/library, which serves the merged view a phone sees. That is
 deliberate on the daemon's side and it is what lets this app tell a title
-somebody chose from one the preparer derived, which is what pulling edits back
-depends on.
+somebody chose from one the preparer derived.
 
 It does mean the join is this module's job. Skipping it reads as a film marked
 "edited" still showing the title the edit replaced, which is a convincing enough

@@ -18,6 +18,9 @@ when that did not get through.
 
 CONFIG edits the Ansible variables and is unrelated to any of it.
 
+The four are pages behind a sidebar rather than tabs, each under a heading that
+says what it is for -- see theme.py for the look.
+
 WHAT THE WINDOW OWNS
 
 The database. One connection pool, opened once, handed to every tab -- because
@@ -34,20 +37,35 @@ rather than the one that made the call.
 
 import logging
 
-from PySide6.QtWidgets import QMainWindow, QMessageBox, QTabWidget
+from PySide6.QtCore import QSize
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout,
+                               QInputDialog, QLabel, QLineEdit, QMainWindow,
+                               QMessageBox, QPushButton, QStackedWidget,
+                               QVBoxLayout, QWidget)
 
-from . import paths
+from . import icons, paths
 from .bridges.device_monitor import DeviceMonitor
-from .core import device_state, identity, import_legacy, nas_store
+from .core import (device_state, identity, import_legacy, nas_store, release,
+                   site_vars)
 from .core.db import Database
 from .settings import Settings
 from .views.library_view import LibraryTab
 from .views.prepare_view import PrepareTab
 from .views.device_panel import DeviceTab
 from .views.config_editor import ConfigTab
+from .views.brand import Brand
+from .views.device_status_bar import COLOURS
 from .views.settings_dialog import SettingsDialog
 
 LOG = logging.getLogger(__name__)
+
+# Sidebar icon (see icons.py), name, and the line under the page's heading.
+PAGES = (
+    ("film", "Prepare", "Choose films from your sources and prepare them for the stick"),
+    ("library", "Library", "What the stick is holding"),
+    ("monitor", "Device", "Recovery, and a remote control for the stick"),
+    ("gear", "Config", "This app's settings, the appliance's variables, and deploys"),
+)
 
 
 class MainWindow(QMainWindow):
@@ -63,19 +81,18 @@ class MainWindow(QMainWindow):
         self._db.migrate()
 
         self._monitor = DeviceMonitor(self._settings, parent=self)
+        # What actl hands Ansible, from these settings; and no password left
+        # behind by a run that never finished.
+        site_vars.clear_secrets()
+        site_vars.write_site(self._settings)
 
-        self._tabs = QTabWidget()
         self._prepare = PrepareTab(self._db, self._settings, self._monitor)
         self._library = LibraryTab(self._db, self._settings, self._monitor)
         self._device = DeviceTab(self._db, self._settings, self._monitor)
-        self._config = ConfigTab(self._settings)
-        self._tabs.addTab(self._prepare, "Prepare")
-        self._tabs.addTab(self._library, "Library")
-        self._tabs.addTab(self._device, "Device")
-        self._tabs.addTab(self._config, "Config")
-        self.setCentralWidget(self._tabs)
+        self._config = ConfigTab(self._settings, self._db)
+        self._build_pages(
+            (self._prepare, self._library, self._device, self._config))
 
-        self._build_menu()
         self._wire()
         LOG.info("share: %s", self._settings.nas_root or "not set")
         if self._settings.nas_root:
@@ -88,27 +105,119 @@ class MainWindow(QMainWindow):
         # goes back on the queue, and the debris of a half-made film is cleared.
         self._prepare.recover()
         self._refresh_all()
+        self._prepare.use_share()
 
         if not self._settings.nas_root:
-            self.open_settings()
+            self.get_started()
         else:
             self._check_share()
             self._offer_import()
 
-    def _build_menu(self):
-        menu = self.menuBar().addMenu("&File")
-        settings_action = menu.addAction("Settings...")
-        settings_action.triggered.connect(self.open_settings)
-        refresh_action = menu.addAction("Refresh")
-        refresh_action.triggered.connect(self._refresh_all)
-        menu.addSeparator()
-        import_action = menu.addAction("Import an existing prepared library...")
-        import_action.triggered.connect(self.import_legacy_library)
-        self._tidy_action = menu.addAction("Tidy the share...")
-        self._tidy_action.triggered.connect(self.tidy_share)
-        menu.addSeparator()
-        quit_action = menu.addAction("Quit")
-        quit_action.triggered.connect(self.close)
+    def _build_pages(self, widgets):
+        self._pages = QStackedWidget()
+        side = QFrame()
+        side.setObjectName("sidebar")
+        side.setFixedWidth(228)
+        nav = QVBoxLayout(side)
+        nav.setContentsMargins(18, 22, 14, 16)
+        nav.setSpacing(6)
+        nav.addWidget(Brand())
+        nav.addSpacing(30)
+        self._nav = QButtonGroup(self)
+        self._nav_icons = []
+        # A page's own buttons -- Prepare's sources -- sit in the header, to the
+        # right of its title, and change with the page.
+        self._actions = QStackedWidget()
+        for index, ((glyph, name, _blurb), widget) in enumerate(
+                zip(PAGES, widgets)):
+            self._pages.addWidget(widget)
+            self._actions.addWidget(getattr(widget, "header_actions", None)
+                                    or QWidget())
+            button = QPushButton("  " + name)
+            button.setObjectName("nav")
+            button.setCheckable(True)
+            button.setIconSize(QSize(22, 22))
+            self._nav_icons.append(
+                (icons.icon(glyph, "#AEBBD8", size=22),
+                 icons.icon(glyph, "#FFFFFF", size=22)))
+            self._nav.addButton(button, index)
+            nav.addWidget(button)
+        nav.addStretch(1)
+        nav.addWidget(self._build_status_card())
+        self._nav.idClicked.connect(self._pages.setCurrentIndex)
+        self._pages.currentChanged.connect(self._on_page)
+
+        self._heading = QLabel("")
+        self._heading.setObjectName("heading")
+        self._blurb = QLabel("")
+        self._blurb.setObjectName("subheading")
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        titles.addWidget(self._heading)
+        titles.addWidget(self._blurb)
+        top = QHBoxLayout()
+        top.addLayout(titles, 1)
+        top.addWidget(self._actions)
+        rule = QFrame()
+        rule.setObjectName("rule")
+
+        content = QWidget()
+        body = QVBoxLayout(content)
+        body.setContentsMargins(28, 22, 28, 20)
+        body.setSpacing(14)
+        body.addLayout(top)
+        body.addWidget(rule)
+        body.addWidget(self._pages, 1)
+
+        root = QWidget()
+        outer = QHBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(side)
+        outer.addWidget(content, 1)
+        self.setCentralWidget(root)
+        self._prepare.summaryChanged.connect(self._status_detail.setText)
+        self._monitor.changed.connect(self._draw_status)
+        self._draw_status()
+        self._on_page(0)
+
+    def _build_status_card(self):
+        """Whether the stick is answering, and how much there is to choose
+        from -- the two things worth knowing from any page."""
+        card = QFrame()
+        card.setObjectName("statusCard")
+        box = QVBoxLayout(card)
+        box.setContentsMargins(14, 10, 14, 10)
+        box.setSpacing(2)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self._status_dot = QLabel("\u25cf")
+        self._status_head = QLabel("")
+        self._status_head.setObjectName("statusHead")
+        head.addWidget(self._status_dot)
+        head.addWidget(self._status_head, 1)
+        self._status_detail = QLabel("")
+        self._status_detail.setObjectName("statusDetail")
+        self._status_detail.setWordWrap(True)
+        box.addLayout(head)
+        box.addWidget(self._status_detail)
+        return card
+
+    def _draw_status(self):
+        colour, headline, detail = self._monitor.state.describe()
+        self._status_dot.setStyleSheet(
+            "color: %s; font-size: 13px;" % COLOURS.get(colour, COLOURS["idle"]))
+        self._status_head.setText(headline)
+        self._status_head.setToolTip(detail)
+
+    def _on_page(self, index):
+        _glyph, name, blurb = PAGES[index]
+        self._heading.setText(name)
+        self._blurb.setText(blurb)
+        self._actions.setCurrentIndex(index)
+        self._nav.button(index).setChecked(True)
+        for i, (normal, current) in enumerate(self._nav_icons):
+            self._nav.button(i).setIcon(current if i == index else normal)
 
     def _wire(self):
         # A film finished and reached the stick, so the Library tab is stale.
@@ -130,6 +239,11 @@ class MainWindow(QMainWindow):
         # edge rather than on every poll: the monitor only says "changed" when
         # the answer did.
         self._monitor.changed.connect(self._on_device_changed)
+        # The Settings tab under Config, and the import beside it.
+        self._config.settingsSaved.connect(self._on_settings_saved)
+        self._config.importRequested.connect(self.import_legacy_library)
+        self._config.sourcesChanged.connect(self._on_sources_changed)
+        self._device.updateRequested.connect(self.update_device)
 
     def _on_device_changed(self):
         """Ask the stick for its films again the moment it starts answering.
@@ -146,7 +260,7 @@ class MainWindow(QMainWindow):
         self._device_was_reached = reached
 
     def _on_reprepare(self, movie):
-        self._tabs.setCurrentWidget(self._prepare)
+        self._pages.setCurrentWidget(self._prepare)
         self._prepare.enqueue_one(movie["id"])
 
     def _refresh_all(self):
@@ -201,52 +315,56 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "Imported",
             "%d film(s), %d poster(s) and %d correction(s) are now in this "
-            "machine's library.\n\nNothing on the share was deleted -- File, "
-            "Tidy the share, removes the files nothing reads any more."
+            "machine's library.\n\nNothing on the share was deleted."
             % (result["films"], result["posters"], result["overrides"]))
         self._refresh_all()
 
-    def tidy_share(self):
-        """Delete the five things the old arrangement left that the stick never
-        opened. Says exactly what will go, and how much, before doing it."""
-        where = self._settings.nas_root
-        leavings = import_legacy.leavings(where)
-        if not leavings:
-            QMessageBox.information(
-                self, "Nothing to tidy",
-                "The share holds only films already.")
-            return
-        total = sum(size for _path, size in leavings)
-        from .views.format import human_size
-        answer = QMessageBox.question(
-            self, "Tidy the share?",
-            "%d file(s), %s, that the stick has never opened: the index, the "
-            "overrides file, the probe and TMDb caches, and the posters -- "
-            "which the stick keeps in its own database.\n\nThey are all in "
-            "this machine's library now. Delete them from the share?"
-            % (len(leavings), human_size(total)))
-        if answer != QMessageBox.Yes:
-            return
-        try:
-            result = import_legacy.tidy_share(self._db, where)
-        except RuntimeError as exc:
-            LOG.warning("refusing to tidy the share: %s", exc)
-            QMessageBox.warning(self, "Not yet", str(exc))
-            return
-        LOG.info("tidied the share: %d file(s), %s freed",
-                 result["removed"], result["bytes"])
-        QMessageBox.information(
-            self, "Tidied",
-            "Removed %d file(s) and freed %s on the share."
-            % (result["removed"], human_size(result["bytes"])))
-
-    def open_settings(self):
-        dialog = SettingsDialog(self._settings, self)
-        if dialog.exec():
-            # A new address means the old verdict is about a machine nobody
-            # cares about any more.
-            self._monitor.refresh_url()
-            self._monitor.poll()
-            self._check_share()
-            self._refresh_all()
+    def get_started(self):
+        """The first-run window, when there is no share yet. Everything after
+        that is the Settings tab under Config."""
+        if SettingsDialog(self._settings, self).exec():
             self._config.refresh()
+            self._on_settings_saved()
+
+    def _on_sources_changed(self, added):
+        self._prepare.refresh_roots()
+        if added:
+            self._prepare.rescan()
+        else:
+            self._prepare.reload()
+
+    def update_device(self):
+        """Deploy to the stick from the Device page's button.
+
+        The sudo password is asked for each time and handed to that one run
+        -- see site_vars.write_secrets -- rather than kept: a deploy is rare,
+        and a stored password that can become root on the stick is worth more
+        to somebody else than the typing it saves. Empty is fine for a login
+        whose sudo asks for nothing."""
+        password, ok = QInputDialog.getText(
+            self, "Update device",
+            "The stick's sudo password for %s (empty if it needs none):"
+            % (self._settings.ssh_user or "the SSH user"),
+            QLineEdit.Password)
+        if not ok:
+            return
+        self._pages.setCurrentWidget(self._config)
+        if not self._config.deploy(become_password=password):
+            QMessageBox.information(
+                self, "Not yet",
+                "Something is already running in the Deploy console, or there "
+                "is no playstick checkout to deploy from.")
+
+    def _on_settings_saved(self):
+        # The site values are part of the release, so the Device page's
+        # verdict may have changed with them.
+        release.forget()
+        self._device.refresh_release()
+        # A new address means the old verdict is about a machine nobody
+        # cares about any more.
+        self._monitor.refresh_url()
+        self._monitor.poll()
+        self._check_share()
+        self._refresh_all()
+        # The share may be a different one now, and it is always a source.
+        self._prepare.use_share()

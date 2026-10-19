@@ -17,7 +17,9 @@ Depends: ${misc:Depends},
          python3-pyside6.qtcore,
          python3-pyside6.qtgui,
          python3-pyside6.qtwidgets,
+         python3-pyside6.qtsvg,
          python3-ruamel.yaml,
+         python3-keyring,
 Recommends: ffmpeg
 Description: desktop admin and library manager for the playstick appliance
  Prepares films for the playstick media player -- probing, encoding the

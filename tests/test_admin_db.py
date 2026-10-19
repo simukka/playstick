@@ -136,6 +136,36 @@ class Catalogue(Fixture):
         self.assertIsNone(catalog.load_probe(self.db, ident, stale))
 
 
+class TheShareIsASource(Fixture):
+    """Settings' NAS root is offered in Prepare without being added by hand,
+    and only the current one is."""
+
+    def test_the_share_is_added_once(self):
+        source, added = catalog.ensure_share_source(self.db, self.nas)
+        self.assertTrue(added)
+        again, added = catalog.ensure_share_source(self.db, self.nas)
+        self.assertEqual((again, added), (source, False))
+        self.assertEqual([s["label"] for s in catalog.sources(self.db)], ["NAS"])
+        self.assertEqual(catalog.share_source_path(self.db),
+                         os.path.realpath(self.nas))
+
+    def test_a_new_share_replaces_the_old_one_and_nothing_else(self):
+        other = tempfile.mkdtemp(prefix="playstick-share-")
+        self.addCleanup(__import__("shutil").rmtree, other, True)
+        mine = catalog.add_source(self.db, tempfile.gettempdir(), "Mine")
+        catalog.ensure_share_source(self.db, self.nas)
+        catalog.ensure_share_source(self.db, other)
+        paths = sorted(s["path"] for s in catalog.sources(self.db))
+        self.assertEqual(paths, sorted([os.path.realpath(other),
+                                        os.path.realpath(tempfile.gettempdir())]))
+        self.assertIsNotNone(catalog.get_source(self.db, mine))
+
+    def test_no_share_is_no_source(self):
+        catalog.ensure_share_source(self.db, self.nas)
+        self.assertEqual(catalog.ensure_share_source(self.db, ""), (None, False))
+        self.assertEqual(catalog.sources(self.db), [])
+
+
 class Queue(Fixture):
     def setUp(self):
         super().setUp()
@@ -175,6 +205,42 @@ class Queue(Fixture):
         self.assertEqual(len(failed), 1)
         self.assertIn("no space", failed[0]["error"])
         self.assertEqual(catalog.get_item(self.db, self.ids[0])["state"], "failed")
+
+    def _fail(self, ident, error="ffmpeg exploded"):
+        queue.enqueue(self.db, ident)
+        job = queue.claim_next(self.db)
+        queue.finish(self.db, job["id"], catalog.FAILED, error=error)
+        return job["id"]
+
+    def test_a_failure_is_shown_until_something_deals_with_it(self):
+        """The queue table lists unresolved failures under the work still to
+        do: queued again, or prepared by a later attempt, and it is gone."""
+        first = self._fail(self.ids[0], "first try")
+        second = self._fail(self.ids[0], "second try")
+        self._fail(self.ids[1])
+        shown = {r["item_id"]: r["id"] for r in queue.unresolved_failures(self.db)}
+        # One row per film, the latest.
+        self.assertEqual(shown, {self.ids[0]: second, self.ids[1]: shown[self.ids[1]]})
+        self.assertNotIn(first, shown.values())
+        queue.enqueue(self.db, self.ids[1])            # retried
+        job = queue.claim_next(self.db)
+        queue.finish(self.db, job["id"], catalog.READY)  # ...and it worked
+        self.assertEqual([r["item_id"] for r in queue.unresolved_failures(self.db)],
+                         [self.ids[0]])
+        queue.enqueue(self.db, self.ids[0])            # queued again
+        self.assertEqual(queue.unresolved_failures(self.db), [])
+
+    def test_a_failure_can_be_dismissed(self):
+        job = self._fail(self.ids[0])
+        self.assertTrue(queue.remove(self.db, job))
+        self.assertEqual(queue.unresolved_failures(self.db), [])
+        self.assertEqual(catalog.get_item(self.db, self.ids[0])["state"],
+                         "available")
+
+    def test_a_running_job_is_not_removed(self):
+        queue.enqueue(self.db, self.ids[0])
+        job = queue.claim_next(self.db)
+        self.assertFalse(queue.remove(self.db, job["id"]))
 
     def test_move_and_remove(self):
         queue.enqueue_many(self.db, self.ids)

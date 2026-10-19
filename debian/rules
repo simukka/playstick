@@ -17,8 +17,28 @@ export PYBUILD_DISABLE = test
 %:
 	dh $@ --buildsystem=pybuild --sourcedirectory=src/admin
 
+# What a deploy reads, for the Config tab to run actl against -- see the
+# app's paths.py. The phone page is build output: scripts/build-deb.sh adds it
+# to the source after `make ui`, and the cp fails the build if it is missing.
+SHARE := debian/playstick/usr/share/playstick
+DEPLOY := actl ansible.cfg site.yml fetch-results.yml inventory.yml \
+	docker-compose.yml Dockerfile roles group_vars
+
 execute_after_dh_auto_install:
 	install -D -m 0644 src/admin/playstick.desktop \
 		debian/playstick/usr/share/applications/playstick.desktop
 	install -D -m 0644 icon.svg \
 		debian/playstick/usr/share/icons/hicolor/scalable/apps/playstick.svg
+	mkdir -p $(SHARE)/src/server $(SHARE)/src/player/dist
+	cp -r --preserve=mode $(DEPLOY) $(SHARE)/
+	cp -r --preserve=mode src/server/playstick src/server/playstick-web.py \
+		$(SHARE)/src/server/
+	cp src/player/dist/playstick-ui.html $(SHARE)/src/player/dist/
+	install -D -m 0755 scripts/release_id.py $(SHARE)/scripts/release_id.py
+	find $(SHARE) -name __pycache__ -prune -exec rm -rf {} +
+
+# The daemon's sources under /usr/share/playstick are files for the player role
+# to copy onto the stick, not modules for this machine: compiled here, their
+# __pycache__ would travel with them.
+override_dh_python3:
+	dh_python3 -X '/usr/share/playstick/'

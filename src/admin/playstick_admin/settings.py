@@ -39,7 +39,7 @@ APP = "admin"
 # Bumped when the keys below change shape, so migrate() runs once rather than
 # on every launch. It is not a schema version -- QSettings has no schema -- it
 # is a record of which one-way conversions have already happened.
-SETTINGS_VERSION = 2
+SETTINGS_VERSION = 3
 
 
 class Settings:
@@ -99,6 +99,87 @@ class Settings:
     def device_url(self, value):
         self._set("device_url", value)
 
+    # What Settings shows and takes: the stick's address -- an IP, or a name,
+    # with a port when it is not 80 -- rather than a URL. The URL is still what
+    # is stored, so everything that talks to the stick reads device_url as
+    # before; this only spares a person typing the scheme.
+    @property
+    def device_ip(self):
+        url = self.device_url
+        for scheme in ("http://", "https://"):
+            if url.startswith(scheme):
+                return url[len(scheme):]
+        return url
+
+    @device_ip.setter
+    def device_ip(self, value):
+        value = value.strip().rstrip("/")
+        if value and "://" not in value:
+            value = "http://" + value
+        self.device_url = value
+
+    # How a deploy logs in to the stick: a user and, optionally, a private
+    # key -- empty means whatever ssh would use by itself, the agent and the
+    # default ~/.ssh/id_* files. The host is the device IP's. See
+    # core.ssh_check for why there is no password.
+    @property
+    def ssh_user(self):
+        return str(self._get("ssh_user", ""))
+
+    @ssh_user.setter
+    def ssh_user(self, value):
+        self._set("ssh_user", value)
+
+    @property
+    def ssh_key(self):
+        return str(self._get("ssh_key", ""))
+
+    @ssh_key.setter
+    def ssh_key(self, value):
+        self._set("ssh_key", value)
+
+    # --- the share, as the stick mounts it ---------------------------------
+    #
+    # Not the NAS root above, which is where THIS machine mounts it: the stick
+    # mounts //<nas_server>/<nas_share> itself, read-only. Settings suggests
+    # both from this machine's mount (core.nas_mount). They reach the playbook
+    # through core.site_vars, and nowhere else sets them.
+
+    @property
+    def nas_server(self):
+        return str(self._get("nas_server", ""))
+
+    @nas_server.setter
+    def nas_server(self, value):
+        self._set("nas_server", value)
+
+    @property
+    def nas_share(self):
+        return str(self._get("nas_share", ""))
+
+    @nas_share.setter
+    def nas_share(self, value):
+        self._set("nas_share", value)
+
+    # Optional; for the page's wake-on-LAN button.
+    @property
+    def nas_mac(self):
+        return str(self._get("nas_mac", ""))
+
+    @nas_mac.setter
+    def nas_mac(self, value):
+        self._set("nas_mac", value)
+
+    # Empty mounts as guest. The password is not a setting -- it is in the
+    # keyring, see core.credentials.
+    @property
+    def nas_username(self):
+        return str(self._get("nas_username", ""))
+
+    @nas_username.setter
+    def nas_username(self, value):
+        self._set("nas_username", value)
+
     # --- metadata ----------------------------------------------------------
 
     @property
@@ -117,27 +198,9 @@ class Settings:
     def tmdb_language(self, value):
         self._set("tmdb_language", value)
 
-    # --- tools -------------------------------------------------------------
-
-    @property
-    def ffmpeg(self):
-        return str(self._get("ffmpeg", ""))
-
-    @ffmpeg.setter
-    def ffmpeg(self, value):
-        self._set("ffmpeg", value)
-
-    @property
-    def ffprobe(self):
-        return str(self._get("ffprobe", ""))
-
-    @ffprobe.setter
-    def ffprobe(self, value):
-        self._set("ffprobe", value)
-
     # The playstick checkout the Config tab edits and runs actl in. Defaults
-    # to the one this app is running from, which is "" for an installed copy
-    # -- see paths.py.
+    # to the one this app is running from, or for an installed copy to what
+    # the .deb put in /usr/share/playstick -- see paths.py.
     @property
     def repo_root(self):
         return str(self._get("repo_root", paths.REPO_ROOT))
@@ -145,18 +208,6 @@ class Settings:
     @repo_root.setter
     def repo_root(self, value):
         self._set("repo_root", value)
-
-    # Extra flags applied to every preparation, as a single string. Still the
-    # preparer's own argv vocabulary -- "--transcode never --verify probe" --
-    # even though there is no longer a command line to append it to: it is
-    # shlex.split and handed to prep.parse_args, which is the same parser.
-    @property
-    def prep_extra_args(self):
-        return str(self._get("prep_extra_args", ""))
-
-    @prep_extra_args.setter
-    def prep_extra_args(self, value):
-        self._set("prep_extra_args", value)
 
     # --- what the old settings said ----------------------------------------
     #
@@ -192,8 +243,10 @@ class Settings:
             # wrote and where the stick read. Defaulting to it is also what
             # keeps every existing film's id -- see core.identity.
             self.nas_root = legacy
-        # Staging stopped being a setting. Left in the file, the key would
-        # read as though it still did something.
-        self._s.remove("staging_dir")
+        # Staging stopped being a setting, and so did the tools -- found by
+        # tools.py now -- and the extra preparer flags. Left in the file, the
+        # keys would read as though they still did something.
+        for key in ("staging_dir", "ffmpeg", "ffprobe", "prep_extra_args"):
+            self._s.remove(key)
         self._set("settings_version", SETTINGS_VERSION)
         return True

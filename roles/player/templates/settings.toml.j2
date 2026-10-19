@@ -191,3 +191,9 @@ idle_minutes = {{ player_projector_idle_minutes | float | to_json }}
 tick_seconds = {{ player_projector_tick_seconds | float | to_json }}
 wake_on_airplay = {{ player_projector_wake_on_airplay | bool | to_json }}
 airplay_wake_ticks = {{ player_projector_airplay_wake_ticks | int | to_json }}
+
+{# Which deploy this is: a hash of everything it installed and the site values
+   it was given, worked out in tasks/main.yml. The daemon only reports it, in
+   /api/status, for the admin app to say whether there is an update. #}
+[release]
+id = {{ player_release | default('') | to_json }}

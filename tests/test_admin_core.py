@@ -33,6 +33,9 @@ from playstick_admin.core import device_library             # noqa: E402
 from playstick_admin.core import device_state                # noqa: E402
 from playstick_admin import log as log_setup                 # noqa: E402
 from playstick_admin.core import posters                    # noqa: E402
+from playstick_admin.core import ssh_check                  # noqa: E402
+from playstick_admin.core import nas_mount, site_vars      # noqa: E402
+from playstick_admin.core import release                    # noqa: E402
 from playstick_admin.core import prepared                   # noqa: E402
 from playstick_admin.core import sync                       # noqa: E402
 from playstick_admin.core.db import Database                # noqa: E402
@@ -288,58 +291,6 @@ class Pushing(unittest.TestCase):
             sync.push_one(self.client, self.db, "a" * 16)
 
 
-class PullingEditsBack(unittest.TestCase):
-    """What somebody corrected from the sofa, brought here before a
-    preparation overwrites it.
-
-    Without this a preparation derives the title from the filename again and
-    pushes it back over the correction -- the edit survives on the stick only
-    until the next push, which is exactly the failure the old two-file
-    arrangement had.
-    """
-
-    def setUp(self):
-        Device.reset()
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.db = Database(os.path.join(self._tmp.name, "admin.db"))
-        self.db.migrate()
-        self.addCleanup(self.db.close)
-        self.client = DeviceClient(BASE)
-        self.ident = "0123456789abcdef"
-        self.db.write().execute(
-            "INSERT INTO item (id, rel, abs_path, seen_at) VALUES (?,?,?,0)",
-            (self.ident, "Ponyo.mkv", "/x/Ponyo.mkv"))
-
-    def test_an_edit_on_the_stick_lands_here(self):
-        Device.films = [{"id": self.ident, "title": "Ponyo",
-                         "overrides": {"title": "Ponyo on the Cliff",
-                                       "year": 2008}}]
-        self.assertEqual(sync.pull_overrides(self.client, self.db), 1)
-        entry = prepared.overrides(self.db, self.ident)
-        self.assertEqual(entry["title"], "Ponyo on the Cliff")
-
-    def test_a_pull_does_not_lose_a_hand_picked_match(self):
-        # tmdb_id is this app's own idea. The device has no column for it, so a
-        # pull that replaced the entry would silently unpin every match anybody
-        # had chosen by hand.
-        prepared.set_override(self.db, self.ident, tmdb_id=12429)
-        Device.films = [{"id": self.ident, "overrides": {"title": "Ponyo"}}]
-        sync.pull_overrides(self.client, self.db)
-        entry = prepared.overrides(self.db, self.ident)
-        self.assertEqual(entry["tmdb_id"], 12429)
-        self.assertEqual(entry["title"], "Ponyo")
-
-    def test_a_film_with_no_edits_is_left_alone(self):
-        Device.films = [{"id": self.ident, "title": "Ponyo", "overrides": {}}]
-        self.assertEqual(sync.pull_overrides(self.client, self.db), 0)
-
-    def test_pulling_twice_reports_no_second_change(self):
-        Device.films = [{"id": self.ident, "overrides": {"title": "Ponyo"}}]
-        self.assertEqual(sync.pull_overrides(self.client, self.db), 1)
-        self.assertEqual(sync.pull_overrides(self.client, self.db), 0)
-
-
 class WhatTheLibraryTabShows(unittest.TestCase):
     """The device's rows joined to their edits, and to what only a preparation
     knows."""
@@ -379,6 +330,204 @@ class WhatTheLibraryTabShows(unittest.TestCase):
              "sort_title": "fifth element"}])
         self.assertEqual([r["title"] for r in rows],
                          ["The Fifth Element", "Ponyo"])
+
+
+class TheLoginTest(unittest.TestCase):
+    """Settings tests the stick's login the way a deploy will use it, and says
+    what to do when it fails. A fake ssh stands in for the real one."""
+
+    def _fake_ssh(self, code, stderr=""):
+        directory = tempfile.mkdtemp(prefix="playstick-ssh-")
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        path = os.path.join(directory, "ssh")
+        with open(path, "w") as handle:
+            handle.write("#!/bin/sh\nprintf '%%s\\n' \"$*\" > \"%s/argv\"\n"
+                         "printf '%%s\\n' '%s' >&2\nexit %d\n"
+                         % (directory, stderr, code))
+        os.chmod(path, 0o755)
+        return path, os.path.join(directory, "argv")
+
+    def test_the_web_port_is_not_the_ssh_host(self):
+        self.assertEqual(ssh_check.host_of("10.0.1.5:8080"), "10.0.1.5")
+        self.assertEqual(ssh_check.host_of("vivostick.local"), "vivostick.local")
+        self.assertEqual(ssh_check.host_of("[fe80::1]:8080"), "fe80::1")
+        self.assertEqual(ssh_check.host_of(""), "")
+
+    def test_it_never_prompts_and_never_accepts_a_host_key(self):
+        ssh, seen = self._fake_ssh(0)
+        ok, sentence = ssh_check.test("10.0.1.5", "admin", "~/.ssh/stick",
+                                      binary=ssh)
+        self.assertTrue(ok, sentence)
+        with open(seen) as handle:
+            argv = handle.read()
+        self.assertIn("BatchMode=yes", argv)
+        self.assertIn("StrictHostKeyChecking=yes", argv)
+        self.assertIn(os.path.expanduser("~/.ssh/stick"), argv)
+        self.assertIn("admin@10.0.1.5 true", argv)
+
+    def test_a_refused_key_says_how_to_copy_one_across(self):
+        ssh, _seen = self._fake_ssh(255, "admin@10.0.1.5: Permission denied "
+                                         "(publickey).")
+        ok, sentence = ssh_check.test("10.0.1.5", "admin", binary=ssh)
+        self.assertFalse(ok)
+        self.assertIn("ssh-copy-id admin@10.0.1.5", sentence)
+
+    def test_an_unknown_host_key_says_to_log_in_once(self):
+        sentence = ssh_check.explain(
+            "No ED25519 host key is known for 10.0.1.5 and you have requested "
+            "strict checking.\nHost key verification failed.", "10.0.1.5", "admin")
+        self.assertIn("ssh admin@10.0.1.5", sentence)
+
+    def test_a_changed_host_key_is_not_mistaken_for_an_unknown_one(self):
+        sentence = ssh_check.explain(
+            "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\n"
+            "Host key verification failed.", "10.0.1.5", "admin")
+        self.assertIn("ssh-keygen -R 10.0.1.5", sentence)
+
+    def test_nothing_to_connect_to_is_said_before_trying(self):
+        self.assertEqual(ssh_check.test("", "admin"),
+                         (False, "Set the device IP first."))
+        self.assertFalse(ssh_check.test("10.0.1.5", "")[0])
+
+    def test_no_ssh_at_all(self):
+        ok, sentence = ssh_check.test("10.0.1.5", "admin",
+                                      binary="/nonexistent/ssh")
+        self.assertFalse(ok)
+        self.assertIn("not installed", sentence)
+
+
+class SiteSettings:
+    def __init__(self, **kw):
+        self.device_ip = kw.get("device_ip", "10.0.1.5:8080")
+        self.ssh_user = kw.get("ssh_user", "admin")
+        self.ssh_key = kw.get("ssh_key", "")
+        self.nas_server = kw.get("nas_server", "192.0.2.83")
+        self.nas_share = kw.get("nas_share", "video")
+        self.nas_mac = kw.get("nas_mac", "")
+        self.nas_username = kw.get("nas_username", "family")
+
+
+class WhatTheDeployIsHanded(unittest.TestCase):
+    """Settings are the only source of the site's values. They reach Ansible
+    as an inventory actl mounts; the password only while the app runs it."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="playstick-site-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        old = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = self.dir
+        self.addCleanup(lambda: os.environ.__setitem__("XDG_STATE_HOME", old)
+                        if old is not None
+                        else os.environ.pop("XDG_STATE_HOME", None))
+
+    def _hostvars(self, path):
+        with open(path) as handle:
+            return json.loads(handle.read().split("\n", 1)[1])[
+                "all"]["hosts"]["vivostick"]
+
+    def test_the_stick_is_reached_on_the_ssh_host_not_the_web_port(self):
+        site_vars.write_site(SiteSettings())
+        got = self._hostvars(site_vars.site_path())
+        self.assertEqual(got["ansible_host"], "10.0.1.5")
+        self.assertEqual(got["ansible_user"], "admin")
+        self.assertEqual((got["nas_server"], got["nas_share"],
+                          got["nas_username"]), ("192.0.2.83", "video", "family"))
+        self.assertNotIn("nas_password", got)
+        self.assertEqual(os.stat(site_vars.site_path()).st_mode & 0o777, 0o600)
+
+    def test_empty_nas_values_are_written_so_nothing_else_applies(self):
+        site_vars.write_site(SiteSettings(nas_server="", nas_share=""))
+        got = self._hostvars(site_vars.site_path())
+        self.assertEqual((got["nas_server"], got["nas_share"]), ("", ""))
+
+    def test_a_key_is_named_where_the_container_sees_it(self):
+        key = os.path.join(self.dir, "stick_ed25519")
+        open(key, "w").close()
+        site_vars.write_site(SiteSettings(ssh_key=key))
+        got = self._hostvars(site_vars.site_path())
+        self.assertEqual(got["ansible_ssh_private_key_file"],
+                         site_vars.CONTAINER_KEY)
+        self.assertEqual(os.readlink(site_vars.key_link()), key)
+        site_vars.write_site(SiteSettings(ssh_key=""))
+        self.assertFalse(os.path.lexists(site_vars.key_link()))
+
+    def test_the_password_is_on_disk_only_until_cleared(self):
+        site_vars.write_secrets(nas_password="hunter2",
+                                ansible_become_password="")
+        self.assertEqual(self._hostvars(site_vars.secrets_path()),
+                         {"nas_password": "hunter2"})
+        self.assertEqual(os.stat(site_vars.secrets_path()).st_mode & 0o777,
+                         0o600)
+        site_vars.clear_secrets()
+        self.assertFalse(os.path.exists(site_vars.secrets_path()))
+        site_vars.clear_secrets()           # and again, with nothing there
+
+    def test_no_half_written_file_is_left_for_ansible_to_read(self):
+        site_vars.write_site(SiteSettings())
+        self.assertEqual(sorted(os.listdir(site_vars.inventory_dir())),
+                         ["site.yml"])
+
+
+class WhetherTheStickIsCurrent(unittest.TestCase):
+    """The Device tab's "Update available". Both sides are one script, so
+    the app's answer has to be the script's answer, byte for byte."""
+
+    def test_the_app_and_the_script_agree(self):
+        import subprocess
+        site = os.path.join(tempfile.mkdtemp(prefix="playstick-rel-"), "site.yml")
+        self.addCleanup(shutil.rmtree, os.path.dirname(site), ignore_errors=True)
+        with open(site, "w") as handle:
+            handle.write('{"all": {}}')
+        script = os.path.join(ROOT, "scripts", "release_id.py")
+        by_script = subprocess.run([sys.executable, script, ROOT, site],
+                                   capture_output=True, text=True,
+                                   check=True).stdout.strip()
+        by_app = release._module(ROOT).compute(ROOT, site)
+        self.assertEqual(by_script, by_app)
+        self.assertRegex(by_app, "^[0-9a-f]{12}$")
+
+    def test_the_site_values_are_part_of_it(self):
+        directory = tempfile.mkdtemp(prefix="playstick-rel-")
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        site = os.path.join(directory, "site.yml")
+        module = release._module(ROOT)
+        with open(site, "w") as handle:
+            handle.write('{"nas_server": "10.0.1.5"}')
+        before = module.compute(ROOT, site)
+        with open(site, "w") as handle:
+            handle.write('{"nas_server": "10.0.1.6"}')
+        self.assertNotEqual(before, module.compute(ROOT, site))
+
+    def test_what_each_answer_says(self):
+        self.assertEqual(release.compare("abc", "abc")[0], "current")
+        self.assertEqual(release.compare("abc", "def")[0], "update")
+        # A stick from before releases were tracked is offered the update.
+        self.assertEqual(release.compare("", "def")[0], "update")
+        self.assertEqual(release.compare("abc", None)[0], "none")
+
+
+class TheShareFromThisMachinesMount(unittest.TestCase):
+    MOUNTINFO = (
+        "22 1 8:2 / / rw,relatime - ext4 /dev/sda2 rw\n"
+        "952 22 0:64 / /mnt/video rw,relatime shared:898 - cifs "
+        "//192.0.2.83/video rw,vers=3.1.1,username=family,addr=192.0.2.83\n"
+        "953 22 0:65 / /mnt/my\\040films rw - cifs //nas/films rw,guest\n"
+        "954 22 0:66 / /mnt/nfs rw - nfs 192.0.2.83:/volume1/video rw\n")
+
+    def test_server_share_and_user_come_off_the_mount(self):
+        self.assertEqual(nas_mount.detect("/mnt/video", self.MOUNTINFO),
+                         ("192.0.2.83", "video", "family"))
+        self.assertEqual(nas_mount.detect("/mnt/video/Films", self.MOUNTINFO),
+                         ("192.0.2.83", "video", "family"))
+
+    def test_a_guest_mount_and_an_escaped_space(self):
+        self.assertEqual(nas_mount.detect("/mnt/my films", self.MOUNTINFO),
+                         ("nas", "films", ""))
+
+    def test_nfs_and_local_disks_suggest_nothing(self):
+        self.assertIsNone(nas_mount.detect("/mnt/nfs", self.MOUNTINFO))
+        self.assertIsNone(nas_mount.detect("/home", self.MOUNTINFO))
+        self.assertIsNone(nas_mount.detect("", self.MOUNTINFO))
 
 
 class PosterCache(unittest.TestCase):

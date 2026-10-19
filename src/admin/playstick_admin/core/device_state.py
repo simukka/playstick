@@ -167,7 +167,7 @@ class DeviceState:
         """
         if self._state == UNSET:
             return ("idle", "No device",
-                    "Set the stick's address in File, Settings.")
+                    "Set the stick's address in Config, Settings.")
         if self.syncing:
             return ("busy", "Syncing with the device",
                     self._what or self._url)

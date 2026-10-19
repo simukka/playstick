@@ -90,6 +90,38 @@ def remove_source(db, source_id):
         conn.execute("DELETE FROM source WHERE id = ?", (source_id,))
 
 
+# Which source is the share, by the path it was added under: when Settings
+# names another share, the old one's source is the one to take away.
+SHARE_META = "share_source"
+
+
+def ensure_share_source(db, nas_root):
+    """Make the share itself a source, and the previous share not one.
+
+    The share is where films end up, and very often where they already are --
+    a film that needs no encode is recorded where it lies and copies nothing --
+    so it is offered without anybody having to add it. Returns (source id or
+    None, whether it was added just now), so the caller knows to scan it.
+    """
+    resolved = (os.path.realpath(os.path.expanduser(nas_root))
+                if nas_root else "")
+    previous = db.get_meta(SHARE_META) or ""
+    if previous and previous != resolved:
+        row = db.one("SELECT id FROM source WHERE path = ?", (previous,))
+        if row is not None:
+            remove_source(db, row["id"])
+    db.set_meta(SHARE_META, resolved)
+    if not resolved:
+        return None, False
+    existed = db.one("SELECT id FROM source WHERE path = ?",
+                     (resolved,)) is not None
+    return add_source(db, resolved, "NAS"), not existed
+
+
+def share_source_path(db):
+    return db.get_meta(SHARE_META) or ""
+
+
 def touch_scanned(db, source_id, when=None):
     with db.write() as conn:
         conn.execute("UPDATE source SET scanned_at = ? WHERE id = ?",
@@ -210,6 +242,15 @@ def set_state(db, ident, state, excluded_reason=None):
         conn.execute(
             "UPDATE item SET state = ?, excluded_reason = ? WHERE id = ?",
             (state, excluded_reason, ident))
+
+
+def source_counts(db):
+    """{source id: films it offers}, for Config's Sources tab. A film a scan
+    no longer finds is not counted: it is not something anybody can choose."""
+    return {row["source_id"]: row["n"] for row in db.query(
+        "SELECT source_id, COUNT(*) AS n FROM item "
+        "WHERE state != 'missing' AND source_id IS NOT NULL "
+        "GROUP BY source_id")}
 
 
 def counts(db):

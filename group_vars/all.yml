@@ -17,18 +17,22 @@
 #
 # WHY THIS FILE AND NOT settings.yml AT THE REPO ROOT. Ansible's variable
 # precedence. A root file would have to be pulled in with vars_files:, which
-# ranks ABOVE host_vars/ -- so host_vars/vivostick/local.yml would quietly stop
-# overriding anything, and the committed/site-local split this repo is careful
-# about would invert without an error. group_vars/all.yml sits BELOW host_vars,
-# which is the relationship the design needs.
+# ranks ABOVE inventory host variables -- so the site values the playstick app
+# supplies would quietly stop overriding anything, and the committed/site-local
+# split this repo is careful about would invert without an error.
+# group_vars/all.yml sits BELOW them, which is the relationship the design
+# needs.
 #
 # WHAT DOES NOT BELONG HERE. Three tiers, and the boundary is not stylistic:
 #
 #   group_vars/all.yml       decisions about how the appliance behaves. The
 #                            same for everyone. Committed.
-#   host_vars/*/local.yml    facts about one LAN: addresses, the login, the
-#                            share name, the NAS's MAC. Gitignored.
-#   host_vars/*/vault.yml    secrets. Gitignored AND encrypted.
+#   the app's Settings       facts about one LAN: the stick's address and
+#                            login, the NAS server, share, user and MAC.
+#                            Written outside the repo, and handed to Ansible
+#                            by actl as a second inventory source.
+#   the desktop keyring      the NAS password, via the app; only on disk
+#                            while the app is running a deploy.
 #
 # And the trap that costs an afternoon: a DIRECTORY named group_vars/all/
 # SHADOWS this file outright, taking every tunable below out of play at once.
@@ -403,35 +407,25 @@ idle_busy_file: /run/playstick/playing
 
 nas_enabled: true
 
-# Server, share and MAC. ALL THREE ARE SITE VALUES AND GO IN
-# host_vars/vivostick/local.yml, which is gitignored -- this file is in git and
-# an address here would be published with it. Declared empty rather than set to
-# a plausible example on purpose: an example address is a live value, and a
-# clone missing local.yml should mount nothing rather than reach for somebody
-# else's NAS. Empty server or share skips the role entirely.
-#
-#   # host_vars/vivostick/local.yml   (see local.yml.example)
-#   nas_server: "10.0.1.5"     # address, not a name: the mount must not
-#                              # depend on mDNS being up at boot
-#   nas_share:  "movies"
-#   nas_mac:    "00:11:32:aa:bb:cc"
+# Server, share and MAC. ALL THREE ARE SITE VALUES AND COME FROM THE PLAYSTICK
+# APP'S SETTINGS, which suggests the server and share from the machine's own
+# mount of the NAS -- this file is in git and an address here would be
+# published with it. Declared empty rather than set to a plausible example on
+# purpose: an example address is a live value, and a run without the app's
+# values should mount nothing rather than reach for somebody else's NAS. Empty
+# server or share skips the role entirely. The app writes all of them, empty
+# ones included, so nothing set here would take effect anyway.
 #
 # nas_share is the exported SHARE NAME, not the path the files sit at on the
 # NAS. A Synology shows the folder as /volume1/movies and exports it as
 # //nas/movies -- the last component alone. Both wrong forms fail underneath
 # Ansible, in the kernel, naming neither the variable nor the role, so the nas
-# role asserts on the value before it can get that far. See docs/install.md.
+# role asserts on the value before it can get that far.
 #
-# Credentials are a separate question again: they are secrets, so they go in
-# the ENCRYPTED vault rather than in the merely-gitignored file. Both are kept
-# out of git; only one of them would still be safe if that stopped being true.
-#   ./actl 'ansible-vault create host_vars/vivostick/vault.yml'
-#   ./actl 'ansible-playbook site.yml --ask-vault-pass'
-#
-# Both paths are host_vars, and that is load-bearing: vivostick is a HOST in
-# inventory.yml, not a group. group_vars/vivostick/ is never read.
-nas_server: "10.0.1.83"
-nas_share: "video"
+# Credentials are a separate question again: the username is a setting like
+# these, and the password lives in the desktop keyring -- see nas_password.
+nas_server: ""
+nas_share: ""
 
 # The NAS's wired MAC, for wake-on-LAN. Empty means the daemon will not offer
 # to switch the NAS on: the page still says the films are unreachable, it just
@@ -458,9 +452,11 @@ nas_share_unc: "{{ nas_share | regex_replace('^/+', '') | regex_replace('/+$', '
 # systemd-escape, so /srv/movies becomes srv-movies.mount / srv-movies.automount.
 nas_mount_point: /srv/movies
 
-# Credentials. Put these in a vault file, not here:
-#   ./actl 'ansible-vault create host_vars/vivostick/vault.yml'
-# and reference them as nas_username / nas_password there.
+# Credentials. Both come from the playstick app, not from here: the username
+# with its other settings, the password from the desktop keyring, handed over
+# only while the app runs the deploy. A run from a terminal has the username
+# without the password and the nas role refuses it rather than write an empty
+# one onto the stick; -e nas_password=... gets a terminal run past that.
 #
 # An empty username mounts as guest, which is what a NAS share published
 # without authentication wants.

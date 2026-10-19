@@ -44,8 +44,8 @@ from .config import (
     ADMIN_SYNC_MAX, ADMIN_THUMB_CLEAR_RE, ADMIN_THUMB_MAX, ADMIN_THUMB_RE,
     ALLOW_NETWORKS, AUDIO_CHUNK, AUDIO_ROUTE_RE, AUDIO_SLOTS, HAS_AUDIO,
     LIBRARY, PHONE_AUDIO, PHONE_AUDIO_BPS, PHONE_AUDIO_BURST,
-    PHONE_AUDIO_STREAMS, RANGE_RE, SYNC_HEADER, SYNC_KEEP_RE, SYNC_MAX,
-    SYNC_MAX_RATE, UI_FILE, log
+    PHONE_AUDIO_STREAMS, RANGE_RE, RELEASE, SYNC_HEADER, SYNC_KEEP_RE,
+    SYNC_MAX, SYNC_MAX_RATE, UI_FILE, log
 )
 from .airplay import airplay_active
 from .library import Library
@@ -1027,6 +1027,11 @@ class Handler(BaseHTTPRequestHandler):
             # like everything else here, so a page from before this existed
             # carries on ignoring it and carries on needing a manual refresh.
             "build": build_id(),
+            # Which deploy put this daemon here -- not the page alone, as
+            # build is, but everything a deploy installs and the site values
+            # it was given. The admin app compares it with what it would
+            # deploy now; see scripts/release_id.py. Empty before it existed.
+            "release": RELEASE,
             # The page cannot build an audio URL without this.
             "id": item["id"] if item else "",
             "title": self.projectionist.current_title(),

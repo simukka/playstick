@@ -41,8 +41,11 @@ TEST_IMAGES="${TEST_IMAGES:-debian:trixie ubuntu:26.04}"
 command -v docker >/dev/null || { echo "docker not found" >&2; exit 1; }
 mkdir -p "$OUT"
 
+# Plus the phone page, which is ignored as build output but is what the player
+# role deploys -- so `make admin-deb` builds it first.
 source_tar() {
-  (cd "$ROOT" && git ls-files -z --cached --others --exclude-standard \
+  (cd "$ROOT" && { git ls-files -z --cached --others --exclude-standard
+                   printf 'src/player/dist/playstick-ui.html\0'; } \
      | tar --null --files-from=- -cf -)
 }
 

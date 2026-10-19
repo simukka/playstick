@@ -29,6 +29,7 @@ from PySide6.QtWidgets import QApplication
 
 from playstick_admin import log as log_setup
 from playstick_admin import settings as settings_mod
+from playstick_admin import theme
 
 
 def main():
@@ -41,11 +42,16 @@ def main():
     QCoreApplication.setOrganizationName(settings_mod.ORG)
     QCoreApplication.setApplicationName(settings_mod.APP)
     app = QApplication(sys.argv)
+    theme.apply(app)
 
     # A scratch share, so the window does not pop the settings dialog, and a
     # scratch database beside it -- see the module docstring.
     tmp = tempfile.mkdtemp(prefix="playstick-smoke-")
     os.environ["PLAYSTICK_ADMIN_DB"] = os.path.join(tmp, "admin.db")
+    # And the rest of what the app writes under its own name -- site.yml for
+    # actl among it -- so a smoke run cannot replace the real one.
+    os.environ["XDG_STATE_HOME"] = os.path.join(tmp, "state")
+    os.environ["XDG_CACHE_HOME"] = os.path.join(tmp, "cache")
     for fmt in (QSettings.NativeFormat, QSettings.IniFormat):
         QSettings.setPath(fmt, QSettings.UserScope, os.path.join(tmp, "config"))
     nas = os.path.join(tmp, "nas")
@@ -57,14 +63,15 @@ def main():
     window = MainWindow()
     window.show()
 
-    # Exercise every tab, then quit.
-    for i in range(window._tabs.count()):
-        window._tabs.setCurrentIndex(i)
+    # Exercise every page, through the sidebar the way a click would, then quit.
+    for i in range(window._pages.count()):
+        window._nav.button(i).click()
+        assert window._pages.currentIndex() == i, i
         app.processEvents()
 
     QTimer.singleShot(200, app.quit)
     code = app.exec()
-    print("smoke ok: %d tabs, exit %d" % (window._tabs.count(), code))
+    print("smoke ok: %d pages, exit %d" % (window._pages.count(), code))
     return 0
 
 

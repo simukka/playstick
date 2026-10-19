@@ -243,7 +243,8 @@ class FilmDetailsDialog(QDialog):
         year = (details["prepared"] or {}).get("year") or item["year"]
         name = "%s (%s)" % (title, year) if year else title
         self.setWindowTitle(name)
-        self._frames.set_film(item["abs_path"], self._settings.ffmpeg, name)
+        # "" is the ffmpeg tools.py found at startup.
+        self._frames.set_film(item["abs_path"], "", name)
         self._heading.setText(
             "<b>%s</b><br><small>%s<br>id %s &middot; %s</small>"
             % (_esc(name), _esc(item["abs_path"]), _esc(item["id"]),
@@ -263,7 +264,7 @@ class FilmDetailsDialog(QDialog):
             return
         self._reprobe.setEnabled(False)
         self._ffprobe.show_message("Running ffprobe on %s..." % self._abs_path)
-        path, binary = self._abs_path, self._settings.ffprobe
+        path, binary = self._abs_path, ""
         job, thread = net_worker.call(
             lambda: film_details.ffprobe(path, binary), label="ffprobe")
         job.done.connect(self._on_ffprobe)

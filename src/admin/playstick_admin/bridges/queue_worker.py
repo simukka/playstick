@@ -48,6 +48,7 @@ class QueueWorker(QObject):
     jobStarted = Signal(dict)       # {id, item_id, title, remaining}
     jobPhase = Signal(str, str)     # phase, detail
     jobLog = Signal(str)
+    jobProgress = Signal(str, float)  # what ffmpeg is doing, 0..1 of it
     jobDone = Signal(dict)          # what pipeline.prepare returned
     jobFailed = Signal(dict)        # {item_id, title, error}
     queueChanged = Signal()
@@ -67,10 +68,6 @@ class QueueWorker(QObject):
         LOG.info("the queue is draining; %d film(s) waiting",
                  len(queue.pending(self._db)))
         prep.reset_cancel()
-        if self._settings.ffmpeg:
-            prep.FFMPEG = self._settings.ffmpeg
-        if self._settings.ffprobe:
-            prep.FFPROBE = self._settings.ffprobe
         prep.set_reporter(self._on_prep_event)
         try:
             while not self._stopping:
@@ -147,9 +144,20 @@ class QueueWorker(QObject):
         prep.request_cancel()
 
     def stop(self):
-        """Finish the current film and then stop. The queue keeps its place."""
+        """Finish the current film and then stop. The queue keeps its place.
+        A paused film is resumed, or "after this film" would never come."""
         LOG.info("stopping after this film")
         self._stopping = True
+        prep.request_resume()
+
+    def pause(self):
+        """Hold the encode where it is. Safe from any thread, like cancel."""
+        LOG.info("pausing the film being prepared")
+        prep.request_pause()
+
+    def resume(self):
+        LOG.info("resuming the film being prepared")
+        prep.request_resume()
 
     # --- reporting ---------------------------------------------------------
 
@@ -166,6 +174,9 @@ class QueueWorker(QObject):
         # with its own copy.
         if event.get("event") == "log":
             self._append(event.get("text", ""))
+        elif event.get("event") == "progress" and event.get("total"):
+            self.jobProgress.emit(event.get("label", ""),
+                                  min(1.0, event["done"] / event["total"]))
 
     def _append(self, line):
         self._log.append(line)

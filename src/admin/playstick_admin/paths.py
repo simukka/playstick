@@ -12,10 +12,11 @@ INSTALLED (a wheel, a .deb). The package is in some site-packages and there is
 no repo above it -- three directories up is lib/ or /usr. The preparer is then
 an ordinary top-level module installed alongside the package: the symlink at
 src/admin/playstick_prep.py is listed in pyproject.toml's py-modules, and a
-built wheel carries the file it points at. The Config tab has no files to edit
-until Settings names a checkout, because group_vars and actl are the repo's,
-not the app's -- a packaged copy of them would be a second inventory nobody
-deploys from.
+built wheel carries the file it points at. The .deb also installs what a deploy
+needs -- actl, the playbook, its roles and group_vars, and the daemon and phone
+page the player role copies -- under /usr/share/playstick, and the Config tab
+defaults to that. It belongs to root, so from there it can be read and run but
+not edited; Settings can name a checkout instead.
 """
 
 import os
@@ -25,10 +26,18 @@ PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 _ABOVE = os.path.abspath(os.path.join(PKG_DIR, "..", "..", ".."))
 PREP_DIR = os.path.join(_ABOVE, "src", "prep")
 
-# The checkout this package is running from, or "" when it is installed.
+# Where the .deb puts the deploy files. See debian/rules.
+INSTALLED_ROOT = "/usr/share/playstick"
+
+# The checkout this package is running from; else the packaged copy; else "".
 # Judged by actl being there: a path three levels up always exists, and an
 # installed copy must not mistake /usr for the repo.
-REPO_ROOT = _ABOVE if os.path.isfile(os.path.join(_ABOVE, "actl")) else ""
+if os.path.isfile(os.path.join(_ABOVE, "actl")):
+    REPO_ROOT = _ABOVE
+elif os.path.isfile(os.path.join(INSTALLED_ROOT, "actl")):
+    REPO_ROOT = INSTALLED_ROOT
+else:
+    REPO_ROOT = ""
 
 
 def is_checkout(root):
@@ -42,10 +51,6 @@ def actl(root):
 
 def group_vars(root):
     return os.path.join(root, "group_vars", "all.yml")
-
-
-def host_vars(root):
-    return os.path.join(root, "host_vars", "vivostick", "local.yml")
 
 
 def ensure_prep_on_path():

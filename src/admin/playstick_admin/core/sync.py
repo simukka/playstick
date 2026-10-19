@@ -243,38 +243,3 @@ def remove_one(client, db, ident):
     LOG.info("asking the stick to forget %s", ident)
     client.delete_films([ident])
 
-
-def pull_overrides(client, db):
-    """Copy the stick's metadata edits into the admin database.
-
-    Called before a preparation. Without it a run would derive a title from the
-    filename again and push it back over the one somebody fixed from the sofa --
-    the edit would survive on the stick only until the next push, which is
-    exactly the failure the old two-file arrangement had.
-
-    Merges rather than replaces. A field the device has no override on is a
-    field nobody corrected THERE, which is not the same as one somebody
-    cleared -- and `tmdb_id` in particular is this app's own idea, which the
-    device has no column for and must never be what loses.
-
-    Returns the number of films whose entry changed.
-    """
-    device = client.admin_library().get("films") or []
-    changed = 0
-    for row in device:
-        edits = row.get("overrides") or {}
-        if not edits:
-            continue
-        ident = row.get("id")
-        before = prepared.overrides(db, ident)
-        wanted = {k: v for k, v in edits.items()
-                  if k in prepared.SCALAR_FIELDS + prepared.FLAG_FIELDS}
-        if all(before.get(k) == v for k, v in wanted.items()):
-            continue
-        prepared.set_override(db, ident, **wanted)
-        LOG.info("took %s's edits from the stick: %s", ident,
-                 ", ".join(sorted(wanted)))
-        changed += 1
-    LOG.info("%d film(s) had edits on the stick this machine did not have",
-             changed)
-    return changed

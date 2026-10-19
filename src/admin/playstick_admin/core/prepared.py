@@ -18,10 +18,9 @@ DELETE here, not a write of the old value. A film with no rows here reads
 exactly as it was prepared.
 
 The device has the same table and it is not a duplicate of this one. An edit
-made from the sofa lands there; sync.pull_overrides copies it here, so that the
-next preparation honours it instead of deriving the old answer from the
-filename again and pushing it back over the top. That round trip is the whole
-reason both exist.
+made here is sent to the stick too; an edit made on the stick stays there --
+nothing copies it back, so the next push of that film from here writes this
+machine's answer over it.
 
 THE FIELD LISTS ARE A CONTRACT WITH TWO OTHER FILES
 
@@ -29,7 +28,7 @@ playstick_prep.apply_overrides reads the shape SCALAR_FIELDS describes, and the
 daemon accepts exactly SCALAR_FIELDS + FLAG_FIELDS minus `plot` on
 /api/admin/item. META_FIELDS are this app's own and the device has no column
 for any of them -- a pinned TMDb match in particular is a decision somebody made
-here, and a pull from a device that has never heard of it must not clear it.
+here, which the device has never heard of.
 """
 
 import hashlib
