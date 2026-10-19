@@ -24,6 +24,30 @@ Two people watching the same film can hear it in different languages at once.
 
 Great for multi-language households, friends, and parties.
 
+![The phone UI: the library, the remote, and choosing a language](screenshots/web-0-hero.png)
+
+## The phone is the remote
+
+Open the stick's address on any phone or tablet on the home network. There is nothing to install.
+
+* **Tap a poster to play it.** The projector switches itself on, and the page says so while the lamp warms up.
+* **A series is one tile.** Tapping it opens the seasons and their episodes.
+* **Sort and filter** by title, year, or genre.
+* **Big, simple controls** while a film plays: skip ten seconds, pause, stop, and volume.
+
+<details>
+<summary>More screenshots</summary>
+
+![The library grid](screenshots/web-1-grid.png)
+![A series and its episodes](screenshots/web-2-series.png)
+![Sorting and filtering](screenshots/web-3-filter.png)
+![Waiting for the projector to warm up](screenshots/web-4-preparing.png)
+![The remote while a film plays](screenshots/web-5-playing.png)
+![Choosing sound and language](screenshots/web-6-sound.png)
+![The library on a tablet](screenshots/web-7-tablet-grid.png)
+
+</details>
+
 ## A desktop app to run the library
 
 The heavy lifting happens on your own computer, not the stick. The **Playstick Admin** app (PySide6, `make admin`) 
@@ -50,4 +74,4 @@ probing, re-encoding where the stick needs it, extracting per-language audio, an
 
 </details>
 
-*The screenshots use a demo library of public-domain films.*
+*All screenshots use a demo library of public-domain films.*
