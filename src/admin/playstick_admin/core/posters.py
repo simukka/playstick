@@ -26,13 +26,13 @@ import errno
 import os
 import tempfile
 
+from .. import paths
+
 # Where the files go. Under the user's cache directory rather than the repo:
 # these are fetched, not authored, and a `git status` full of JPEGs is how a
 # cache announces it is in the wrong place.
 def cache_dir():
-    base = (os.environ.get("XDG_CACHE_HOME")
-            or os.path.join(os.path.expanduser("~"), ".cache"))
-    return os.path.join(base, "playstick-admin", "posters")
+    return os.path.join(paths.cache_dir(), "posters")
 
 
 def path_for(etag, suffix=".img"):

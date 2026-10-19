@@ -65,10 +65,26 @@ def ensure_prep_on_path():
 # what is on the NAS, and a cache is by definition something a cleaner may
 # delete. The daemon draws the same line for the same reason -- see the note
 # above config._default_db() on the device side.
-def state_dir():
-    base = (os.environ.get("XDG_STATE_HOME")
+#
+# The directory is playstick, shared with that daemon when a developer runs it
+# by hand; the names inside do not collide.
+def _state_base():
+    return (os.environ.get("XDG_STATE_HOME")
             or os.path.join(os.path.expanduser("~"), ".local", "state"))
-    return os.path.join(base, "playstick-admin")
+
+
+def _cache_base():
+    return (os.environ.get("XDG_CACHE_HOME")
+            or os.path.join(os.path.expanduser("~"), ".cache"))
+
+
+def state_dir():
+    return os.path.join(_state_base(), "playstick")
+
+
+def cache_dir():
+    """Fetched things a cleaner may delete -- the device's posters."""
+    return os.path.join(_cache_base(), "playstick")
 
 
 def db_path():
@@ -86,3 +102,4 @@ def tmdb_cache_path():
     to keep to films.
     """
     return os.path.join(state_dir(), "tmdb-cache.json")
+
