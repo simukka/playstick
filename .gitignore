@@ -31,5 +31,7 @@ __pycache__/
 # committed copy goes stale the moment one is added.
 src/admin/*.egg-info/
 
-# Built packages, from `make admin-deb`.
+# Build output, never source: dist/ at the root is the .deb from
+# `make admin-deb`, and src/player/dist/ is the phone page from `make build`,
+# which a deploy copies from -- so build before running the playbook.
 dist/
