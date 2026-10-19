@@ -1,4 +1,3 @@
----
 # EVERY TUNABLE THIS APPLIANCE HAS. One file, on purpose.
 #
 # There used to be five: this one, plus a defaults/main.yml in each of the
@@ -136,8 +135,7 @@ uxplay_decoder: avdec_h264
 # Set explicitly to override; set to "" to leave UxPlay's own default alone.
 uxplay_request_fps: 30
 uxplay_request_size: >-
-  {{ (drm_force_mode.split('@')[0] ~ '@' ~ uxplay_request_fps)
-  if drm_force_mode | length > 0 else '' }}
+  {{ (drm_force_mode.split('@')[0] ~ '@' ~ uxplay_request_fps) if drm_force_mode | length > 0 else '' }}
 # Audio is deliberately suppressed (-a): the Cherry Trail LPE/SST audio
 # stack is the least reliable part of this platform and is out of scope.
 uxplay_suppress_audio: true
@@ -272,65 +270,44 @@ trim_enabled: true
 #   upower              no battery
 #   kdump-tools         see below -- it reserves nothing and cannot work
 trim_purge_packages:
-  - apport
-  - bolt
-  - fwupd
-  - kdump-tools
-  - landscape-common
-  - modemmanager
-  - multipath-tools
-  - networkd-dispatcher
-  - open-iscsi
-  - packagekit
-  - plymouth
-  - rsyslog
-  - snapd
-  - software-properties-common   # base edits sources directly; not needed
-  - udisks2
-  - ufw
-  - upower
-
-# Asserted against the purge list before anything is removed. These are not
-# suggestions -- removing any of them costs you the device.
-#
-#   lvm2            root is /dev/mapper/ubuntu--vg-ubuntu--lv. Removing this
-#                   makes the system unbootable.
-#   openssh-server  the only way in
-#   netplan.io      network configuration
-#   systemd-*       init, DNS, network
-#   dbus            required by logind and avahi
-#   avahi-daemon    AirPlay discovery is mDNS
-#   chrony          time sync; pairing and TLS care
-#   thermald        kept deliberately: a passively cooled stick doing
-#                   sustained video decode wants thermal management
+- apport
+- bolt
+- fwupd
+- kdump-tools
+- landscape-common
+- modemmanager
+- multipath-tools
+- networkd-dispatcher
+- open-iscsi
+- packagekit
+- plymouth
+- rsyslog
+- snapd
+- software-properties-common
+- udisks2
+- ufw
+- upower
 trim_protected_packages:
-  - lvm2
-  - openssh-server
-  - openssh-client
-  - netplan.io
-  - systemd
-  - systemd-resolved
-  - systemd-timesyncd
-  - dbus
-  - avahi-daemon
-  - chrony
-  - thermald
-  - sudo
-  - sudo-rs
-
-# Timers that wake a slow CPU to do work nobody asked for. fstrim.timer is
-# deliberately NOT here: TRIM is worth keeping on eMMC.
+- lvm2
+- openssh-server
+- openssh-client
+- netplan.io
+- systemd
+- systemd-resolved
+- systemd-timesyncd
+- dbus
+- avahi-daemon
+- chrony
+- thermald
+- sudo
+- sudo-rs
 trim_disable_timers:
-  - apt-daily.timer
-  - apt-daily-upgrade.timer
-  - motd-news.timer
-  - man-db.timer
-  - dpkg-db-backup.timer
-  - e2scrub_all.timer
-
-# Keep the package (so `apt upgrade` still works) but stop it running on its
-# own. An unattended apt run mid-presentation would wreck a mirroring session
-# on this CPU. The tradeoff: patching becomes manual.
+- apt-daily.timer
+- apt-daily-upgrade.timer
+- motd-news.timer
+- man-db.timer
+- dpkg-db-backup.timer
+- e2scrub_all.timer
 trim_disable_unattended_upgrades: true
 
 # Disable, do NOT purge. Purging cloud-init can take
@@ -355,15 +332,8 @@ trim_clean_apt_cache: true
 # leaving loaded on a kiosk. Both blacklist and install-/bin/true, because
 # blacklist alone does not stop a modalias-triggered load.
 trim_blacklist_modules:
-  - spi_intel_platform
-  - spi_intel
-
-# Quieting the boot console is tempting on a box whose display is the output,
-# but it is OFF by default on purpose: the kernel message that cracked the
-# performance investigation open was
-#   i915 0000:00:02.0: [drm] *ERROR* CPU pipe C FIFO underrun
-# read straight off tty1. Hiding that class of message costs more than the
-# tidier boot screen is worth while anything is still being measured.
+- spi_intel_platform
+- spi_intel
 trim_quiet_boot: false
 
 # The installer left the default target at graphical.target. Nothing visibly
@@ -393,14 +363,10 @@ idle_tty: /dev/tty1
 # "Unable to load such font with such kernel version" renders fine here.
 # First readable file wins; the rest are fallbacks if console-setup is slimmed.
 idle_fonts:
-  - /usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz
-  - /usr/share/consolefonts/Lat15-Terminus32x16.psf.gz
-  - /usr/share/consolefonts/Lat15-VGA32x16.psf.gz
-  - /usr/share/consolefonts/Lat15-Fixed16.psf.gz
-
-# 0 = fit the clock to the framebuffer (90% of width, 55% of height, whichever
-# binds first). On 1280x720 with the 16x32 face that lands on scale 12, i.e.
-# 192x384 px digits. Set a number to pin it.
+- /usr/share/consolefonts/Lat15-TerminusBold32x16.psf.gz
+- /usr/share/consolefonts/Lat15-Terminus32x16.psf.gz
+- /usr/share/consolefonts/Lat15-VGA32x16.psf.gz
+- /usr/share/consolefonts/Lat15-Fixed16.psf.gz
 idle_clock_scale: 0
 
 # strftime format. 24-hour, no seconds: a projector clock that ticks every
@@ -464,8 +430,8 @@ nas_enabled: true
 #
 # Both paths are host_vars, and that is load-bearing: vivostick is a HOST in
 # inventory.yml, not a group. group_vars/vivostick/ is never read.
-nas_server: ""
-nas_share: ""
+nas_server: "10.0.1.83"
+nas_share: "video"
 
 # The NAS's wired MAC, for wake-on-LAN. Empty means the daemon will not offer
 # to switch the NAS on: the page still says the films are unreachable, it just
@@ -636,15 +602,10 @@ player_advertise_mdns: true
 # and it is thin: it keeps a misconfigured router from exposing the UI, not a
 # determined neighbour off your Wi-Fi. Empty disables the check.
 player_allow_networks:
-  - 10.0.0.0/8
-  - 172.16.0.0/12
-  - 192.168.0.0/16
-  - 127.0.0.0/8
-
-# --- player: paths on the device -----------------------------------------
-# These used to be written straight into the unit template, which meant the
-# daemon's fallback and the value it was actually given lived in different
-# files and could drift. They are settings like any other now.
+- 10.0.0.0/8
+- 172.16.0.0/12
+- 192.168.0.0/16
+- 127.0.0.0/8
 player_ui_file: /usr/local/share/playstick/ui.html
 player_mpv_binary: /usr/bin/mpv
 player_mpv_socket: /run/playstick/mpv.sock
