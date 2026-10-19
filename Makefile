@@ -38,6 +38,9 @@ help:
 	@echo "  make admin        install (first run) and launch the desktop admin app"
 	@echo "  make admin-clean  remove the admin virtualenv"
 	@echo "  make admin-deb    build dist/playstick_<ver>_all.deb in Docker"
+	@echo "  make version V=minor MSG=\"...\""
+	@echo "                    new version (major, minor, patch or x.y.z) in"
+	@echo "                    debian/changelog and pyproject.toml"
 	@echo "                    and install-test it on Debian 13 and Ubuntu 26.04"
 	@echo ""
 	@echo "The admin app logs everything it does to this terminal: scans, each"
@@ -156,3 +159,9 @@ admin-clean:
 .PHONY: admin-deb
 admin-deb: ui
 	./scripts/build-deb.sh
+
+# A new version for the .deb, with its changelog entry -- see the script.
+.PHONY: version
+version:
+	@test -n "$(V)" -a -n "$(MSG)" || { echo 'usage: make version V=major|minor|patch|x.y.z MSG="what changed"' >&2; exit 2; }
+	./scripts/bump-version.sh "$(V)" "$(MSG)"
