@@ -1,4 +1,4 @@
-<p align="center"><img src="logo.svg" alt="playstick" width="440"></p>
+<p align="center"><img src="logo.png" alt="playstick" width="440"></p>
 
 **Old tech meets modern software.**
 
