@@ -141,6 +141,21 @@ class MoviesModel(QAbstractTableModel):
         col = index.column()
         if role == Qt.DecorationRole and col == 0:
             return self._icon(movie)
+        if role == Qt.UserRole:
+            # What the proxy sorts on. Not the shown title, which carries a
+            # "* " for an edited film and sorted every edit to the top; and
+            # numbers as numbers, so 10 does not come before 9.
+            if col == 0:
+                return (movie.get("sort_title") or movie.get("title")
+                        or "").lower()
+            if col == 1:
+                return int(movie.get("year") or 0)
+            if col == 2:
+                try:
+                    return float(movie.get("rating") or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+            return self.data(index, Qt.DisplayRole) or ""
         if role == Qt.DisplayRole:
             if col == 0:
                 title = movie.get("title") or "?"
@@ -195,6 +210,7 @@ class LibraryTab(QWidget):
         self._proxy.setSourceModel(self._model)
         self._proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self._proxy.setFilterKeyColumn(-1)      # match against every column
+        self._proxy.setSortRole(Qt.UserRole)
         self._threads = set()
         self._posters = None
         self._build()
@@ -238,9 +254,12 @@ class LibraryTab(QWidget):
         header.setSectionResizeMode(3, QHeaderView.Stretch)
         # The rest to what they hold. Left at Qt's default hundred pixels each,
         # they took the width the two stretching columns need.
-        for col, width in ((1, 64), (2, 72), (4, 84), (5, 76), (6, 110)):
+        for col, width in ((1, 64), (2, 72), (4, 120), (5, 76), (6, 110)):
             header.resizeSection(col, width)
         self._table.setShowGrid(False)
+        # A to Z to start with. Switching sorting on sorts by Qt's default,
+        # which is descending, and the list opened at Z.
+        self._table.sortByColumn(0, Qt.AscendingOrder)
         self._table.doubleClicked.connect(self._edit_at)
         outer.addWidget(self._table, 1)
 
