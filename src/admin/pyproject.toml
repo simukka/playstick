@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "playstick"
-version = "0.1.0"
+version = "1.0.0"
 description = "Desktop admin and library manager for the playstick appliance"
 requires-python = ">=3.10"
 dependencies = [

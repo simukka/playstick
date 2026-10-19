@@ -1,3 +1,9 @@
+playstick (1.0.0) unstable; urgency=medium
+
+  * Popcorn time!
+
+ -- simukka <kylesimukka@gmail.com>  Mon, 19 Oct 2026 19:28:13 +0200
+
 playstick (0.1.0) unstable; urgency=medium
 
   * First package of the admin app.
