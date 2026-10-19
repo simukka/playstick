@@ -10,6 +10,7 @@ import logging
 import sys
 
 from PySide6.QtCore import QCoreApplication
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication
 
 from . import log as log_setup
@@ -27,6 +28,9 @@ def main(argv=None):
 
     QCoreApplication.setOrganizationName(settings_mod.ORG)
     QCoreApplication.setApplicationName(settings_mod.APP)
+    # Names the .desktop file the package installs, which is how a Wayland
+    # shell matches this window to its launcher and icon.
+    QGuiApplication.setDesktopFileName("playstick-admin")
     app = QApplication(argv)
     # Imported here so a headless import of this module (e.g. in a test) does
     # not require the widgets to be constructed.

@@ -1,0 +1,29 @@
+Source: playstick-admin
+Section: video
+Priority: optional
+Maintainer: simukka <kylesimukka@gmail.com>
+Build-Depends: debhelper-compat (= 13),
+               dh-sequence-python3,
+               pybuild-plugin-pyproject,
+               python3-all,
+               python3-setuptools,
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+
+Package: playstick-admin
+Architecture: all
+Depends: ${misc:Depends},
+         ${python3:Depends},
+         python3-pyside6.qtcore,
+         python3-pyside6.qtgui,
+         python3-pyside6.qtwidgets,
+         python3-ruamel.yaml,
+Recommends: ffmpeg
+Description: desktop admin and library manager for the playstick appliance
+ Prepares films for the playstick media player -- probing, encoding the
+ headphone audio, fetching metadata and posters -- copies them onto the
+ share the stick reads, and tells the stick what is there.
+ .
+ Runs on the machine that encodes the library, not on the stick. The
+ Config tab edits a playstick checkout's Ansible variables and runs its
+ actl, so it needs a clone of the repo named in Settings.

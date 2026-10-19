@@ -249,3 +249,4 @@ class MainWindow(QMainWindow):
             self._monitor.poll()
             self._check_share()
             self._refresh_all()
+            self._config.refresh()

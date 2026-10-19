@@ -135,6 +135,9 @@ class Settings:
     def ffprobe(self, value):
         self._set("ffprobe", value)
 
+    # The playstick checkout the Config tab edits and runs actl in. Defaults
+    # to the one this app is running from, which is "" for an installed copy
+    # -- see paths.py.
     @property
     def repo_root(self):
         return str(self._get("repo_root", paths.REPO_ROOT))

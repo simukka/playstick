@@ -30,3 +30,6 @@ __pycache__/
 # source: it names the files that were present when the venv was made, so a
 # committed copy goes stale the moment one is added.
 src/admin/*.egg-info/
+
+# Built packages, from `make admin-deb`.
+dist/

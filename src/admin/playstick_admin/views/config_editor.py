@@ -5,6 +5,10 @@ Two sub-panels. A generated form of the top-level tunables in group_vars/all.yml
 round-trip. And an actl console for the commands that need no become password --
 a syntax check and a ping -- with a free-form box for anything else, which a
 privileged deploy still needs a real terminal for.
+
+Both work on the checkout named by settings.repo_root, read afresh each time,
+so that an installed app -- which has no repo of its own -- can be pointed at
+one in Settings without a restart. Until it is, the tab says so.
 """
 
 import os
@@ -18,6 +22,11 @@ from .. import paths
 from ..core import config_file
 from ..bridges.process_runner import ActlRunner
 
+_NO_CHECKOUT = (
+    "No playstick checkout to work on (repo root: %s).\n\n"
+    "This tab edits the repo's group_vars and runs its actl, so it needs a "
+    "clone of the playstick repo. Set \"Repo root\" in Settings to one.")
+
 
 class ConfigTab(QWidget):
     def __init__(self, settings, parent=None):
@@ -26,8 +35,7 @@ class ConfigTab(QWidget):
         self._doc = None
         self._path = ""
         self._widgets = {}          # key -> (widget, original_value)
-        self._runner = ActlRunner(settings.repo_root or paths.REPO_ROOT,
-                                  paths.ACTL, self)
+        self._runner = ActlRunner(self)
         self._runner.output.connect(self._append_console)
         self._runner.finished.connect(lambda _c: self._set_running(False))
         self._build()
@@ -48,8 +56,8 @@ class ConfigTab(QWidget):
 
         top = QHBoxLayout()
         self._file_pick = QComboBox()
-        self._file_pick.addItem("group_vars/all.yml", paths.GROUP_VARS)
-        self._file_pick.addItem("host_vars/vivostick/local.yml", paths.HOST_VARS)
+        self._file_pick.addItem("group_vars/all.yml", paths.group_vars)
+        self._file_pick.addItem("host_vars/vivostick/local.yml", paths.host_vars)
         self._file_pick.currentIndexChanged.connect(self._reload_file)
         reload_btn = QPushButton("Reload")
         reload_btn.clicked.connect(self._reload_file)
@@ -72,11 +80,25 @@ class ConfigTab(QWidget):
         layout.addWidget(self._form_area, 1)
         return page
 
+    def refresh(self):
+        """Re-read the file, for when Settings may have named another repo."""
+        self._reload_file()
+
     def _reload_file(self):
-        self._path = self._file_pick.currentData()
+        root = self._settings.repo_root
         self._widgets = {}
         host = QWidget()
         vbox = QVBoxLayout(host)
+        if not paths.is_checkout(root):
+            self._doc = None
+            self._path = ""
+            self._status.setText("")
+            vbox.addWidget(QLabel(_NO_CHECKOUT % (root or "not set")))
+            vbox.addStretch(1)
+            self._form_host = host
+            self._form_area.setWidget(host)
+            return
+        self._path = self._file_pick.currentData()(root)
         if not self._path or not os.path.isfile(self._path):
             self._doc = None
             vbox.addWidget(QLabel("File not found: %s" % self._path))
@@ -220,8 +242,12 @@ class ConfigTab(QWidget):
     def _run(self, command):
         if self._runner.is_running():
             return
+        root = self._settings.repo_root
+        if not paths.is_checkout(root):
+            self._append_console(_NO_CHECKOUT % (root or "not set") + "\n")
+            return
         self._set_running(True)
-        self._runner.run(command)
+        self._runner.run(root, command)
 
     def _set_running(self, running):
         self._stop_btn.setEnabled(running)

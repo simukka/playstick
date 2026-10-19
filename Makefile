@@ -36,6 +36,8 @@ help:
 	@echo "Host admin app (PySide6):"
 	@echo "  make admin        install (first run) and launch the desktop admin app"
 	@echo "  make admin-clean  remove the admin virtualenv"
+	@echo "  make admin-deb    build dist/playstick-admin_<ver>_all.deb in Docker"
+	@echo "                    and install-test it on Debian 13 and Ubuntu 26.04"
 	@echo ""
 	@echo "The admin app logs everything it does to this terminal: scans, each"
 	@echo "film prepared and how long it took, every file moved onto the share,"
@@ -140,3 +142,10 @@ admin: $(ADMIN_VENV)
 .PHONY: admin-clean
 admin-clean:
 	rm -rf $(ADMIN_VENV)
+
+# The admin app as a .deb on the distribution's own PySide6 -- see
+# scripts/build-deb.sh for which releases that rules in, and why one build
+# serves all of them. Docker only; the version is debian/changelog's.
+.PHONY: admin-deb
+admin-deb:
+	./scripts/build-deb.sh

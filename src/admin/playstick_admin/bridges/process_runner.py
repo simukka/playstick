@@ -15,42 +15,46 @@ import os
 
 from PySide6.QtCore import QObject, QProcess, Signal
 
+from .. import paths
+
 
 class ActlRunner(QObject):
     output = Signal(str)
     started = Signal(str)           # the command line that was launched
     finished = Signal(int)          # exit code
 
-    def __init__(self, repo_root, actl_path, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._repo_root = repo_root
-        self._actl = actl_path
         self._proc = None
 
     def is_running(self):
         return self._proc is not None and \
             self._proc.state() != QProcess.NotRunning
 
-    def run(self, command):
-        """Launch `./actl '<command>'`, or `./actl` with no argument when
-        command is empty (its default syntax-check). No-op if one is already
-        running."""
+    def run(self, repo_root, command):
+        """Launch `./actl '<command>'` in repo_root, or `./actl` with no
+        argument when command is empty (its default syntax-check). No-op if one
+        is already running.
+
+        The repo is an argument rather than fixed at construction because it is
+        a setting, and changing it should not need a restart."""
         if self.is_running():
             self.output.emit("[busy] a command is already running\n")
             return
+        actl = paths.actl(repo_root)
         proc = QProcess(self)
-        proc.setWorkingDirectory(self._repo_root)
+        proc.setWorkingDirectory(repo_root)
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.readyReadStandardOutput.connect(self._drain)
         proc.finished.connect(self._on_finished)
         proc.errorOccurred.connect(self._on_error)
         self._proc = proc
         args = [command] if command else []
-        display = "%s %s" % (os.path.basename(self._actl),
+        display = "%s %s" % (os.path.basename(actl),
                              repr(command) if command else "(syntax check)")
         self.started.emit(display)
         self.output.emit("$ %s\n" % display)
-        proc.start(self._actl, args)
+        proc.start(actl, args)
 
     def stop(self):
         if self.is_running():

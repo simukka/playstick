@@ -16,6 +16,10 @@ dependencies = [
 playstick-admin = "playstick_admin.__main__:main"
 
 [tool.setuptools]
+# The preparer, as a top-level module beside the package. playstick_prep.py
+# here is a symlink to src/prep/playstick_prep.py; a built wheel carries the
+# file itself, so an installed app needs no checkout -- see paths.py.
+py-modules = ["playstick_prep"]
 packages = [
     "playstick_admin",
     "playstick_admin.bridges",
