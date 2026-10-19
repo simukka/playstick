@@ -516,16 +516,12 @@ class PrepareTab(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        for label, icon, slot in (
-                ("Move up", "up", lambda: self._move(-1)),
-                ("Move down", "down", lambda: self._move(1)),
-                ("Remove", "trash", self._remove_job),
-                ("Retry failed", "refresh", self._retry_failed),
-                ("Clear finished", "check", self._clear_finished)):
-            button = QPushButton(label)
-            button.setIcon(icons.icon(icon, "#C9D2E6"))
-            button.clicked.connect(slot)
-            row.addWidget(button)
+        # Moving, removing and retrying are on each row's right-click menu,
+        # where they apply to the job they are pointed at.
+        clear = QPushButton("Clear finished")
+        clear.setIcon(icons.icon("check", "#C9D2E6"))
+        clear.clicked.connect(self._clear_finished)
+        row.addWidget(clear)
         row.addStretch(1)
         self._stop_btn = QPushButton("Stop after this film")
         self._stop_btn.setObjectName("danger")
@@ -887,14 +883,6 @@ class PrepareTab(QWidget):
                 "That film is being prepared now. \"Cancel this film\" stops it.")
             return
         self.reload()
-
-    def _retry_failed(self):
-        failed = queue.unresolved_failures(self._db)
-        if not failed:
-            return
-        queue.enqueue_many(self._db, [row["item_id"] for row in failed])
-        self.reload()
-        self.start_queue()
 
     def _clear_finished(self):
         queue.clear_finished(self._db)
