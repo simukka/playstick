@@ -23,11 +23,12 @@ ADMIN_PY      := $(ADMIN_VENV)/bin/python
 help:
 	@echo "Playstick GUI:"
 	@echo "  make install      install the UI toolchain (node deps, in Docker)"
-	@echo "  make build        bundle the UI -> src/player/dist/playstick-ui.html"
+	@echo "  make build        build everything: the UI bundle and the .deb"
+	@echo "  make ui           bundle the UI -> src/player/dist/playstick-ui.html"
 	@echo "  make typecheck    type-check the UI"
 	@echo "  make test         run the UI unit tests"
 	@echo "  make bench        run the UI benchmarks"
-	@echo "  make check        typecheck + test + build"
+	@echo "  make check        typecheck + test + ui"
 	@echo "  make gui          build the UI and serve it at http://localhost:8080/"
 	@echo "  make gui-restart  reload the daemon after a Python change"
 	@echo "  make gui-down     stop the gui and drop its volumes"
@@ -81,8 +82,14 @@ $(NODE_MODULES):
 .PHONY: install
 install: $(NODE_MODULES)
 
+# Everything this repo builds. The .deb half runs in Docker and install-tests
+# itself on two releases, so the targets that only need the page -- gui, check --
+# depend on `ui` rather than on this.
 .PHONY: build
-build: $(NODE_MODULES)
+build: ui admin-deb
+
+.PHONY: ui
+ui: $(NODE_MODULES)
 	cd $(PLAYER) && $(DX) npm run build
 
 .PHONY: typecheck
@@ -98,14 +105,14 @@ bench: $(NODE_MODULES)
 	cd $(PLAYER) && $(DX) npm run bench
 
 .PHONY: check
-check: typecheck test build
+check: typecheck test ui
 
 # The gui service bind-mounts dist/playstick-ui.html, so it must exist before the
-# container starts; `build` is a prerequisite. --build so the image also picks up
+# container starts; `ui` is a prerequisite. --build so the image also picks up
 # any Dockerfile or dependency change. Ctrl-C to stop. The page is then served
 # from the mount and reloads live -- no rebuild of the image for a UI edit.
 .PHONY: gui
-gui: build
+gui: ui
 	$(COMPOSE) up --build gui
 
 .PHONY: gui-restart
