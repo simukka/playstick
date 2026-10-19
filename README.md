@@ -50,7 +50,7 @@ Open the stick's address on any phone or tablet on the home network. There is no
 
 ## A desktop app to run the library
 
-The heavy lifting happens on your own computer, not the stick. The **Playstick Admin** app (PySide6, `make admin`) 
+The heavy lifting happens on your own computer, not the stick. The **Playstick** app (PySide6, `make admin`) 
 scans your folders of films, lets you choose what goes on the stick, and prepares each film in the background: 
 probing, re-encoding where the stick needs it, extracting per-language audio, and matching it on TMDb.
 

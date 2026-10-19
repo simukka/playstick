@@ -1,4 +1,4 @@
-Source: playstick-admin
+Source: playstick
 Section: video
 Priority: optional
 Maintainer: simukka <kylesimukka@gmail.com>
@@ -10,7 +10,7 @@ Build-Depends: debhelper-compat (= 13),
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
 
-Package: playstick-admin
+Package: playstick
 Architecture: all
 Depends: ${misc:Depends},
          ${python3:Depends},

@@ -1,4 +1,4 @@
-playstick-admin (0.1.0) unstable; urgency=medium
+playstick (0.1.0) unstable; urgency=medium
 
   * First package of the admin app.
 

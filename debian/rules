@@ -8,7 +8,7 @@
 # The source package is the whole repo; the Python project is src/admin, and
 # its pyproject.toml pulls in the preparer through the symlink beside it.
 
-export PYBUILD_NAME = playstick-admin
+export PYBUILD_NAME = playstick
 # src/admin has no unit tests for pybuild to discover, and an empty discovery
 # is a failure since Python 3.12. The real check is the smoke test that
 # scripts/build-deb.sh runs against the INSTALLED package in each release.
@@ -18,7 +18,7 @@ export PYBUILD_DISABLE = test
 	dh $@ --buildsystem=pybuild --sourcedirectory=src/admin
 
 execute_after_dh_auto_install:
-	install -D -m 0644 src/admin/playstick-admin.desktop \
-		debian/playstick-admin/usr/share/applications/playstick-admin.desktop
+	install -D -m 0644 src/admin/playstick.desktop \
+		debian/playstick/usr/share/applications/playstick.desktop
 	install -D -m 0644 icon.svg \
-		debian/playstick-admin/usr/share/icons/hicolor/scalable/apps/playstick-admin.svg
+		debian/playstick/usr/share/icons/hicolor/scalable/apps/playstick.svg

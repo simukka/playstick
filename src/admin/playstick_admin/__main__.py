@@ -1,4 +1,4 @@
-"""Entry point: `python -m playstick_admin` or the `playstick-admin` script.
+"""Entry point: `python -m playstick_admin` or the `playstick` script.
 
 Logging is set up before anything else, and before the QApplication, so that a
 failure while the window is being built has somewhere to go. `make admin` runs
@@ -30,7 +30,7 @@ def main(argv=None):
     QCoreApplication.setApplicationName(settings_mod.APP)
     # Names the .desktop file the package installs, which is how a Wayland
     # shell matches this window to its launcher and icon.
-    QGuiApplication.setDesktopFileName("playstick-admin")
+    QGuiApplication.setDesktopFileName("playstick")
     app = QApplication(argv)
     # Imported here so a headless import of this module (e.g. in a test) does
     # not require the widgets to be constructed.
@@ -39,7 +39,7 @@ def main(argv=None):
     # Said once, at the top, because every question that starts "why is it
     # doing that" is answered by one of these three and none of them is
     # visible in the window.
-    LOG.info("playstick admin starting; logging at %s",
+    LOG.info("playstick starting; logging at %s",
              logging.getLevelName(level))
     LOG.info("library: %s", paths.db_path())
 

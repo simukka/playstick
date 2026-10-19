@@ -580,7 +580,7 @@ class WhatTheTerminalSees(unittest.TestCase):
     that with a decision in them: which level, and what one line looks like."""
 
     def test_the_default_is_the_running_commentary_and_not_the_firehose(self):
-        self.assertEqual(log_setup.level_from(["playstick-admin"], {}),
+        self.assertEqual(log_setup.level_from(["playstick"], {}),
                          logging.INFO)
 
     def test_the_environment_turns_it_up(self):

@@ -2,7 +2,7 @@
 # Build the admin app's .deb in a container, then install it in a fresh
 # container of every release it is meant for and run the smoke test there.
 #
-#   make admin-deb                       # -> dist/playstick-admin_<ver>_all.deb
+#   make admin-deb                       # -> dist/playstick_<ver>_all.deb
 #   TEST_IMAGES=debian:trixie make admin-deb
 #
 # WHICH RELEASES, AND WHY ONLY THOSE
@@ -64,7 +64,7 @@ source_tar | docker run --rm -i -v "$OUT:/out" "$BUILD_IMAGE" bash -euc '
 '
 
 VERSION="$(sed -n '1s/^[^(]*(\([^)]*\)).*/\1/p' "$ROOT/debian/changelog")"
-DEB="playstick-admin_${VERSION}_all.deb"
+DEB="playstick_${VERSION}_all.deb"
 [ -f "$OUT/$DEB" ] || { echo "expected $OUT/$DEB, not found" >&2; exit 1; }
 
 # The smoke test alone in a directory, so it imports the installed package and
@@ -77,7 +77,7 @@ for image in $TEST_IMAGES; do
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -qq -y --no-install-recommends "/tmp/'"$DEB"'" >/dev/null
-    command -v playstick-admin
+    command -v playstick
     cd /tmp/smoke && QT_QPA_PLATFORM=offscreen python3 -I smoke_test.py
   '
 done

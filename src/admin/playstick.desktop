@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=Playstick Admin
+Name=Playstick
 Comment=Prepare films and manage the playstick library
-Exec=playstick-admin
-Icon=playstick-admin
+Exec=playstick
+Icon=playstick
 Terminal=false
 Categories=AudioVideo;Video;
