@@ -30,18 +30,23 @@ import { EPISODE_CSS } from "./episode-sheet";
    bar draws where the jump would land before it happens. */
 const BASE = `
 :root {
-  --bg: #0b0b0d;
-  --card: #17171c;
-  --ink: #f2f2f5;
-  --dim: #9a9aa8;
-  --accent: #4da3ff;
-  --stop: #d8443c;
+  --bg: #07080f;
+  --card: #111624;
+  --card2: #171e31;
+  --line: #222b42;
+  --ink: #f2f4fa;
+  --dim: #8e9bb8;
+  --accent: #2f7bff;
+  --stop: #e5484d;
+  /* The wordmark's run of colour, for the few things that are the one thing
+     on screen to press: play, and the bars that say how far along it is. */
+  --grad: linear-gradient(90deg, #12c6f3 0%, #4f6bff 34%, #b23ff0 66%, #ff7a2f 100%);
 }
 * { box-sizing: border-box; }
 html, body {
   margin: 0; padding: 0; height: 100%;
   background: var(--bg); color: var(--ink);
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   /* A child taps twice, drags, and long-presses. None of that should zoom the
      page, select text, or flash a grey box. */
   touch-action: manipulation;

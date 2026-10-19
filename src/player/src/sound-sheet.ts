@@ -17,6 +17,7 @@ export const SOUND_CSS = `
 #syncRow.on { display: flex; }
 #syncRow button {
   width: 76px; min-height: 60px; border-radius: 16px; background: var(--card);
+  border: 1px solid var(--line);
   font-size: 28px; font-weight: 700;
 }
 #syncVal { flex: 1; text-align: center; font-size: 19px; font-variant-numeric: tabular-nums; }
@@ -28,8 +29,8 @@ export const SOUND_CSS = `
 #tapToListen {
   position: fixed; z-index: 25; left: 12px; right: 12px;
   bottom: calc(12px + env(safe-area-inset-bottom));
-  min-height: 84px; border-radius: 20px; background: var(--accent);
-  color: #06121f; font-size: 22px; font-weight: 700; letter-spacing: .4px;
+  min-height: 84px; border-radius: 20px; background: var(--grad);
+  color: #fff; font-size: 22px; font-weight: 700; letter-spacing: .4px;
   display: none;
 }
 #tapToListen.on { display: block; }

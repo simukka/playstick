@@ -150,14 +150,14 @@ describe("the page boots", () => {
     expect(p.doc.head.querySelectorAll("style")).toHaveLength(1);
     // The tokens are asserted as text: jsdom computes styles but does not
     // resolve var(), so a rule painted from one reads as empty here.
-    expect(p.sheet).toContain("--accent: #4da3ff;");
+    expect(p.sheet).toContain("--accent: #2f7bff;");
     expect(p.sheet).toMatch(/#stop \{[^}]*background: var\(--stop\)/);
-    expect(p.sheet).toMatch(/#toggle \{[^}]*background: var\(--accent\)/);
+    expect(p.sheet).toMatch(/#toggle \{[^}]*background: var\(--grad\)/);
+    expect(p.sheet).toMatch(/#bar \{[^}]*background: var\(--card2\)/);
     // Everything else is a real computed value off a real cascade.
     expect(p.css("grid").display).toBe("grid");
-    expect(p.css("sheet").backgroundColor).toBe("rgb(27, 27, 33)");
-    expect(p.css("sheetScrim").backgroundColor).toBe("rgba(0, 0, 0, 0.6)");
-    expect(p.css("bar").backgroundColor).toBe("rgb(38, 38, 46)");
+    expect(p.css("sheet").backgroundColor).toBe("rgb(12, 16, 28)");
+    expect(p.css("sheetScrim").backgroundColor).toBe("rgba(3, 4, 10, 0.7)");
   });
 
   it("shows the grid and hides the other two views", async () => {
@@ -197,18 +197,20 @@ describe("the sheets, from a real tap", () => {
     expect(p.el("genreList").children).toHaveLength(3); // Everything + 2 kinds
   });
 
-  it("filters the grid, says so on the chip, and clears from the chip", async () => {
+  it("filters the grid, says so on the genre chips, and All clears it", async () => {
     const p = await boot();
     p.tap("filterBtn");
     (p.el("genreList").children[1] as HTMLElement).click();
     expect(p.el("grid").children).toHaveLength(1);
-    expect(p.css("filterChip").display).toBe("flex");
-    expect(p.el("filterChip").textContent).toMatch(/^Anime/);
+    const chips = [...p.el("chips").children] as HTMLElement[];
+    expect(chips.find((c) => c.classList.contains("sel"))!.textContent).toBe("Anime");
+    // The chip row says it, so the strip below it does not repeat it.
+    expect(p.css("filterChip").display).toBe("none");
     expect(p.el("filterBtn").classList.contains("live")).toBe(true);
 
-    p.tap("filterChip");
+    chips.find((c) => c.textContent === "All")!.click();
     expect(p.el("grid").children).toHaveLength(2);
-    expect(p.css("filterChip").display).toBe("none");
+    expect(p.el("filterBtn").classList.contains("live")).toBe(false);
   });
 
   it("keeps one sheet up at a time, and the scrim shuts it", async () => {

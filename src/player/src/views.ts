@@ -37,7 +37,7 @@ export const BANNER_CSS = `
    pressed by whoever is holding the phone, standing up, in the dark. */
 #bannerAct {
   display: none; width: 100%; margin: 12px 0 2px; min-height: 64px;
-  border-radius: 14px; background: var(--accent); color: #06121f;
+  border-radius: 14px; background: var(--grad); color: #fff;
   font-size: 20px; font-weight: 650;
   transition: transform .08s ease;
 }
@@ -57,7 +57,8 @@ export const PREPARING_CSS = `
 #preparing { text-align: center; }
 #prepArt {
   width: min(50vw, 240px); aspect-ratio: 2 / 3; margin: 22px auto 0;
-  border-radius: 14px; background: var(--card); object-fit: cover; display: block;
+  border-radius: 18px; background: var(--card); object-fit: cover; display: block;
+  border: 1px solid var(--line); box-shadow: 0 18px 50px rgba(0,0,0,.55);
 }
 #prepTitle {
   font-size: 24px; font-weight: 700; margin: 18px 8px 6px; line-height: 1.2;
@@ -68,12 +69,12 @@ export const PREPARING_CSS = `
    bar that crept to nine tenths and stopped would be a lie a child can see
    through -- the second time it happens they stop believing the screen. */
 #prepBar {
-  height: 6px; border-radius: 3px; background: #26262e;
+  height: 8px; border-radius: 4px; background: var(--card2);
   margin: 24px 4px 0; overflow: hidden;
 }
 #prepBar i {
-  display: block; height: 100%; width: 38%; border-radius: 3px;
-  background: var(--accent); animation: sweep 1.7s ease-in-out infinite;
+  display: block; height: 100%; width: 38%; border-radius: 4px;
+  background: var(--grad); animation: sweep 1.7s ease-in-out infinite;
 }
 @keyframes sweep {
   from { transform: translateX(-110%); }
@@ -88,6 +89,7 @@ export const PREPARING_CSS = `
 #prepCancel {
   display: block; width: 100%; margin: 32px auto 0; max-width: 420px;
   min-height: 84px; border-radius: 20px; background: var(--card);
+  border: 1px solid var(--line);
   color: var(--dim); font-size: 22px; font-weight: 650;
   transition: transform .08s ease;
 }
@@ -97,15 +99,16 @@ export const PREPARING_CSS = `
 export const PLAYING_CSS = `
 #playing { text-align: center; }
 #nowTitle {
-  font-size: 26px; font-weight: 700; margin: 26px 8px 4px; line-height: 1.2;
+  font-size: 30px; font-weight: 750; margin: 26px 8px 4px; line-height: 1.15;
 }
 #nowSub { color: var(--dim); font-size: 17px; margin-bottom: 26px; }
 #bar {
-  position: relative; height: 6px; border-radius: 3px; background: #26262e;
+  position: relative; height: 8px; border-radius: 4px; background: var(--card2);
   margin: 0 4px 10px;
 }
 #barFill {
-  height: 100%; width: 0; background: var(--accent); border-radius: 3px;
+  height: 100%; width: 0; background: var(--grad); border-radius: 4px;
+  background-size: 100vw 100%;
   transition: width .8s linear;
 }
 /* Where a skip would land. Deliberately without #barFill's transition: this one
@@ -129,7 +132,8 @@ export const PLAYING_CSS = `
 }
 #toggle {
   width: min(42vw, 200px); aspect-ratio: 1; border-radius: 50%;
-  background: var(--accent); color: #06121f;
+  background: var(--grad); color: #fff;
+  box-shadow: 0 14px 44px rgba(91, 80, 255, .35);
   display: inline-flex; align-items: center; justify-content: center;
   font-size: min(18vw, 88px); line-height: 1;
   transition: transform .08s ease;
@@ -143,16 +147,17 @@ export const PLAYING_CSS = `
    still holding it, and :active does not always agree. */
 #skipBack, #skipFwd {
   width: min(24vw, 108px); aspect-ratio: 1; border-radius: 50%;
-  background: var(--card); color: var(--ink);
+  background: var(--card); color: var(--ink); border: 1px solid var(--line);
   display: inline-flex; align-items: center; justify-content: center;
   flex: 0 0 auto; transition: transform .08s ease, background .12s ease;
 }
 #skipBack svg, #skipFwd svg { width: 58%; height: 58%; display: block; }
-#skipBack.held, #skipFwd.held { background: #2f2f3a; transform: scale(.94); }
+#skipBack.held, #skipFwd.held { background: var(--card2); transform: scale(.94); }
 
 #stop {
   display: block; width: 100%; margin: 34px auto 0; max-width: 420px;
-  min-height: 96px; border-radius: 20px; background: var(--stop);
+  min-height: 96px; border-radius: 22px; background: var(--stop);
+  box-shadow: 0 12px 34px rgba(229, 72, 77, .28);
   font-size: 26px; font-weight: 700; letter-spacing: .5px;
 }
 #stop:active { transform: scale(.97); }
@@ -161,7 +166,7 @@ export const PLAYING_CSS = `
 #volume.on { display: flex; }
 #volume button {
   flex: 1; min-height: 72px; border-radius: 18px; background: var(--card);
-  font-size: 32px; font-weight: 700;
+  border: 1px solid var(--line); font-size: 32px; font-weight: 700;
 }
 `;
 

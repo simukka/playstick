@@ -114,6 +114,9 @@ export interface TileItem {
   /** Whose poster to draw, when it is not the tile's own id: a series tile has
    * no row of its own on the daemon, and borrows its first episode's. */
   thumb?: string;
+  /** Drawn under the title, from a data attribute rather than an element of
+   * its own: a tile is three nodes, and the churn tests count them. */
+  year?: number | string | null;
 }
 
 interface Tile {
@@ -198,6 +201,9 @@ export class Grid {
 
     const label = this.doc.createElement("span");
     label.textContent = it.title;
+    if (it.year) {
+      root.setAttribute("data-year", String(it.year));
+    }
 
     root.appendChild(img);
     root.appendChild(label);

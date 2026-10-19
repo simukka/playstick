@@ -51,7 +51,8 @@ describe("LibraryView", () => {
     v.render();
     const chip = doc.getElementById("filterChip")!;
     expect(chip.classList.contains("on")).toBe(true);
-    expect(chip.children[0]!.textContent).toBe("Anime \u00b7 headphones");
+    // The genre is on the chip row above, selected, so the strip leaves it out.
+    expect(chip.children[0]!.textContent).toBe("headphones");
     expect(doc.getElementById("filterBtn")!.classList.contains("live")).toBe(true);
   });
 

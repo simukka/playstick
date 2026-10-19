@@ -11,7 +11,8 @@ export const FILTER_CSS = `
 #fsheetNote { color: var(--dim); font-size: 16px; line-height: 1.45; padding: 6px 14px 2px; }
 #filterClear {
   display: block; width: 100%; margin: 14px 0 2px; min-height: 56px;
-  border-radius: 14px; background: var(--card); font-size: 17px;
+  border-radius: 14px; background: var(--grad); color: #fff;
+  font-size: 17px; font-weight: 650;
 }
 `;
 

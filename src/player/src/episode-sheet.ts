@@ -23,10 +23,11 @@ export const EPISODE_CSS = `
   -webkit-overflow-scrolling: touch;
 }
 #esheetSeasons button {
-  flex: none; min-height: 48px; padding: 0 18px; border-radius: 24px;
-  background: var(--card); font-size: 17px; font-weight: 600;
+  flex: none; min-height: 44px; padding: 0 18px; border-radius: 12px;
+  background: var(--card); border: 1px solid var(--line);
+  font-size: 16px; font-weight: 600;
 }
-#esheetSeasons button.sel { background: var(--accent); color: #06121f; }
+#esheetSeasons button.sel { background: var(--accent); border-color: var(--accent); color: #fff; }
 `;
 
 export function seasonName(season: number): string {

@@ -18,7 +18,7 @@ export const SHEET_CSS = `
   position: fixed; z-index: 20;
   top: calc(10px + env(safe-area-inset-top));
   width: 52px; height: 52px; border-radius: 50%;
-  background: var(--card); color: var(--ink);
+  background: var(--card); color: var(--ink); border: 1px solid var(--line);
   display: none; align-items: center; justify-content: center;
 }
 /* The funnel and the CC button share a slot, and never collide: the funnel
@@ -27,14 +27,14 @@ export const SHEET_CSS = `
 #audioBtn { right: 12px; }
 #filterBtn.on, #audioBtn.on, #subsBtn.on { display: inline-flex; }
 #filterBtn.live, #audioBtn.live, #subsBtn.live {
-  background: var(--accent); color: #06121f;
+  background: var(--accent); border-color: var(--accent); color: #fff;
 }
 #filterBtn svg { width: 24px; height: 24px; display: block; }
 #audioBtn svg { width: 26px; height: 26px; display: block; }
 #subsBtn svg { width: 26px; height: 26px; display: block; }
 
 #sheetScrim {
-  position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.6);
+  position: fixed; inset: 0; z-index: 30; background: rgba(3,4,10,.7);
   display: none;
 }
 #sheetScrim.on { display: block; }
@@ -43,30 +43,42 @@ export const SHEET_CSS = `
    Only ever one of them open at a time. */
 .sheet {
   position: fixed; z-index: 31; left: 0; right: 0; bottom: 0;
-  background: #1b1b21; border-radius: 22px 22px 0 0;
-  padding: 8px 12px calc(18px + env(safe-area-inset-bottom));
+  background: #0c101c; border-radius: 24px 24px 0 0;
+  border-top: 1px solid var(--line);
+  padding: 8px 16px calc(18px + env(safe-area-inset-bottom));
   max-height: 82vh; overflow-y: auto;
   display: none;
 }
 .sheet.on { display: block; }
 .grip {
-  width: 44px; height: 5px; border-radius: 3px; background: #3a3a45;
+  width: 44px; height: 5px; border-radius: 3px; background: #2e3852;
   margin: 8px auto 4px;
 }
 .sheet h2 {
-  font-size: 14px; font-weight: 700; letter-spacing: .8px;
-  text-transform: uppercase; color: var(--dim); margin: 18px 6px 8px;
+  font-size: 17px; font-weight: 700; color: var(--ink); margin: 20px 4px 10px;
 }
 /* Rows are big for the same reason the poster tiles are: a child in a dark
-   room is the person using this. */
+   room is the person using this. A run of them is one card with rules between,
+   each with a box on the right that is filled for the one that is chosen. */
 .row {
   display: flex; align-items: center; gap: 14px; width: 100%;
-  min-height: 62px; padding: 0 14px; border-radius: 14px;
-  font-size: 19px; text-align: left;
+  min-height: 60px; padding: 0 16px; text-align: left; font-size: 18px;
+  background: var(--card); border-bottom: 1px solid var(--line);
 }
-.row:active { background: #26262e; }
-.row.sel { background: #26262e; }
-.row .tick { margin-left: auto; color: var(--accent); font-size: 22px; }
+.row:first-of-type { border-radius: 14px 14px 0 0; }
+.row:last-of-type { border-radius: 0 0 14px 14px; border-bottom: 0; }
+.row:only-of-type { border-radius: 14px; }
+.row:active { background: var(--card2); }
+.row::after {
+  content: ""; flex: none; margin-left: auto; width: 22px; height: 22px;
+  border-radius: 6px; border: 1.5px solid #4a5878;
+}
+.row.sel::after { display: none; }
+.row .tick {
+  margin-left: auto; flex: none; width: 22px; height: 22px; border-radius: 6px;
+  background: var(--accent); color: #fff; font-size: 15px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+}
 .row .sub { display: block; font-size: 14px; color: var(--dim); margin-top: 2px; }
 .row .grow { flex: 1; min-width: 0; }
 `;

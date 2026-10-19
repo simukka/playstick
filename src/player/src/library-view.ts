@@ -8,31 +8,63 @@ import type { LibraryModel } from "./library";
 import { WORDMARK } from "./brand";
 
 export const LIBRARY_CSS = `
-h1 { font-size: 22px; margin: 18px 4px 12px; font-weight: 650; letter-spacing: .2px; }
+h1 { font-size: 22px; margin: 18px 4px 6px; font-weight: 650; letter-spacing: .2px; }
 /* The wordmark, lined up with the round buttons beside it rather than with
    the text it replaced. */
 h1 svg { display: block; height: 28px; width: auto; margin-top: 6px; }
+#libHead { margin: 18px 4px 14px; }
+#libHead h2 { font-size: 30px; font-weight: 750; margin: 0; letter-spacing: .1px; }
+#libCount { color: var(--dim); font-size: 16px; margin-top: 2px; }
+
+/* The genres, one tap each, in a row that scrolls sideways rather than wraps:
+   the same filter as the sheet's Kind list, without opening the sheet. */
+#chips {
+  display: flex; gap: 8px; overflow-x: auto; margin: 0 -12px 16px;
+  padding: 2px 16px 4px; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+}
+#chips::-webkit-scrollbar { display: none; }
+#chips button {
+  flex: none; min-height: 44px; padding: 0 18px; border-radius: 12px;
+  background: var(--card); border: 1px solid var(--line);
+  font-size: 15px; font-weight: 550; color: #c9d2e6;
+}
+#chips button.sel { background: var(--accent); border-color: var(--accent); color: #fff; }
+
 #grid {
   display: grid; gap: 14px;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
 }
+/* The poster is the tile: the title and year sit on it, over a fade to black
+   at the bottom so they read on any artwork. */
 .tile {
-  display: block; width: 100%; text-align: left;
-  border-radius: 16px; overflow: hidden; background: var(--card);
+  position: relative; display: block; width: 100%; text-align: left;
+  border-radius: 18px; overflow: hidden; background: var(--card);
+  border: 1px solid var(--line);
   transition: transform .08s ease;
 }
 .tile:active { transform: scale(.96); }
 .tile img {
   display: block; width: 100%; aspect-ratio: 2 / 3; object-fit: cover;
-  background: #202028;
+  background: var(--card2);
+}
+.tile::before {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 55%;
+  background: linear-gradient(to bottom, rgba(7,8,15,0), rgba(7,8,15,.92));
+  pointer-events: none;
 }
 .tile span {
-  display: block; padding: 10px 10px 12px; font-size: 16px; line-height: 1.25;
-  font-weight: 600;
+  position: absolute; left: 12px; right: 12px; bottom: 32px;
+  font-size: 17px; line-height: 1.2; font-weight: 700;
+  text-shadow: 0 1px 6px rgba(0,0,0,.6);
   /* Two lines, then ellipsis: a long filename must not push the grid around. */
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.tile::after {
+  content: attr(data-year); position: absolute; left: 12px; bottom: 11px;
+  font-size: 14px; color: #c9d2e6;
+}
+.tile:not([data-year]) span { bottom: 12px; }
 #grid.blocked { opacity: .35; pointer-events: none; }
 #empty { color: var(--dim); font-size: 18px; padding: 40px 8px; line-height: 1.5; }
 /* The grid is empty because of a filter, not because the library is. Big,
@@ -40,15 +72,16 @@ h1 svg { display: block; height: 28px; width: auto; margin-top: 6px; }
    have to find the funnel again to undo it. */
 #emptyClear {
   display: none; margin: 8px auto 0; min-height: 68px; width: 100%;
-  max-width: 420px; border-radius: 18px; background: var(--card);
+  max-width: 420px; border-radius: 18px; background: var(--grad); color: #fff;
   font-size: 19px; font-weight: 650;
 }
 #emptyClear.on { display: block; }
 
 #filterChip {
   display: none; align-items: center; gap: 10px;
-  margin: 0 4px 12px; padding: 12px 16px; border-radius: 14px;
-  background: var(--card); font-size: 17px; width: 100%; text-align: left;
+  margin: 0 4px 14px; padding: 12px 16px; border-radius: 14px;
+  background: var(--card); border: 1px solid var(--line);
+  font-size: 17px; width: 100%; text-align: left;
 }
 #filterChip.on { display: flex; }
 #filterChip .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
@@ -67,6 +100,9 @@ export class LibraryView {
   private readonly emptyClear: HTMLElement;
   private readonly chip: HTMLElement;
   private chipText = "";
+  private readonly count: HTMLElement;
+  private readonly chips: HTMLElement;
+  private chipsKey = "";
 
   constructor(
     doc: Document,
@@ -96,8 +132,12 @@ export class LibraryView {
       type: "button",
       onTap: () => this.clearFilters(),
     });
+    this.count = h(doc, "div", { id: "libCount" });
+    this.chips = h(doc, "div", { id: "chips" });
     this.root = h(doc, "div", { id: "library", class: "view on" }, [
       h(doc, "h1", { html: WORDMARK }),
+      h(doc, "div", { id: "libHead" }, [h(doc, "h2", { text: "Library" }), this.count]),
+      this.chips,
       this.chip,
       this.gridEl,
       this.empty,
@@ -119,7 +159,46 @@ export class LibraryView {
     }
     // Only ever offered when clearing would actually bring films back.
     toggleClass(this.emptyClear, "on", items.length === 0 && emptyByFilter);
+    setText(this.count, items.length === 1 ? "1 film" : items.length + " films");
     this.paintChip();
+    this.paintChips();
+  }
+
+  /** "All" and each genre, the most-stocked first. Rebuilt only when the
+   * genres or the choice change, like the filter chip below it. */
+  private paintChips(): void {
+    const genres = this.model.facets.genres;
+    const key = genres.join("\n") + "|" + this.model.genre;
+    if (key === this.chipsKey) {
+      return;
+    }
+    this.chipsKey = key;
+    this.chips.textContent = "";
+    this.chips.hidden = genres.length === 0;
+    if (!genres.length) {
+      return;
+    }
+    const counts = new Map<string, number>();
+    for (const g of genres) {
+      counts.set(g, this.model.count((item) => (item.genres || []).indexOf(g) >= 0));
+    }
+    const ordered = [...genres].sort(
+      (a, b) => counts.get(b)! - counts.get(a)! || a.localeCompare(b),
+    );
+    const chip = (label: string, genre: string): HTMLElement =>
+      h(this.doc, "button", {
+        type: "button",
+        class: this.model.genre === genre ? "sel" : "",
+        text: label,
+        onTap: () => {
+          this.model.setGenre(genre);
+          this.render();
+        },
+      });
+    this.chips.appendChild(chip("All", ""));
+    for (const g of ordered) {
+      this.chips.appendChild(chip(g, g));
+    }
   }
 
   /** The daemon could not reach the NAS: say so where the grid would be. */
@@ -135,10 +214,12 @@ export class LibraryView {
   }
 
   private paintChip(): void {
-    const on = this.model.filtersOn();
+    const filtered = this.model.filtersOn();
+    toggleClass(this.filterBtn, "live", filtered);
+    const text = filtered ? this.describe() : "";
+    // Only for what the genre chips above do not already show.
+    const on = text !== "";
     toggleClass(this.chip, "on", on);
-    toggleClass(this.filterBtn, "live", on);
-    const text = on ? this.describe() : "";
     if (text === this.chipText) {
       return; // no churn when the filter is unchanged
     }
@@ -155,7 +236,8 @@ export class LibraryView {
 
   private describe(): string {
     const parts: string[] = [];
-    if (this.model.genre) {
+    // The chip row says which genre is chosen, when there is one to say it.
+    if (this.model.genre && !this.model.facets.genres.length) {
       parts.push(this.model.genre);
     }
     if (this.model.minScore > 0) {
