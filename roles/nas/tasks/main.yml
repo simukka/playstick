@@ -44,10 +44,13 @@
     # the daemon then rejects would hide the button with no explanation.
     - name: Refuse a MAC address that is not one
       ansible.builtin.assert:
+        # `is regex`, a test, rather than the regex_search filter it replaces:
+        # the filter returns the matched text, and ansible-core 2.19 refuses a
+        # conditional that is a string rather than a boolean.
         that:
-          - nas_mac | regex_search('^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$')
-            or nas_mac | regex_search('^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$')
-            or nas_mac | regex_search('^[0-9A-Fa-f]{12}$')
+          - nas_mac is regex('^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$')
+            or nas_mac is regex('^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$')
+            or nas_mac is regex('^[0-9A-Fa-f]{12}$')
         fail_msg: >-
           nas_mac is "{{ nas_mac }}", which is not a MAC address. It wants six
           hex octets -- "00:11:32:aa:bb:cc", "00-11-32-aa-bb-cc" or
