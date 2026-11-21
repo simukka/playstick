@@ -77,3 +77,62 @@ def group_for(key):
         if any(key.startswith(p) for p in prefixes):
             return label
     return "Other"
+
+
+# The projector variables are picked from a list rather than typed: a model the
+# daemon does not know becomes no projector at all, and an input the projector
+# does not have answers ER401, and both fail quietly. Kept here as well as on
+# the device (src/server/playstick/projector/probe.py) so the form works with
+# the stick switched off; a probe of the stick replaces nothing in these, it
+# only picks from them and adds the serial ports.
+PROJECTOR_MODEL_KEY = "player_projector_model"
+PROJECTOR_DEVICE_KEY = "player_projector_device"
+PROJECTOR_INPUT_KEY = "player_projector_input"
+
+PROJECTOR_MODELS = (
+    ("", "None -- no projector"),
+    ("pt-ae4000", "Panasonic PT-AE4000"),
+    ("pt-ae3000u", "Panasonic PT-AE3000U"),
+)
+
+PROJECTOR_DEVICES = (
+    ("", "Find it -- the first USB serial adapter"),
+)
+
+PROJECTOR_INPUTS = (
+    ("", "Leave the input alone"),
+    ("HD1", "HDMI 1"),
+    ("HD2", "HDMI 2"),
+    ("HD3", "HDMI 3"),
+    ("CP1", "Component 1"),
+    ("CP2", "Component 2 (PT-AE3000U only)"),
+    ("VID", "Composite video"),
+    ("SVD", "S-video"),
+    ("RG1", "Computer (PT-AE4000 only)"),
+)
+
+CHOICES = {
+    PROJECTOR_MODEL_KEY: PROJECTOR_MODELS,
+    PROJECTOR_DEVICE_KEY: PROJECTOR_DEVICES,
+    PROJECTOR_INPUT_KEY: PROJECTOR_INPUTS,
+}
+
+# Typed into as well as picked from: a port the probe cannot see -- the stick
+# switched off, a by-path link somebody prefers -- still has to be enterable.
+EDITABLE_CHOICES = (PROJECTOR_DEVICE_KEY,)
+
+
+def choices_for(key, current):
+    """(value, label) pairs for a select-list key, with `current` kept.
+
+    A value that is not in the table -- an older model name, a hand-edited
+    device path -- is offered as its own entry rather than silently replaced by
+    the first one, so opening the form and pressing Save changes nothing.
+    """
+    options = list(CHOICES[key])
+    value = "" if current is None else str(current)
+    if key == PROJECTOR_INPUT_KEY:
+        value = value.upper()
+    if value not in [v for v, _ in options]:
+        options.append((value, value))
+    return options

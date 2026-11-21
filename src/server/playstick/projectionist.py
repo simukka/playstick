@@ -150,6 +150,11 @@ class Projectionist:
                 "since": round(self._clock() - prep["at"], 1),
             }
 
+    def driver(self):
+        """The driver itself, for /api/admin/projector/probe to ask the port
+        the daemon already holds through the same lock -- see probe.py."""
+        return self._projector
+
     def projector_status(self):
         with self._lock:
             return {"model": self._projector.model,

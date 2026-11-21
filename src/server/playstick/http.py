@@ -44,13 +44,15 @@ from .config import (
     ADMIN_SYNC_MAX, ADMIN_THUMB_CLEAR_RE, ADMIN_THUMB_MAX, ADMIN_THUMB_RE,
     ALLOW_NETWORKS, AUDIO_CHUNK, AUDIO_ROUTE_RE, AUDIO_SLOTS, HAS_AUDIO,
     LIBRARY, PHONE_AUDIO, PHONE_AUDIO_BPS, PHONE_AUDIO_BURST,
-    PHONE_AUDIO_STREAMS, RANGE_RE, RELEASE, SYNC_HEADER, SYNC_KEEP_RE,
+    PHONE_AUDIO_STREAMS, PROJECTOR_DEVICE, PROJECTOR_INPUT, PROJECTOR_MODEL,
+    PROJECTOR_TIMEOUT, RANGE_RE, RELEASE, SYNC_HEADER, SYNC_KEEP_RE,
     SYNC_MAX, SYNC_MAX_RATE, UI_FILE, log
 )
 from .airplay import airplay_active
 from .library import Library
 from .thumbs import placeholder_svg
 from .player import Busy
+from .projector import probe as projector_probe
 
 
 _sync_lock = threading.Lock()
@@ -323,6 +325,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_library()
         if path == "/api/admin/library":
             return self._api_admin_library()
+        if path == "/api/admin/projector/probe":
+            return self._api_admin_projector_probe()
         if path.startswith("/api/thumb/"):
             return self._api_thumb(path[len("/api/thumb/"):])
         if path == "/api/status":
@@ -662,6 +666,21 @@ class Handler(BaseHTTPRequestHandler):
             "films": self.library.rows(),
             "library": LIBRARY,
         })
+
+    def _api_admin_projector_probe(self):
+        """Which serial ports there are, what the HDMI EDID says the screen is,
+        and which port a Panasonic projector answers on -- for the admin app
+        to fill player_projector_model and _device from instead of having
+        them typed. Questions only (QPW, QIN); see projector/probe.py.
+
+        A GET, because nothing changes. Slow by the standards of this file: an
+        adapter with nothing on the far end costs one PROJECTOR_TIMEOUT.
+        """
+        return self._json(projector_probe.probe(
+            live=self.projectionist.driver(),
+            configured={"model": PROJECTOR_MODEL, "device": PROJECTOR_DEVICE,
+                        "input": PROJECTOR_INPUT},
+            timeout=PROJECTOR_TIMEOUT))
 
     def _api_admin_films(self):
         """The library, pushed from the machine that prepared it.
