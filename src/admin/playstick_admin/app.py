@@ -360,6 +360,7 @@ class MainWindow(QMainWindow):
         # verdict may have changed with them.
         release.forget()
         self._device.refresh_release()
+        self._device.refresh_https()
         # A new address means the old verdict is about a machine nobody
         # cares about any more.
         self._monitor.refresh_url()

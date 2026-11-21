@@ -405,6 +405,7 @@ class SiteSettings:
         self.nas_share = kw.get("nas_share", "video")
         self.nas_mac = kw.get("nas_mac", "")
         self.nas_username = kw.get("nas_username", "family")
+        self.tls_name = kw.get("tls_name", "")
 
 
 class WhatTheDeployIsHanded(unittest.TestCase):
@@ -472,6 +473,16 @@ class WhatTheDeployIsHanded(unittest.TestCase):
         with open(site_vars.overrides_path(), "w") as handle:
             handle.write("{not json")
         self.assertEqual(site_vars.load_overrides(), {})
+
+    def test_the_https_name_is_a_site_value_and_empty_means_off(self):
+        settings = SiteSettings()
+        site_vars.write_site(settings)
+        self.assertEqual(self._hostvars(site_vars.site_path())["player_tls_name"],
+                         "")
+        settings.tls_name = "playstick.example.com"
+        site_vars.write_site(settings)
+        self.assertEqual(self._hostvars(site_vars.site_path())["player_tls_name"],
+                         "playstick.example.com")
 
     def test_a_key_is_named_where_the_container_sees_it(self):
         key = os.path.join(self.dir, "stick_ed25519")
@@ -836,3 +847,116 @@ class WhenTheStickAnswersWithAPage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+try:
+    from playstick_admin.views import https_box          # noqa: E402
+except ImportError:                                       # no PySide6 here
+    https_box = None
+
+
+@unittest.skipIf(https_box is None, "needs PySide6")
+class WhatTheHttpsBoxSays(unittest.TestCase):
+    PENDING = {"record": "_acme-challenge.playstick.example.com",
+               "zone": "example.com", "value": "abc", "since": 1000,
+               "wait": 900}
+
+    def test_the_record_name_is_shown_inside_its_zone(self):
+        self.assertEqual(https_box.relative_name(self.PENDING),
+                         "_acme-challenge.playstick")
+        self.assertEqual(https_box.relative_name(
+            dict(self.PENDING, zone="")), self.PENDING["record"])
+
+    def test_waiting_says_how_long_the_stick_will_keep_looking(self):
+        text = https_box.describe({"state": "waiting",
+                                   "pending": self.PENDING}, now=1000 + 60)
+        self.assertIn("Add this TXT record", text)
+        self.assertIn("14 more minutes", text)
+
+    def test_a_renewal_says_it_is_a_renewal(self):
+        text = https_box.describe({"state": "waiting", "certificate": True,
+                                   "expires": 2_000_000_000,
+                                   "pending": self.PENDING}, now=1060)
+        self.assertTrue(text.startswith("Renewal needs a new DNS record."))
+        self.assertIn("valid until", text)
+
+    def test_given_up_asks_for_check_now(self):
+        text = https_box.describe({"state": "record", "pending": self.PENDING})
+        self.assertIn("Check now", text)
+
+    def test_valid_names_the_date_and_flags_staging(self):
+        text = https_box.describe({"state": "valid", "certificate": True,
+                                   "expires": 2_000_000_000, "staging": True})
+        self.assertIn("valid until", text)
+        self.assertIn("staging", text)
+
+    def test_the_last_check_is_one_line_saying_how_it_went(self):
+        self.assertEqual(https_box.describe_last({}), "")
+        self.assertIn("No check has run", https_box.describe_last({"ran": False, "active": "inactive"}))
+        running = {"ran": True, "active": "activating", "started": 0}
+        self.assertTrue(https_box.describe_last(running).startswith("Checking now"))
+        good = {"ran": True, "active": "inactive", "result": "success",
+                "finished": 0, "outcome": "not_due"}
+        self.assertIn("worked: the certificate is not due", https_box.describe_last(good))
+        bad = {"ran": True, "active": "failed", "result": "exit-code",
+               "exit_status": 1, "finished": 0, "outcome": "no_record"}
+        line = https_box.describe_last(bad)
+        self.assertIn("failed (exit 1): the TXT record did not appear", line)
+        self.assertIn("See the log", line)
+
+
+@unittest.skipIf(https_box is None, "needs PySide6")
+class CheckNowReportsBack(unittest.TestCase):
+    """The box after "Check now": waiting, then a verdict and the log."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def box(self):
+        settings = type("S", (), {"tls_name": "playstick.example.com",
+                                  "device_url": ""})()
+        box = https_box.HttpsBox(settings)
+        # As if pressed, without a network call.
+        box._checking_since = https_box._AWAITING
+        box._check.setEnabled(False)
+        return box
+
+    def status(self, **last):
+        return {"state": "valid", "certificate": True, "expires": 2_000_000_000,
+                "now": 1000, "last": dict({"ran": True}, **last)}
+
+    def test_it_waits_for_the_attempt_it_started_not_the_previous_one(self):
+        box = self.box()
+        # The reply to the press: the previous attempt, finished long ago.
+        box.show_status(self.status(active="inactive", result="success", finished=500))
+        self.assertEqual(box._last.text(), "Asking the stick to check...")
+        self.assertFalse(box._check.isEnabled())
+        box.show_status(self.status(active="activating", started=1000))
+        self.assertTrue(box._last.text().startswith("Checking now"))
+        box.show_status(self.status(active="inactive", result="success",
+                                    finished=1003, outcome="not_due",
+                                    log=["Certificate not yet due for renewal"]))
+        self.assertIn("worked", box._last.text())
+        self.assertTrue(box._check.isEnabled())
+        self.assertTrue(box._log.isHidden(), "a good run keeps its log folded")
+        self.assertTrue(box._log_btn.isEnabled())
+
+    def test_a_failure_opens_the_log(self):
+        box = self.box()
+        box.show_status(self.status(active="activating", started=1000))
+        box.show_status(self.status(active="failed", result="exit-code",
+                                    exit_status=1, finished=1900,
+                                    outcome="no_record",
+                                    log=["TXT _acme-challenge.x did not appear within 900s"]))
+        self.assertIn("failed (exit 1)", box._last.text())
+        self.assertFalse(box._log.isHidden())
+        self.assertIn("did not appear", box._log.toPlainText())
+
+    def test_a_stick_that_cannot_report_stops_the_wait(self):
+        box = self.box()
+        box.show_status({"state": "missing", "now": 1000, "last": {}})
+        self.assertTrue(box._check.isEnabled())
+

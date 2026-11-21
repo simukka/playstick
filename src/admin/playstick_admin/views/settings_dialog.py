@@ -195,6 +195,25 @@ class SettingsForm(QWidget):
         share_form.addRow("NAS password", self._nas_password)
         share_form.addRow("NAS MAC address", self._nas_mac)
 
+        # --- HTTPS: optional, so not part of the first-run wizard ------------
+        self._tls_name = QLineEdit(settings.tls_name)
+        self._tls_name.setPlaceholderText(
+            "playstick.example.com -- empty: plain HTTP only")
+        tls = QWidget()
+        tls_form = QFormLayout(tls)
+        tls_form.setContentsMargins(0, 0, 0, 0)
+        tls_note = QLabel(
+            "Serves the phone page at https://<name>/ as well, which browsers "
+            "need before they hand a page the phone's motion sensors. Point "
+            "the name's A record at the stick yourself. After the next update, "
+            "the Device page shows a TXT record to add at your DNS provider; "
+            "Let's Encrypt may ask for a new one at each renewal, about every "
+            "two months.")
+        tls_note.setObjectName("meta")
+        tls_note.setWordWrap(True)
+        tls_form.addRow(tls_note)
+        tls_form.addRow("HTTPS name", self._tls_name)
+
         outer = QVBoxLayout(self)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
@@ -223,7 +242,7 @@ class SettingsForm(QWidget):
                 buttons.addWidget(button)
             self._go(0)
         else:
-            _align(form, ssh_form, share_form)
+            _align(form, ssh_form, share_form, tls_form)
             outer.addWidget(_heading("The share and the stick"))
             outer.addWidget(basics)
             outer.addSpacing(10)
@@ -232,6 +251,9 @@ class SettingsForm(QWidget):
             outer.addSpacing(10)
             outer.addWidget(_heading("The share, as the stick mounts it"))
             outer.addWidget(share)
+            outer.addSpacing(10)
+            outer.addWidget(_heading("HTTPS for the phone page"))
+            outer.addWidget(tls)
             outer.addSpacing(6)
             # Puts back what is saved, for a form somebody has half-edited.
             revert = QPushButton("Revert")
@@ -260,6 +282,7 @@ class SettingsForm(QWidget):
         self._nas_share.setText(s.nas_share)
         self._nas_user.setText(s.nas_username)
         self._nas_mac.setText(s.nas_mac)
+        self._tls_name.setText(s.tls_name)
         self._nas_password.clear()
         self._test_note.clear()
 
@@ -347,6 +370,7 @@ class SettingsForm(QWidget):
         s.nas_share = self._nas_share.text().strip()
         s.nas_username = self._nas_user.text().strip()
         s.nas_mac = self._nas_mac.text().strip()
+        s.tls_name = self._tls_name.text()
         if not self._first_run:
             s.repo_root = self._repo.edit.text().strip()
         site_vars.write_site(s)

@@ -114,6 +114,9 @@ def host_vars(settings):
     out["nas_share"] = settings.nas_share
     out["nas_mac"] = settings.nas_mac
     out["nas_username"] = settings.nas_username
+    # Written when empty, like the NAS values: empty is "HTTPS off", and it
+    # has to win over anything else that might set it.
+    out["player_tls_name"] = getattr(settings, "tls_name", "")
     return out
 
 

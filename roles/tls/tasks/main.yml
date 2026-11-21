@@ -1,0 +1,109 @@
+---
+# A Let's Encrypt certificate for player_tls_name, proved with a DNS record a
+# person adds by hand, so nothing here depends on who hosts the domain. See
+# the HTTPS section of group_vars/all.yml for why, and
+# src/server/playstick/tls.py for how the daemon uses the result.
+#
+# THE DEPLOY DOES NOT WAIT FOR THE RECORD
+#
+# Issuance is a unit, playstick-tls.service, started here without blocking.
+# While Let's Encrypt wants a TXT record the unit sits in its auth hook, which
+# writes the record where the daemon reports it -- the playstick app shows it
+# on the Device page -- and watches the domain's name servers for it. The rest
+# of the deploy carries on meanwhile, so a record nobody has added yet cannot
+# hold up, or fail, an update that is about something else entirely.
+#
+# Everything is skipped while player_tls_name is empty, the default: an
+# appliance nobody has given a name to behaves exactly as it did before this
+# role existed.
+- name: HTTPS is wanted
+  when: player_tls_name | length > 0
+  vars:
+    tls_renewal_conf: "/etc/letsencrypt/renewal/{{ player_tls_name }}.conf"
+  block:
+    - name: Install certbot, and dig for watching the name servers
+      ansible.builtin.apt:
+        name:
+          - certbot
+          - bind9-dnsutils
+        state: present
+
+    - name: Create the hook directory
+      ansible.builtin.file:
+        path: /usr/local/lib/playstick
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the DNS challenge hooks
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "/usr/local/lib/playstick/{{ item }}"
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - playstick-tls-auth-hook
+        - playstick-tls-deploy-hook
+
+    - name: Create the challenge state directory
+      ansible.builtin.file:
+        path: "{{ player_tls_state_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the certificate unit and its timer
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - playstick-tls.service
+        - playstick-tls.timer
+      register: tls_units
+
+    # certbot renew from certbot.timer would run the same auth hook for a
+    # certificate this role issued, so two timers would be two ways of asking
+    # for the same record. One path.
+    - name: Turn off certbot's own renewal timer
+      ansible.builtin.systemd:
+        name: certbot.timer
+        enabled: false
+        state: stopped
+      failed_when: false
+
+    - name: Run the certificate check daily
+      ansible.builtin.systemd:
+        name: playstick-tls.timer
+        enabled: true
+        state: started
+        daemon_reload: "{{ tls_units is changed }}"
+
+    # Switching between staging and the real service: the certificate on disk
+    # is the wrong kind however new it is, and --keep-until-expiring would keep
+    # it. Deleting the lineage makes the next attempt a fresh issuance.
+    - name: Read which Let's Encrypt service issued the current certificate
+      ansible.builtin.slurp:
+        src: "{{ tls_renewal_conf }}"
+      register: tls_renewal
+      failed_when: false
+
+    - name: Replace a certificate from the other Let's Encrypt service
+      ansible.builtin.command:
+        argv: [certbot, delete, --non-interactive, --cert-name, "{{ player_tls_name }}"]
+      when:
+        - tls_renewal.content is defined
+        - ('acme-staging' in (tls_renewal.content | b64decode)) != (player_tls_staging | bool)
+      changed_when: true
+
+    # --no-block: the unit may wait a quarter of an hour for a person. See the
+    # top of this file.
+    - name: Start a certificate check
+      ansible.builtin.command:
+        argv: [systemctl, start, --no-block, playstick-tls.service]
+      changed_when: false

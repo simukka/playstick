@@ -104,6 +104,24 @@ BIND = _get("server", "bind", "0.0.0.0")
 # anything useful.
 PORT = int(_get("server", "port", 8080))
 UI_FILE = _get("server", "ui_file", "/usr/local/share/playstick/ui.html")
+# HTTPS, beside the plain listener rather than instead of it -- see tls.py.
+# Off unless all three are set, which is the default everywhere: the tls role
+# fills them in only once player_tls_name names a certificate it can get.
+TLS_PORT = int(_get("server", "tls_port", 0) or 0)
+TLS_CERT = str(_get("server", "tls_cert", "") or "")
+TLS_KEY = str(_get("server", "tls_key", "") or "")
+# The name the certificate is for, the directory the tls role's challenge hook
+# leaves the TXT record it is waiting for in, and the unit that makes an
+# attempt -- for /api/admin/tls, so the app can show the record and start
+# another attempt. Empty name means HTTPS is off.
+TLS_NAME = str(_get("server", "tls_name", "") or "")
+TLS_STATE_DIR = str(_get("server", "tls_state_dir", "/var/lib/playstick/tls") or "")
+TLS_UNIT = str(_get("server", "tls_unit", "playstick-tls.service") or "")
+
+# The idle clock's unit, which "Show clock" in the page's hidden menu sends
+# SIGUSR1 to: the clock un-blanks and starts its countdown again. See
+# roles/idle/files/uxplay-idle-clock.py.
+IDLE_UNIT = _get("display", "idle_unit", "uxplay-idle.service")
 
 LIBRARY = _get("library", "path", "/srv/movies")
 # How often the daemon checks that the share is still there. Once a walk of

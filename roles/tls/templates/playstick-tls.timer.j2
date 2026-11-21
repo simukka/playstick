@@ -1,0 +1,14 @@
+{{ ansible_managed | comment }}
+# Daily, in place of certbot's own twice-daily timer, which this role turns
+# off: one path to renewal, through the unit that knows about the DNS hook.
+# --keep-until-expiring makes a day with nothing due cost one certbot start.
+[Unit]
+Description=Daily check of the playstick HTTPS certificate
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=2h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

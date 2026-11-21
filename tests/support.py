@@ -357,6 +357,8 @@ class FakeProjectionist:
         self.calls = []
         # Set to an exception instance to make the next begin() raise it.
         self.begin_error = None
+        # ...and power().
+        self.power_error = None
 
     def state(self):
         if self.prepare is not None:
@@ -374,6 +376,14 @@ class FakeProjectionist:
 
     def driver(self):
         return None
+
+    def power(self, on):
+        """Recorded; raises power_error if set, else answers like the real
+        one. The rules themselves are tested in test_projectionist.py."""
+        self.calls.append(("power", on))
+        if self.power_error is not None:
+            raise self.power_error
+        return "Switching on." if on else "Switching off."
 
     def projector_status(self):
         return dict(self.projector)

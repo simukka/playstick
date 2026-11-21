@@ -232,6 +232,52 @@ class Projectionist:
             prep["cancel"].set()
         self._player.stop()
 
+    # -- by hand, from the page's hidden menu
+
+    def power(self, on):
+        """Switch the lamp on or off because somebody asked, and return the
+        sentence the page shows.
+
+        Raises Busy for a request that should not be carried out -- no
+        projector, or off while a film is starting or playing -- and lets a
+        ProjectorError through for one the projector would not take, which the
+        HTTP layer words. Neither waits for the lamp: PON returns as soon as
+        the projector acknowledges, and the keeper's next ticks see it light.
+
+        On, the input is selected the same way an AirPlay wake does it -- owed,
+        and paid by a tick once QPW says the lamp is lit, because the projector
+        is deaf for the first ten seconds. And the idle switch-off counts from
+        now, so the lamp that was asked for is not put out by the keeper on its
+        next pass for an idleness that started an hour ago.
+        """
+        if self._projector.model == "none":
+            raise Busy("No projector is set up on this stick.")
+        if on:
+            self._projector.power_on()
+            with self._lock:
+                self._owe_input = True
+                self._last_activity = self._clock()
+                self._fault = ""
+                # Ahead of the lamp, on purpose: the menu should offer "off"
+                # now rather than "on" again for up to a keeper tick. The next
+                # QPW corrects it if the projector disagrees.
+                self._power = ON
+            log("projector switched on from the page")
+            return "Switching on. The lamp takes a minute to warm up."
+        with self._lock:
+            if self._preparing is not None:
+                raise Busy("A film is starting. Stop it first.")
+        if self._player.state() != "idle":
+            raise Busy("A film is playing. Stop it first.")
+        self._projector.power_off()
+        with self._lock:
+            self._power = STANDBY
+            self._owe_input = False
+            self._last_activity = self._clock()
+            self._fault = ""
+        log("projector switched off from the page")
+        return "Switching off."
+
     # -- the sequence
 
     def _prepare(self, prep):

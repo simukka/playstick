@@ -325,6 +325,14 @@
           - "Movie player: http://{{ ansible_host | default(ansible_hostname) }}{{ player_url_port }}/"
           - "        also: http://{{ ansible_hostname }}.local{{ player_url_port }}/"
           - >-
+            {{ 'HTTPS: https://' ~ player_tls_name
+               ~ ('' if player_tls_port | int == 443 else ':' ~ player_tls_port) ~ '/'
+               ~ (' (STAGING certificate: browsers will warn)' if player_tls_staging | bool else '')
+               ~ ' -- once the certificate is issued. If it is waiting for a TXT
+                  record, the Device page in the playstick app shows it.'
+               if player_tls_name
+               else 'HTTPS: off. See player_tls_name.' }}
+          - >-
             Projector audio is
             {{ 'on, via ' ~ (player_audio_device | default('mpv default', true))
                if player_audio | bool

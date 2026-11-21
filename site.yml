@@ -62,6 +62,9 @@
     # The share before the player, so the library exists to be scanned the
     # moment the daemon starts.
     - nas
+    # The certificate before the player, so the player's settings can name it
+    # -- and so a first deploy issues it and serves HTTPS in the same run.
+    - tls
     # Last of the display consumers: the player has to stop the AirPlay unit
     # to take DRM master, so it asserts that unit is installed, and it needs
     # drm_card_path from graphics and uxplay_port for the mirroring gate.

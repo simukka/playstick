@@ -1,0 +1,10 @@
+#!/bin/sh
+# certbot --deploy-hook: runs once, after a certificate has been issued or
+# renewed. All it does is forget the record the auth hook was waiting for, so
+# the Device page stops asking for it.
+#
+# Nothing is restarted. The daemon notices the new certificate files by itself
+# within a minute (src/server/playstick/tls.py), and restarting it would stop
+# whatever film was playing.
+set -u
+rm -f "${PLAYSTICK_TLS_STATE:-/var/lib/playstick/tls}/pending.json"

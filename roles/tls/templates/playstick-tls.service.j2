@@ -1,0 +1,29 @@
+{{ ansible_managed | comment }}
+# One attempt at the HTTPS certificate for {{ player_tls_name }}: issue it if
+# there is none, renew it if it is due, otherwise nothing. Started daily by
+# playstick-tls.timer, by a deploy, and by "Check now" on the playstick app's
+# Device page (through the daemon). See roles/tls/tasks/main.yml.
+#
+# While Let's Encrypt wants a TXT record, this sits in "activating" for up to
+# player_tls_dns_wait_minutes, in the auth hook, polling the domain's name
+# servers. Starting it again while it waits is a no-op, which is what makes the
+# Device page's button safe to press twice.
+[Unit]
+Description=HTTPS certificate for the playstick page
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PLAYSTICK_TLS_STATE={{ player_tls_state_dir }}
+Environment=PLAYSTICK_TLS_WAIT={{ (player_tls_dns_wait_minutes | float * 60) | int }}
+ExecStart=/usr/bin/certbot certonly --non-interactive --agree-tos \
+    --register-unsafely-without-email \
+    --cert-name {{ player_tls_name }} -d {{ player_tls_name }} \
+    --manual --preferred-challenges dns \
+    --manual-auth-hook /usr/local/lib/playstick/playstick-tls-auth-hook \
+    --deploy-hook /usr/local/lib/playstick/playstick-tls-deploy-hook \
+    --keep-until-expiring{% if player_tls_staging | bool %} --staging{% endif %}
+
+# The wait is the hook's; this only stops a hung certbot outliving it badly.
+TimeoutStartSec={{ (player_tls_dns_wait_minutes | float * 60) | int + 300 }}

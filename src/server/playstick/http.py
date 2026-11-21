@@ -32,9 +32,11 @@ film table.
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
+import ssl
 import threading
 import time
 from http.server import BaseHTTPRequestHandler
@@ -46,12 +48,16 @@ from .config import (
     LIBRARY, PHONE_AUDIO, PHONE_AUDIO_BPS, PHONE_AUDIO_BURST,
     PHONE_AUDIO_STREAMS, PROJECTOR_DEVICE, PROJECTOR_INPUT, PROJECTOR_MODEL,
     PROJECTOR_TIMEOUT, RANGE_RE, RELEASE, SYNC_HEADER, SYNC_KEEP_RE,
-    SYNC_MAX, SYNC_MAX_RATE, UI_FILE, log
+    IDLE_UNIT, SYNC_MAX, SYNC_MAX_RATE, TLS_CERT, TLS_NAME, TLS_STATE_DIR, TLS_UNIT,
+    UI_FILE, log
 )
-from .airplay import airplay_active
+from .airplay import airplay_active, systemctl
+from . import tls
 from .library import Library
 from .thumbs import placeholder_svg
 from .player import Busy
+from .projector import ProjectorError, Refused
+from . import pointer as pointer_mod
 from .projector import probe as projector_probe
 
 
@@ -92,6 +98,28 @@ _BUILD_TOKEN = b"__PLAYSTICK_BUILD__"
 
 _ui_lock = threading.Lock()
 _ui_cache = [None, "", b""]     # what it was built from, the id, the page
+
+
+_pointer_lock = threading.Lock()
+_pointer_window = [0.0, 0]
+
+# Pointer samples per second, for everybody together. A phone sends at most
+# twenty-five; this leaves room for two and stops a runaway loop from turning
+# into sixty mpv commands a second on the Atom.
+POINTER_MAX_RATE = 60
+
+
+def pointer_allowed():
+    """The same one-second budget as sync_allowed(), with its own counter."""
+    now = time.monotonic()
+    with _pointer_lock:
+        if now - _pointer_window[0] >= 1.0:
+            _pointer_window[0] = now
+            _pointer_window[1] = 0
+        if _pointer_window[1] >= POINTER_MAX_RATE:
+            return False
+        _pointer_window[1] += 1
+        return True
 
 
 def ui_page():
@@ -203,6 +231,11 @@ def _image_type(data):
     return ""
 
 
+def _unit_report():
+    """The certificate unit's last attempt -- see tls.unit_report."""
+    return tls.unit_report(TLS_UNIT)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "playstick"
     protocol_version = "HTTP/1.1"
@@ -232,12 +265,49 @@ class Handler(BaseHTTPRequestHandler):
     # still here because pause, volume and the status numbers come straight
     # from mpv and have nothing to do with the projector.
     projectionist = None
+    # The dot over the film. None in a daemon built without it -- the tests'
+    # handler, say -- and the route then answers that nothing is drawn.
+    pointer = None
 
     # BaseHTTPRequestHandler logs every request to stderr, i.e. into the
     # journal, and a page polling once a second per phone would be the only
     # thing in it. Errors still get through via log_error.
     def log_message(self, fmt, *args):
         pass
+
+    # -- HTTPS: the handshake tls.TlsServer deliberately did not do
+
+    # Short, and separate from `timeout`: a client that connects to the HTTPS
+    # port and never speaks is holding a thread for nothing, and a real phone
+    # finishes a handshake on the LAN in milliseconds.
+    handshake_timeout = 10
+    _tls_failed = False
+
+    def setup(self):
+        if isinstance(self.request, ssl.SSLSocket):
+            self.request.settimeout(self.handshake_timeout)
+            try:
+                self.request.do_handshake()
+            except (ssl.SSLError, OSError):
+                # A browser probing with a protocol it then abandons, a scanner,
+                # a phone that walked out of range. Not worth a journal line.
+                self._tls_failed = True
+        super().setup()
+
+    def handle(self):
+        if self._tls_failed:
+            return
+        if not isinstance(self.request, ssl.SSLSocket):
+            return super().handle()
+        try:
+            super().handle()
+        except (ConnectionError, ssl.SSLError):
+            # A keep-alive phone going away mid-wait. Over TLS that arrives as
+            # a reset or an unclean EOF rather than the quiet empty read plain
+            # HTTP gets -- TLS 1.3 sends session tickets nobody reads, and a
+            # close with unread data is an RST -- and left alone it would be a
+            # traceback in the journal for every phone that locks its screen.
+            self.close_connection = True
 
     def _allowed(self):
         if not ALLOW_NETWORKS:
@@ -327,6 +397,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_admin_library()
         if path == "/api/admin/projector/probe":
             return self._api_admin_projector_probe()
+        if path == "/api/admin/tls":
+            return self._api_admin_tls()
         if path.startswith("/api/thumb/"):
             return self._api_thumb(path[len("/api/thumb/"):])
         if path == "/api/status":
@@ -367,6 +439,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "not on the local network"}, 403)
         if path == "/api/play":
             return self._api_play()
+        if path == "/api/admin/tls/check":
+            return self._api_admin_tls_check()
+        if path == "/api/projector/power":
+            return self._api_projector_power()
+        if path == "/api/clock/wake":
+            return self._api_clock_wake()
+        if path == "/api/pointer":
+            return self._api_pointer()
         if path in ("/api/pause", "/api/resume"):
             self.player.set_pause(path.endswith("pause"))
             return self._api_status()
@@ -681,6 +761,86 @@ class Handler(BaseHTTPRequestHandler):
             configured={"model": PROJECTOR_MODEL, "device": PROJECTOR_DEVICE,
                         "input": PROJECTOR_INPUT},
             timeout=PROJECTOR_TIMEOUT))
+
+    # -- the page's hidden menu: the projector, the clock, the pointer
+
+    def _api_projector_power(self):
+        on = self._body().get("on")
+        if not isinstance(on, bool):
+            return self._json({"error": "on must be true or false"}, 400)
+        try:
+            message = self.projectionist.power(on)
+        except Busy as exc:
+            return self._json({"error": str(exc)}, 409)
+        except Refused:
+            # The usual reason, by a distance: PON during the cool-down after
+            # POF, which the projector simply ignores for a minute or two.
+            return self._json({"error": "The projector is not taking that "
+                                        "right now -- it may still be cooling "
+                                        "down. Try again in a minute."}, 409)
+        except ProjectorError as exc:
+            log("projector power from the page: %s", exc)
+            return self._json({"error": "I couldn't reach the projector."}, 503)
+        return self._json({"message": message,
+                           "projector": self.projectionist.projector_status()})
+
+    def _api_clock_wake(self):
+        """Bring the idle clock back after it has blanked. It is drawn under
+        whatever else has the screen, so while a film or a mirroring session
+        does there is nothing to show -- say so rather than pretend."""
+        state = self._state()
+        if state not in ("idle", "unavailable"):
+            return self._json({"error": "The clock shows when nothing is "
+                                        "playing."}, 409)
+        result = systemctl("kill", "--signal=SIGUSR1", IDLE_UNIT, timeout=10)
+        if result is None or result.returncode != 0:
+            return self._json({"error": "The clock is not running on this "
+                                        "stick."}, 503)
+        return self._json({"message": "The clock is back."})
+
+    def _api_pointer(self):
+        body = self._body()
+        try:
+            x, y = float(body.get("x", 0.5)), float(body.get("y", 0.5))
+        except (TypeError, ValueError):
+            return self._json({"error": "x and y are numbers from 0 to 1"}, 400)
+        # Before the clamp, which would quietly turn a NaN into 0: json.loads
+        # accepts NaN and Infinity, and neither is a place on a screen.
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return self._json({"error": "x and y are numbers from 0 to 1"}, 400)
+        x, y = min(1.0, max(0.0, x)), min(1.0, max(0.0, y))
+        size = body.get("size", "m")
+        color = body.get("color", "red")
+        if size not in pointer_mod.SIZES or color not in pointer_mod.COLORS:
+            return self._json({"error": "unknown size or colour"}, 400)
+        if not pointer_allowed():
+            return self._json({"error": "too many"}, 429)
+        if self.pointer is None:
+            return self._json({"shown": False})
+        shown = self.pointer.update(x, y, bool(body.get("on", True)),
+                                    size=size, color=color)
+        return self._json({"shown": shown})
+
+    def _api_admin_tls(self):
+        """The HTTPS certificate as the admin app's Device page shows it: off,
+        in place until when, or the TXT record the tls role's challenge hook
+        is waiting for somebody to add. See tls.status for the states."""
+        return self._json(tls.status(TLS_NAME, TLS_CERT, TLS_STATE_DIR,
+                                     unit=_unit_report))
+
+    def _api_admin_tls_check(self):
+        """Start an attempt now, rather than at tomorrow's timer: "Check now"
+        on the Device page, after the record has been added. --no-block,
+        because an attempt may wait a quarter of an hour; starting one that is
+        already waiting is a no-op, so pressing it twice is harmless."""
+        if not TLS_NAME:
+            return self._json({"error": "HTTPS is off on this stick"}, 409)
+        result = systemctl("start", "--no-block", TLS_UNIT, timeout=10)
+        if result is None or result.returncode != 0:
+            detail = (result.stderr.strip() if result is not None else "")
+            return self._json({"error": "could not start %s%s" % (
+                TLS_UNIT, (": " + detail) if detail else "")}, 500)
+        return self._api_admin_tls()
 
     def _api_admin_films(self):
         """The library, pushed from the machine that prepared it.
