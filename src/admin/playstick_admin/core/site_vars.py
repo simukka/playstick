@@ -23,6 +23,16 @@ it lives in the keyring (see credentials.py), and a terminal run that needs it
 is stopped by the nas role rather than writing an empty one onto the stick.
 
 Both files are JSON, which is YAML, so nothing here can mis-quote a value.
+
+APPLIANCE OVERRIDES
+
+The Config tab's Advanced form edits group_vars/all.yml in place when it can.
+The installed copy belongs to root, so it cannot -- and then what the form saves
+is kept in <state>/appliance.json and merged into site.yml under the Settings
+values. The same precedence that lets site.yml fill all.yml's empty NAS values
+makes these win over all.yml's defaults, and because they are in site.yml they
+are part of the release id too: changing the projector model from an installed
+app is an update the Device tab offers, exactly as if all.yml had changed.
 """
 
 import json
@@ -48,6 +58,40 @@ def site_path():
 
 def secrets_path():
     return os.path.join(inventory_dir(), "secrets.yml")
+
+
+def overrides_path():
+    return os.path.join(paths.state_dir(), "appliance.json")
+
+
+def load_overrides():
+    """Appliance variables saved by an app that could not write all.yml, or
+    {}. A file that will not parse is treated as empty rather than fatal: the
+    worst case is a deploy with all.yml's own values, which is a known state."""
+    try:
+        with open(overrides_path(), "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_overrides(values):
+    """Replace them. Empty removes the file, so a machine that has gone back
+    to editing a checkout carries nothing over from the installed copy."""
+    path = overrides_path()
+    if not values:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        return
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".part"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(values, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.replace(tmp, path)
 
 
 def key_link():
@@ -90,7 +134,11 @@ def _write(path, variables):
 
 
 def write_site(settings):
-    _write(site_path(), host_vars(settings))
+    # Settings last: a site value is never something the Advanced form owns,
+    # and an override of one would be a stale leftover rather than intent.
+    variables = dict(load_overrides())
+    variables.update(host_vars(settings))
+    _write(site_path(), variables)
     _link_key(settings.ssh_key)
 
 

@@ -372,6 +372,9 @@ class FakeProjectionist:
     def progress(self):
         return self.prepare
 
+    def driver(self):
+        return None
+
     def projector_status(self):
         return dict(self.projector)
 

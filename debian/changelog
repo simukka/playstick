@@ -1,3 +1,15 @@
+playstick (1.0.2) unstable; urgency=medium
+
+  * Fixed save error.
+
+ -- simukka <kylesimukka@gmail.com>  Sat, 21 Nov 2026 19:37:34 +0100
+
+playstick (1.0.1) unstable; urgency=medium
+
+  * Improved projector settings
+
+ -- simukka <kylesimukka@gmail.com>  Sat, 21 Nov 2026 17:44:16 +0100
+
 playstick (1.0.0) unstable; urgency=medium
 
   * Popcorn time!

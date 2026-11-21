@@ -440,6 +440,39 @@ class WhatTheDeployIsHanded(unittest.TestCase):
         got = self._hostvars(site_vars.site_path())
         self.assertEqual((got["nas_server"], got["nas_share"]), ("", ""))
 
+    def test_appliance_overrides_reach_the_inventory(self):
+        """What the Advanced form saves when all.yml belongs to root. In
+        site.yml, so Ansible applies it over group_vars and the release id
+        counts it."""
+        site_vars.save_overrides({"player_projector_model": "pt-ae4000",
+                                  "player_projector_input": "HD2"})
+        site_vars.write_site(SiteSettings())
+        got = self._hostvars(site_vars.site_path())
+        self.assertEqual(got["player_projector_model"], "pt-ae4000")
+        self.assertEqual(got["player_projector_input"], "HD2")
+        self.assertEqual(got["ansible_user"], "admin")
+
+    def test_a_settings_value_wins_over_a_stale_override(self):
+        site_vars.save_overrides({"nas_server": "198.51.100.1"})
+        site_vars.write_site(SiteSettings())
+        got = self._hostvars(site_vars.site_path())
+        self.assertEqual(got["nas_server"], "192.0.2.83")
+
+    def test_no_overrides_removes_the_file(self):
+        site_vars.save_overrides({"player_projector_model": "pt-ae4000"})
+        site_vars.save_overrides({})
+        self.assertFalse(os.path.exists(site_vars.overrides_path()))
+        self.assertEqual(site_vars.load_overrides(), {})
+        site_vars.write_site(SiteSettings())
+        self.assertNotIn("player_projector_model",
+                         self._hostvars(site_vars.site_path()))
+
+    def test_an_unreadable_overrides_file_is_no_overrides(self):
+        os.makedirs(os.path.dirname(site_vars.overrides_path()), exist_ok=True)
+        with open(site_vars.overrides_path(), "w") as handle:
+            handle.write("{not json")
+        self.assertEqual(site_vars.load_overrides(), {})
+
     def test_a_key_is_named_where_the_container_sees_it(self):
         key = os.path.join(self.dir, "stick_ed25519")
         open(key, "w").close()

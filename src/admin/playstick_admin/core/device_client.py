@@ -122,6 +122,13 @@ class DeviceClient:
     def healthz(self):
         return self._request("/healthz")
 
+    def projector_probe(self):
+        """Serial ports, the screen's EDID name and which port a projector
+        answers on, for the projector settings. Slower than the other reads:
+        each adapter with nothing on the far end waits out one timeout."""
+        return self._request("/api/admin/projector/probe",
+                             timeout=max(self.timeout, 15.0))
+
     def thumb_url(self, film_id):
         return self._url("/api/thumb/%s" % film_id)
 
