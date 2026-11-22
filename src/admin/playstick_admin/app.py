@@ -250,6 +250,8 @@ class MainWindow(QMainWindow):
         self._config.settingsSaved.connect(self._on_settings_saved)
         self._config.importRequested.connect(self.import_legacy_library)
         self._config.sourcesChanged.connect(self._on_sources_changed)
+        self._config.runAllRequested.connect(
+            lambda: self.update_device(title="Run all"))
         self._device.updateRequested.connect(self.update_device)
 
     def _on_device_changed(self):
@@ -341,8 +343,9 @@ class MainWindow(QMainWindow):
         else:
             self._prepare.reload()
 
-    def update_device(self):
-        """Deploy to the stick from the Device page's button.
+    def update_device(self, title="Update device"):
+        """Deploy to the stick, from the Device page's Update device or the
+        Deploy panel's Run all -- the same run, so the same password prompt.
 
         The sudo password is asked for each time and handed to that one run
         -- see site_vars.write_secrets -- rather than kept: a deploy is rare,
@@ -350,7 +353,7 @@ class MainWindow(QMainWindow):
         to somebody else than the typing it saves. Empty is fine for a login
         whose sudo asks for nothing."""
         password, ok = QInputDialog.getText(
-            self, "Update device",
+            self, title,
             "The stick's sudo password for %s (empty if it needs none):"
             % (self._settings.ssh_user or "the SSH user"),
             QLineEdit.Password)

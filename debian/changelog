@@ -1,3 +1,9 @@
+playstick (1.1.5) unstable; urgency=medium
+
+  * Adds Run all to the Deploy tab, and stops naming actl in the app.
+
+ -- simukka <kylesimukka@gmail.com>  Sun, 22 Nov 2026 09:45:26 +0100
+
 playstick (1.1.4) unstable; urgency=medium
 
   * Lets the games role through on an SDL that names its driver KMSDRM in capitals.
