@@ -80,3 +80,54 @@ export function saveShelf(storage: StorageLike | null, shelf: "films" | "games")
     // Not remembered this time.
   }
 }
+
+const PHONE_KEY = "playstick.phone";
+const PROFILE_KEY = "playstick.profile";
+
+/**
+ * This phone's id for its calibration profile, made up once and kept.
+ *
+ * Random rather than derived from anything about the phone: it names a phone
+ * to the stick and nothing else. If storage is cleared it is lost, and the
+ * calibration sheet offers the stick's saved profiles to pick this phone's
+ * again from.
+ */
+export function loadPhoneId(storage: StorageLike | null, make: () => string): string {
+  try {
+    const have = storage?.getItem(PHONE_KEY);
+    if (have && /^[A-Za-z0-9-]{8,64}$/.test(have)) {
+      return have;
+    }
+  } catch {
+    // Fall through and make one; it lasts this page load at least.
+  }
+  const id = make();
+  savePhoneId(storage, id);
+  return id;
+}
+
+export function savePhoneId(storage: StorageLike | null, id: string): void {
+  try {
+    storage?.setItem(PHONE_KEY, id);
+  } catch {
+    // Not remembered this time.
+  }
+}
+
+/** The last profile this phone saved or fetched, as JSON, or null. Parsed and
+ * checked by calibration.ts, which knows the shape. */
+export function loadProfileJson(storage: StorageLike | null): unknown {
+  try {
+    return JSON.parse(storage?.getItem(PROFILE_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+export function saveProfileJson(storage: StorageLike | null, profile: unknown): void {
+  try {
+    storage?.setItem(PROFILE_KEY, JSON.stringify(profile));
+  } catch {
+    // Not remembered this time; the stick still has it.
+  }
+}

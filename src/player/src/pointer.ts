@@ -7,6 +7,13 @@
 // held, and starts from wherever the dot already is: re-centring on every press
 // is what keeps the gyro's slow drift from ever mattering.
 //
+// How far a turn moves the dot is DEGREES_ACROSS and SMOOTHING by default. A
+// phone that has been through the calibration wizard (calibrate.ts) has a
+// PointerCalibration of its own instead: the turn and tilt it actually took to
+// cross this picture from where this person sits, and the smoothing their hand
+// needs. POINTER_CALIBRATION_DEFAULT is the constants exactly, so a phone with
+// no profile aims as it always did.
+//
 // The daemon draws it (src/server/playstick/pointer.py). This sends at most
 // TICK_MS apart, the newest sample only, one request in flight -- the same
 // discipline the status poll keeps -- so a fast finger costs the Atom no more
@@ -60,6 +67,29 @@ export const DEGREES_ACROSS = 45;
 /** How much of each new reading the smoothed aim takes, 0..1. */
 export const SMOOTHING = 0.35;
 
+export interface PointerCalibration {
+  /** Degrees of turn from the left edge of the picture to the right. */
+  yaw_across: number;
+  /** Degrees of tilt from the top edge to the bottom. */
+  pitch_across: number;
+  /** 1, or -1 for a phone whose turn reads the other way. */
+  yaw_sign: number;
+  pitch_sign: number;
+  /** How much of each new reading the smoothed aim takes, 0..1. */
+  smoothing: number;
+  /** Degrees of turn ignored at the start of an aim, for a shaky hand. */
+  deadzone: number;
+}
+
+export const POINTER_CALIBRATION_DEFAULT: PointerCalibration = {
+  yaw_across: DEGREES_ACROSS,
+  pitch_across: DEGREES_ACROSS / SCREEN_ASPECT,
+  yaw_sign: 1,
+  pitch_sign: 1,
+  smoothing: SMOOTHING,
+  deadzone: 0,
+};
+
 export interface Sample {
   x: number;
   y: number;
@@ -104,15 +134,31 @@ export interface Orientation {
  * Held like a remote -- screen up, top towards the projector -- alpha is the
  * turn left and right (it grows anticlockwise, so turning right shrinks it) and
  * beta is the tilt up and down (it grows as the top comes up).
+ *
+ * `cal` says how many degrees cross the picture each way; `speed` divides
+ * them, so 2 crosses it in half the turn.
  */
-export function aim(from: Point, base: Orientation, now: Orientation, speed: number): Point {
-  const across = DEGREES_ACROSS / speed;
-  const yaw = angleDelta(base.alpha, now.alpha);
-  const pitch = now.beta - base.beta;
+export function aim(
+  from: Point,
+  base: Orientation,
+  now: Orientation,
+  speed: number,
+  cal: PointerCalibration = POINTER_CALIBRATION_DEFAULT,
+): Point {
+  const yaw = cal.yaw_sign * deadzone(angleDelta(base.alpha, now.alpha), cal.deadzone);
+  const pitch = cal.pitch_sign * deadzone(now.beta - base.beta, cal.deadzone);
   return {
-    x: clamp(from.x + yaw / across),
-    y: clamp(from.y - (pitch / across) * SCREEN_ASPECT),
+    x: clamp(from.x + (yaw * speed) / cal.yaw_across),
+    y: clamp(from.y - (pitch * speed) / cal.pitch_across),
   };
+}
+
+/** `v` with the first `dz` degrees either way taken off. */
+function deadzone(v: number, dz: number): number {
+  if (dz <= 0) {
+    return v;
+  }
+  return Math.sign(v) * Math.max(0, Math.abs(v) - dz);
 }
 
 export interface SenderDeps {
@@ -192,6 +238,10 @@ export class PointerSheet {
   private readonly note: HTMLElement;
   private readonly settings: HTMLElement;
   prefs: PointerPrefs;
+  /** This phone's calibration, or null to aim with the defaults and the
+   * speed slider. With one, the turn it measured is a full sweep and the
+   * slider only drives the pad. */
+  calibration: PointerCalibration | null = null;
   /** Where the dot is, 0..1 across and down. Kept between gestures. */
   dot: Point = { x: 0.5, y: 0.5 };
   private playing = false;
@@ -362,11 +412,13 @@ export class PointerSheet {
       a.base = o;
       return;
     }
-    const target = aim(a.from, a.base, o, this.prefs.speed);
+    const cal = this.calibration;
+    const target = cal ? aim(a.from, a.base, o, 1, cal) : aim(a.from, a.base, o, this.prefs.speed);
+    const k = cal ? cal.smoothing : SMOOTHING;
     a.smooth = a.smooth
       ? {
-          x: a.smooth.x + (target.x - a.smooth.x) * SMOOTHING,
-          y: a.smooth.y + (target.y - a.smooth.y) * SMOOTHING,
+          x: a.smooth.x + (target.x - a.smooth.x) * k,
+          y: a.smooth.y + (target.y - a.smooth.y) * k,
         }
       : target;
     this.dot = a.smooth;
@@ -429,6 +481,14 @@ export class PointerSheet {
         (v) => this.set({ color: v as PointerPrefs["color"] }),
       ),
     );
+    if (this.deps.tiltAvailable && this.calibration) {
+      this.settings.appendChild(
+        h(doc, "div", {
+          class: "sub",
+          text: "Tilting uses this phone's calibration. Speed is for the pad.",
+        }),
+      );
+    }
     if (this.deps.tiltAvailable) {
       this.settings.appendChild(
         picker(

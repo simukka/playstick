@@ -1,3 +1,9 @@
+playstick (1.1.6) unstable; urgency=medium
+
+  * Adds a calibration wizard that fits a profile to each phone, shown on the projector.
+
+ -- simukka <kylesimukka@gmail.com>  Sun, 22 Nov 2026 16:37:46 +0100
+
 playstick (1.1.5) unstable; urgency=medium
 
   * Adds Run all to the Deploy tab, and stops naming actl in the app.

@@ -88,6 +88,10 @@ class Player:
         with self._lock:
             if self._proc is None or self._proc.poll() is not None:
                 return "idle"
+            # The calibration wizard's black screen: mpv with no film, so
+            # nothing below it has an answer to give. See calibrate.py.
+            if self._item and self._item.get("kind") == "calibrate":
+                return "calibrating"
         # Deliberately outside the lock, and deliberately via status() rather
         # than the cached dict: reading the cache directly meant a state
         # computed before the cache was refreshed, so the first poll after a
@@ -184,6 +188,56 @@ class Player:
             self._subs = None
             # A different film is a different timeline even if the last one
             # ended at the same number of seconds in.
+            self._timecode = None
+            self._window = []
+
+            if not self._connect_ipc():
+                log("mpv did not open its IPC socket; stopping")
+                self._teardown()
+                raise Busy("The player would not start.")
+
+            threading.Thread(target=self._reap, daemon=True).start()
+
+    def start_blank(self, item, progress=None):
+        """Put mpv on the screen with no film: a black picture for the
+        calibration wizard to draw on with osd-overlay (calibrate.py).
+
+        The same handover as start() -- the lock, the display taken from the
+        AirPlay receiver, the VT, the IPC socket, the reaper -- without the
+        library path, the subtitles or the timeline, none of which a black
+        screen has. --idle with --force-window is what keeps mpv up and
+        drawing its OSD with nothing loaded.
+        """
+        with self._lock:
+            if self.state() != "idle":
+                raise Busy("Something is already on the projector.")
+            if airplay_confirmed():
+                raise Busy("The projector is being used for AirPlay.")
+
+            self._restore_airplay = stage.take_display(progress)
+            try:
+                os.unlink(MPV_SOCKET)
+            except OSError:
+                pass
+            argv = [MPV, *MPV_ARGS, "--idle=yes", "--force-window=yes",
+                    "--input-ipc-server=" + MPV_SOCKET]
+            if progress:
+                progress("starting")
+            log("calibrating: %s", " ".join(shlex.quote(a) for a in argv))
+            tty = self._open_tty()
+            try:
+                self._proc = subprocess.Popen(
+                    argv,
+                    stdin=tty if tty is not None else subprocess.DEVNULL,
+                    stdout=tty if tty is not None else subprocess.DEVNULL,
+                    stderr=None,
+                    start_new_session=False)
+            finally:
+                if tty is not None:
+                    os.close(tty)
+            self._item = dict(item, kind="calibrate")
+            self._status_cache = (0.0, {})
+            self._subs = None
             self._timecode = None
             self._window = []
 
@@ -551,6 +605,9 @@ class Player:
         """
         with self._lock:
             if self._proc is None or self._proc.poll() is not None:
+                return {}
+            # No film, so no position, duration or timeline to report.
+            if self._item and self._item.get("kind") == "calibrate":
                 return {}
             cached_at, cached = self._status_cache
             if time.monotonic() - cached_at < 0.5:

@@ -75,7 +75,9 @@ export type PlayerState =
   | "airplay"
   | "unavailable"
   /** A game is on the projector: the phones show the gamepad. */
-  | "gaming";
+  | "gaming"
+  /** The calibration wizard's black screen is on the projector. */
+  | "calibrating";
 
 export interface Status {
   state: PlayerState;

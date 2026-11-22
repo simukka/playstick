@@ -11,11 +11,25 @@
 // the game -- and have a button to join as player two when the game has a
 // second pad. Which seat a phone has is the daemon's to say, over the socket
 // (game-link.ts), so this view only draws what it is told.
+//
+// A phone that has been through the calibration wizard may have its buttons
+// rearranged: which of the four on-screen buttons sends A, B, START and SELECT
+// is its ButtonMap, and each button wears the name of what it sends. With no
+// profile, BUTTONS_DEFAULT is the layout above.
 import { h, setText, toggleClass } from "./dom";
 import { holdToOpen } from "./secret-menu";
 import type { GameAudio } from "./game-audio";
 import type { GameInfo, GameLink, Role } from "./game-link";
-import { A, B, SELECT, START, TiltPad, type Tilt } from "./tilt-pad";
+import {
+  A,
+  B,
+  SELECT,
+  START,
+  TILT_CALIBRATION_DEFAULT,
+  TiltPad,
+  type Tilt,
+  type TiltCalibration,
+} from "./tilt-pad";
 import type { Status } from "./types";
 
 export const GAMEPAD_CSS = `
@@ -60,6 +74,18 @@ export const GAMEPAD_CSS = `
 }
 `;
 
+/** The four on-screen buttons, named by where they are in the default layout:
+ * A is the big one on the right, B the big one on the left. */
+export type ButtonName = "A" | "B" | "START" | "SELECT";
+export const BUTTON_NAMES: readonly ButtonName[] = ["A", "B", "START", "SELECT"];
+/** Which mask bit each on-screen button sends. */
+export type ButtonMap = Record<ButtonName, number>;
+export const BUTTONS_DEFAULT: ButtonMap = { A, B, START, SELECT };
+/** The name a mask bit goes by, for the label on whichever button sends it. */
+export function bitName(bit: number): ButtonName {
+  return BUTTON_NAMES.find((n) => BUTTONS_DEFAULT[n] === bit) ?? "A";
+}
+
 export interface GamepadDeps {
   link: GameLink;
   audio: GameAudio;
@@ -87,6 +113,8 @@ export class GamepadView {
   private readonly tiltLine: HTMLElement;
   private readonly selectBtn: HTMLElement;
   private buttons = 0;
+  private map: ButtonMap = { ...BUTTONS_DEFAULT };
+  private readonly els = {} as Record<ButtonName, HTMLElement>;
   private unlisten: (() => void) | null = null;
   private active = false;
   private role: Role = "";
@@ -123,10 +151,10 @@ export class GamepadView {
       cancel: deps.cancel,
     });
 
-    const bBtn = this.pad(doc, "padB", "B", B, "padBig");
-    const aBtn = this.pad(doc, "padA", "A", A, "padBig");
-    this.selectBtn = this.pad(doc, "padSelect", "SELECT", SELECT);
-    const startBtn = this.pad(doc, "padStart", "START", START);
+    const bBtn = this.pad(doc, "padB", "B", "padBig");
+    const aBtn = this.pad(doc, "padA", "A", "padBig");
+    this.selectBtn = this.pad(doc, "padSelect", "SELECT");
+    const startBtn = this.pad(doc, "padStart", "START");
     this.tiltBtn = h(doc, "button", {
       id: "padCenter",
       type: "button",
@@ -151,6 +179,21 @@ export class GamepadView {
         aBtn,
       ]),
     ]);
+  }
+
+  /** Apply this phone's calibration: the tilt's press points and signs, and
+   * which on-screen button sends what. Null puts the defaults back. */
+  setCalibration(tilt: TiltCalibration | null, buttons: ButtonMap | null): void {
+    this.tilt.cal = tilt ?? TILT_CALIBRATION_DEFAULT;
+    this.map = { ...(buttons ?? BUTTONS_DEFAULT) };
+    for (const name of BUTTON_NAMES) {
+      setText(this.els[name], bitName(this.map[name]));
+    }
+  }
+
+  /** Which mask bit the on-screen button `name` sends. */
+  bitFor(name: ButtonName): number {
+    return this.map[name];
   }
 
   /** The mask the phone is holding now: thumbs, and the tilt when it is on. */
@@ -269,22 +312,28 @@ export class GamepadView {
     this.deps.link.setMask(this.mask);
   }
 
-  /** One thumb button: held while touched, let go on lift or slide-off. */
-  private pad(doc: Document, id: string, label: string, bit: number, cls = ""): HTMLElement {
-    const el = h(doc, "button", { id, type: "button", class: cls, text: label });
+  /** One thumb button: held while touched, let go on lift or slide-off.
+   * The bit is looked up when it is pressed and remembered until it is let
+   * go, so a profile arriving under a thumb cannot leave a button stuck. */
+  private pad(doc: Document, id: string, name: ButtonName, cls = ""): HTMLElement {
+    const el = h(doc, "button", { id, type: "button", class: cls, text: name });
+    this.els[name] = el;
+    let held = 0;
     const down = (ev: Event): void => {
       (ev as { preventDefault?: () => void }).preventDefault?.();
       if (!this.deps.audio.on) {
         this.unlock();
       }
-      this.buttons |= bit;
+      held = this.map[name];
+      this.buttons |= held;
       toggleClass(el, "down", true);
       this.deps.vibrate?.(8);
       this.send();
     };
     const up = (): void => {
-      if (this.buttons & bit) {
-        this.buttons &= ~bit;
+      if (held && this.buttons & held) {
+        this.buttons &= ~held;
+        held = 0;
         toggleClass(el, "down", false);
         this.send();
       }

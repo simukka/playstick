@@ -83,6 +83,21 @@ export class StatusPresenter {
     // Not a game, or not any more: the socket and the sound go with the view.
     this.gamepad?.leave();
 
+    // The calibration wizard runs in its own sheet over the grid, so neither
+    // its warm-up nor its black screen takes the view: every other phone keeps
+    // the grid, blocked, with a sentence saying why.
+    const calibrating = s.state === "calibrating" || (s.state === "preparing" && s.id === "calibrate");
+    if (calibrating) {
+      this.views.show("library");
+      toggleClass(this.grid, "blocked", true);
+      this.banner.show(
+        s.state === "calibrating"
+          ? "The projector is showing the phone calibration screen."
+          : "Getting the projector ready to calibrate a phone…",
+      );
+      return;
+    }
+
     if (s.state === "preparing") {
       this.views.show("preparing");
       this.preparing.apply(s);

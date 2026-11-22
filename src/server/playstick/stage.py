@@ -16,9 +16,11 @@ STAGE
 
 `Stage` puts the two players behind the one interface the projectionist was
 written against: state(), current_item(), start(item, progress) and stop(). It
-picks between them on the item's kind. The projectionist needs no other
-change, and its existing refusals ("a film is already playing") cover a game
-too, because a running game makes state() something other than "idle".
+picks between them on the item's kind. A third kind, "calibrate", is the
+player again with no film: mpv on a black screen for the calibration wizard
+(see calibrate.py). The projectionist needs no other change, and its
+existing refusals ("a film is already playing") cover a game and a
+calibration too, because either makes state() something other than "idle".
 """
 
 import os
@@ -156,6 +158,8 @@ class Stage:
                 raise Busy("Something is already on the projector.")
             if item.get("kind") == "game":
                 return self.game.start(item, progress=progress)
+            if item.get("kind") == "calibrate":
+                return self.player.start_blank(item, progress=progress)
             return self.player.start(item, progress=progress)
 
     def stop(self):

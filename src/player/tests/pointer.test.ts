@@ -2,6 +2,9 @@
 // that a setting survives storage that refuses to work.
 import { describe, it, expect } from "vitest";
 import {
+  DEGREES_ACROSS,
+  POINTER_CALIBRATION_DEFAULT,
+  SCREEN_ASPECT,
   PointerSender,
   PointerSheet,
   TICK_MS,
@@ -49,6 +52,33 @@ describe("aim", () => {
     const p = aim({ x: 0.5, y: 0.5 }, { alpha: 2, beta: 0 }, { alpha: 358, beta: 0 }, 1);
     expect(p.x).toBeGreaterThan(0.5);
     expect(p.x).toBeLessThan(0.7);
+  });
+});
+
+describe("aim with a calibration", () => {
+  const base: Orientation = { alpha: 10, beta: 20 };
+  const cal = { ...POINTER_CALIBRATION_DEFAULT, yaw_across: 40, pitch_across: 24 };
+
+  it("is the old arithmetic exactly with the defaults", () => {
+    const now = { alpha: 1, beta: 26 };
+    const p = aim({ x: 0.5, y: 0.5 }, base, now, 1.5, POINTER_CALIBRATION_DEFAULT);
+    expect(p.x).toBeCloseTo(0.5 + 9 / (DEGREES_ACROSS / 1.5));
+    expect(p.y).toBeCloseTo(0.5 - (6 / (DEGREES_ACROSS / 1.5)) * SCREEN_ASPECT);
+  });
+
+  it("crosses the picture in the turn that was measured", () => {
+    expect(aim({ x: 0, y: 0.5 }, base, { alpha: 10 - 40, beta: 20 }, 1, cal).x).toBeCloseTo(1);
+    expect(aim({ x: 0.5, y: 1 }, base, { alpha: 10, beta: 44 }, 1, cal).y).toBeCloseTo(0);
+  });
+
+  it("turns the other way for a flipped sign", () => {
+    const flipped = { ...cal, yaw_sign: -1 };
+    expect(aim({ x: 0.5, y: 0.5 }, base, { alpha: 5, beta: 20 }, 1, flipped).x).toBeLessThan(0.5);
+  });
+
+  it("ignores a shake inside the deadzone", () => {
+    const dz = { ...cal, deadzone: 1 };
+    expect(aim({ x: 0.5, y: 0.5 }, base, { alpha: 9.5, beta: 20.5 }, 1, dz)).toEqual({ x: 0.5, y: 0.5 });
   });
 });
 

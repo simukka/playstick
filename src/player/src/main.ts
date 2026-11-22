@@ -24,7 +24,18 @@ import { EpisodeSheet } from "./episode-sheet";
 import { SheetManager } from "./sheet";
 import { SecretSheet, holdToOpen } from "./secret-menu";
 import { PointerSender, PointerSheet, type Orientation } from "./pointer";
-import { browserStorage, loadShelf, saveShelf } from "./prefs";
+import {
+  browserStorage,
+  loadPhoneId,
+  loadProfileJson,
+  loadShelf,
+  savePhoneId,
+  saveProfileJson,
+  saveShelf,
+} from "./prefs";
+import { CalibrateSheet, type Reading } from "./calibrate";
+import { CalibrateLink, calibrateUrl } from "./calibrate-link";
+import { type Profile, makePhoneId, parseProfile } from "./calibration";
 import { TimeDriver } from "./time-driver";
 import { Poller } from "./poller";
 import { toggleClass } from "./dom";
@@ -144,6 +155,7 @@ function boot(): void {
     power: (on) => api.projectorPower(on),
     wakeClock: () => api.wakeClock(),
     openPointer: () => sheets.showPointer(true),
+    openCalibrate: () => sheets.showCalibrate(true),
   });
   const pointerSender = new PointerSender({
     post: (sample) => api.pointer(sample),
@@ -157,20 +169,26 @@ function boot(): void {
     typeof DeviceOrientationEvent !== "undefined"
       ? (DeviceOrientationEvent as unknown as Asking)
       : null;
+  const tiltAvailable = window.isSecureContext && orientation !== null;
+  const requestTilt =
+    orientation && typeof orientation.requestPermission === "function"
+      ? () =>
+          orientation.requestPermission!().then(
+            (answer) => answer === "granted",
+            () => false,
+          )
+      : undefined;
+  const screenAngle = (): number =>
+    screen.orientation?.angle ??
+    Number((window as unknown as { orientation?: number }).orientation) ??
+    0;
   const pointerSheet = new PointerSheet(doc, {
     sender: pointerSender,
     storage: browserStorage(),
     schedule: (fn, ms) => window.setTimeout(fn, ms),
     cancel: (id) => window.clearTimeout(id),
-    tiltAvailable: window.isSecureContext && orientation !== null,
-    requestTilt:
-      orientation && typeof orientation.requestPermission === "function"
-        ? () =>
-            orientation.requestPermission!().then(
-              (answer) => answer === "granted",
-              () => false,
-            )
-        : undefined,
+    tiltAvailable,
+    requestTilt,
     listenTilt: (fn: (o: Orientation) => void) => {
       const onTurn = (ev: DeviceOrientationEvent): void => {
         if (ev.alpha !== null && ev.beta !== null) {
@@ -206,15 +224,8 @@ function boot(): void {
   const gamepad = new GamepadView(doc, {
     link: gameLink,
     audio: gameAudio,
-    tiltAvailable: window.isSecureContext && orientation !== null,
-    requestTilt:
-      orientation && typeof orientation.requestPermission === "function"
-        ? () =>
-            orientation.requestPermission!().then(
-              (answer) => answer === "granted",
-              () => false,
-            )
-        : undefined,
+    tiltAvailable,
+    requestTilt,
     listenTilt: (fn: (t: Tilt) => void) => {
       const onTurn = (ev: DeviceOrientationEvent): void => {
         if (ev.beta !== null && ev.gamma !== null) {
@@ -224,10 +235,7 @@ function boot(): void {
       window.addEventListener("deviceorientation", onTurn);
       return () => window.removeEventListener("deviceorientation", onTurn);
     },
-    angle: () =>
-      screen.orientation?.angle ??
-      Number((window as unknown as { orientation?: number }).orientation) ??
-      0,
+    angle: screenAngle,
     stop: () => {
       void api.stop().then((r) => onStatus(r.data as unknown as Status));
     },
@@ -237,6 +245,74 @@ function boot(): void {
       typeof navigator.vibrate === "function" ? (ms) => void navigator.vibrate(ms) : undefined,
   });
 
+  // --- the calibration wizard, and this phone's profile -----------------------
+  // The profile is applied as soon as the page has one: from storage at once,
+  // then from the stick, which is the copy that survives Safari clearing site
+  // data. A phone with neither aims and tilts with the defaults.
+  const storage = browserStorage();
+  let phoneId = loadPhoneId(storage, () => makePhoneId());
+  let profile: Profile | null = parseProfile(loadProfileJson(storage));
+  const applyProfile = (p: Profile | null): void => {
+    profile = p;
+    pointerSheet.calibration = p?.pointer ?? null;
+    gamepad.setCalibration(p?.tilt ?? null, p?.buttons ?? null);
+  };
+  const refreshProfile = (): void => {
+    void api.profile(phoneId).then(
+      (raw) => {
+        const p = parseProfile(raw);
+        if (p) {
+          saveProfileJson(storage, p);
+          applyProfile(p);
+        }
+      },
+      () => undefined,
+    );
+  };
+  const calibrateLink = new CalibrateLink({
+    open: (url) => new WebSocket(url) as unknown as SocketLike,
+    url: calibrateUrl(window.location),
+    schedule: (fn, ms) => window.setTimeout(fn, ms),
+    cancel: (id) => window.clearTimeout(id),
+    every: (fn, ms) => window.setInterval(fn, ms),
+    stopEvery: (id) => window.clearInterval(id),
+  });
+  const calibrateSheet = new CalibrateSheet(doc, {
+    api: {
+      start: () => api.calibrateStart(),
+      profiles: () => api.profiles(),
+      save: (id, body) => api.saveProfile(id, body),
+    },
+    link: calibrateLink,
+    phoneId: () => phoneId,
+    adoptId: (id) => {
+      phoneId = id;
+      savePhoneId(storage, id);
+      refreshProfile();
+    },
+    current: () => profile,
+    onSaved: (p) => {
+      saveProfileJson(storage, p);
+      applyProfile(p);
+    },
+    tiltAvailable,
+    requestTilt,
+    listenTilt: (fn: (r: Reading) => void) => {
+      const onTurn = (ev: DeviceOrientationEvent): void => {
+        if (ev.beta !== null && ev.gamma !== null) {
+          fn({ alpha: ev.alpha, beta: ev.beta, gamma: ev.gamma });
+        }
+      };
+      window.addEventListener("deviceorientation", onTurn);
+      return () => window.removeEventListener("deviceorientation", onTurn);
+    },
+    angle: screenAngle,
+    now: () => performance.now(),
+    close: () => sheets.showCalibrate(false),
+  });
+  applyProfile(profile);
+  refreshProfile();
+
   const sheets = new SheetManager(doc, {
     sound: soundSheet.root,
     subs: subsSheet.root,
@@ -244,6 +320,7 @@ function boot(): void {
     episodes: episodeSheet.root,
     secret: secretSheet.root,
     pointer: pointerSheet.root,
+    calibrate: calibrateSheet.root,
     onSoundOpen: () => soundSheet.paint(),
     onSubsOpen: () => subsSheet.paint(),
     onFilterOpen: () => filterSheet.paint(),
@@ -251,6 +328,8 @@ function boot(): void {
     onSecretOpen: () => secretSheet.opened(),
     onPointerOpen: () => pointerSheet.paint(),
     onPointerClose: () => pointerSheet.closed(),
+    onCalibrateOpen: () => calibrateSheet.opened(),
+    onCalibrateClose: () => calibrateSheet.closed(),
   });
 
   // A tile is a film to play or a series to choose from. The model knows which,
@@ -349,6 +428,7 @@ function boot(): void {
     episodeSheet.root,
     secretSheet.root,
     pointerSheet.root,
+    calibrateSheet.root,
     libraryView.root,
     presenter.preparing.root,
     presenter.playing.root,
@@ -396,6 +476,7 @@ function boot(): void {
     if (sheets.secretOpen) {
       secretSheet.paint();
     }
+    calibrateSheet.onStatus(s);
     // Only repainted when whether a film is up changes: a repaint rebuilds the
     // settings, and doing that under a finger on the speed slider every poll
     // would snatch it away.

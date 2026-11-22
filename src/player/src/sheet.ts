@@ -145,18 +145,24 @@ export interface SheetManagerDeps {
   /** The menu in the logo, and the pointer it opens -- see secret-menu.ts. */
   secret: HTMLElement;
   pointer: HTMLElement;
+  /** The calibration wizard the menu opens -- see calibrate.ts. */
+  calibrate: HTMLElement;
   onSoundOpen: () => void;
   onSubsOpen: () => void;
   onFilterOpen: () => void;
   onEpisodesOpen: () => void;
   onSecretOpen: () => void;
   onPointerOpen: () => void;
+  onCalibrateOpen: () => void;
+  /** Told when the calibration sheet goes away: the black screen on the
+   * projector goes with it. */
+  onCalibrateClose?: () => void;
   /** Told when the pointer sheet goes away, however it goes: the dot it drew
    * should not stay on the film. */
   onPointerClose?: () => void;
 }
 
-type SheetName = "sound" | "subs" | "filter" | "episodes" | "secret" | "pointer";
+type SheetName = "sound" | "subs" | "filter" | "episodes" | "secret" | "pointer" | "calibrate";
 
 export class SheetManager {
   /** The chrome, mounted by the composition root. */
@@ -170,6 +176,7 @@ export class SheetManager {
   private readonly roots: Record<SheetName, HTMLElement>;
   private readonly opened: Record<SheetName, () => void>;
   private readonly onPointerClose?: () => void;
+  private readonly onCalibrateClose?: () => void;
 
   constructor(doc: Document, deps: SheetManagerDeps) {
     this.roots = {
@@ -179,8 +186,10 @@ export class SheetManager {
       episodes: deps.episodes,
       secret: deps.secret,
       pointer: deps.pointer,
+      calibrate: deps.calibrate,
     };
     this.onPointerClose = deps.onPointerClose;
+    this.onCalibrateClose = deps.onCalibrateClose;
     this.opened = {
       sound: deps.onSoundOpen,
       subs: deps.onSubsOpen,
@@ -188,6 +197,7 @@ export class SheetManager {
       episodes: deps.onEpisodesOpen,
       secret: deps.onSecretOpen,
       pointer: deps.onPointerOpen,
+      calibrate: deps.onCalibrateOpen,
     };
 
     // Left empty: main.ts paints it with the speaker or the crossed-out speaker
@@ -237,9 +247,13 @@ export class SheetManager {
   get pointerOpen(): boolean {
     return this.isOpen("pointer");
   }
+  get calibrateOpen(): boolean {
+    return this.isOpen("calibrate");
+  }
 
   show(name: SheetName, on: boolean): void {
     const pointerWasOpen = this.isOpen("pointer");
+    const calibrateWasOpen = this.isOpen("calibrate");
     for (const key of Object.keys(this.roots) as SheetName[]) {
       toggleClass(this.roots[key], "on", on && key === name);
     }
@@ -250,6 +264,9 @@ export class SheetManager {
     );
     if (pointerWasOpen && !this.isOpen("pointer")) {
       this.onPointerClose?.();
+    }
+    if (calibrateWasOpen && !this.isOpen("calibrate")) {
+      this.onCalibrateClose?.();
     }
     if (on) {
       this.opened[name]();
@@ -274,15 +291,22 @@ export class SheetManager {
   showPointer(on: boolean): void {
     this.show("pointer", on);
   }
+  showCalibrate(on: boolean): void {
+    this.show("calibrate", on);
+  }
 
   closeAll(): void {
     const pointerWasOpen = this.isOpen("pointer");
+    const calibrateWasOpen = this.isOpen("calibrate");
     for (const key of Object.keys(this.roots) as SheetName[]) {
       toggleClass(this.roots[key], "on", false);
     }
     toggleClass(this.scrim, "on", false);
     if (pointerWasOpen) {
       this.onPointerClose?.();
+    }
+    if (calibrateWasOpen) {
+      this.onCalibrateClose?.();
     }
   }
 }

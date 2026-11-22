@@ -1,5 +1,5 @@
 // The menu hidden in the Playstick wordmark: the projector, the clock, the
-// pointer. For grown-ups, so it is not where a child's thumb lands by accident.
+// pointer, and the calibration wizard for the pointer and the gamepad. For grown-ups, so it is not where a child's thumb lands by accident.
 //
 // HOW IT OPENS. A long press on a touch screen, because a tap is what a child
 // does to everything; a plain click with a mouse, because nobody long-presses a
@@ -101,6 +101,7 @@ export interface SecretSheetDeps {
   power: (on: boolean) => Promise<PostResult>;
   wakeClock: () => Promise<PostResult>;
   openPointer: () => void;
+  openCalibrate: () => void;
 }
 
 export class SecretSheet {
@@ -172,6 +173,18 @@ export class SecretSheet {
     this.list.appendChild(
       this.action("Pointer", "Point at things on the screen", false, () =>
         this.deps.openPointer(),
+      ),
+    );
+
+    const calBusy = film || this.state === "airplay" || this.state === "gaming";
+    this.list.appendChild(
+      this.action(
+        "Calibrate phone",
+        calBusy
+          ? "Stop what is on the projector first"
+          : "Set up the pointer and gamepad for this phone",
+        calBusy,
+        () => this.deps.openCalibrate(),
       ),
     );
     setText(this.note, this.said);

@@ -52,12 +52,14 @@ export function makeShell(doc: FakeDocument = makePage(), plays: string[] = []):
     episodes: h(d, "div", { id: "esheet", class: "sheet" }),
     secret: h(d, "div", { id: "secretSheet", class: "sheet" }),
     pointer: h(d, "div", { id: "pointerSheet", class: "sheet" }),
+    calibrate: h(d, "div", { id: "calibrateSheet", class: "sheet" }),
     onSoundOpen: () => soundPaints++,
     onSubsOpen: () => subsPaints++,
     onFilterOpen: () => filterPaints++,
     onEpisodesOpen: () => {},
     onSecretOpen: () => {},
     onPointerOpen: () => {},
+    onCalibrateOpen: () => {},
   });
   const library = new LibraryView(
     d,

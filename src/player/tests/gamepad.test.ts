@@ -90,6 +90,28 @@ describe("GamepadView", () => {
     expect(masks.at(-1)).toBe(A | LEFT);
   });
 
+  it("sends what a profile says each button sends, and wears its name", () => {
+    const { view, el, masks } = setup();
+    view.apply(gaming());
+    view.setCalibration(null, { A: B, B: A, START: 64, SELECT: 128 });
+    expect(el("padA").textContent).toBe("B");
+    el("padA").fire("pointerdown");
+    expect(masks.at(-1)).toBe(B);
+    el("padA").fire("pointerup");
+    expect(masks.at(-1)).toBe(0);
+    view.setCalibration(null, null);
+    expect(el("padA").textContent).toBe("A");
+  });
+
+  it("lets go of the bit it pressed, even if the map changed under the thumb", () => {
+    const { view, el, masks } = setup();
+    view.apply(gaming());
+    el("padA").fire("pointerdown");
+    view.setCalibration(null, { A: B, B: A, START: 64, SELECT: 128 });
+    el("padA").fire("pointerup");
+    expect(masks.at(-1)).toBe(0);
+  });
+
   it("offers player two to a listener only when that seat is free", () => {
     const { view, el } = setup();
     view.apply(gaming());

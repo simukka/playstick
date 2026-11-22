@@ -135,7 +135,7 @@ describe("the page boots", () => {
     expect(order).toEqual([
       "banner", "audioBtn", "filterBtn", "subsBtn", "tapToListen", "sheetScrim",
       "sheet", "subsSheet", "fsheet", "esheet", "secretSheet", "pointerSheet",
-      "library", "preparing", "playing", "gamepad",
+      "calibrateSheet", "library", "preparing", "playing", "gamepad",
     ]);
   });
 

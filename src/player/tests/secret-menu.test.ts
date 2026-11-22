@@ -95,6 +95,7 @@ function menu(status: Partial<Status>) {
       return answer({ message: "The clock is back." });
     },
     openPointer: () => calls.push("pointer"),
+    openCalibrate: () => calls.push("calibrate"),
   });
   sheet.onStatus({
     state: "idle",
@@ -112,8 +113,26 @@ function menu(status: Partial<Status>) {
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 describe("SecretSheet", () => {
-  it("offers the three things", () => {
-    expect(menu({}).labels()).toEqual(["Turn projector on", "Show clock", "Pointer"]);
+  it("offers the four things", () => {
+    expect(menu({}).labels()).toEqual([
+      "Turn projector on",
+      "Show clock",
+      "Pointer",
+      "Calibrate phone",
+    ]);
+  });
+
+  it("opens the calibration wizard", () => {
+    const m = menu({});
+    m.rows()[3]!.click();
+    expect(m.calls).toEqual(["calibrate"]);
+  });
+
+  it("will not calibrate over a game, and says why", () => {
+    const m = menu({ state: "gaming" });
+    expect(m.subs()[3]).toBe("Stop what is on the projector first");
+    m.rows()[3]!.click();
+    expect(m.calls).toEqual([]);
   });
 
   it("offers off when the lamp is lit", () => {
@@ -123,7 +142,7 @@ describe("SecretSheet", () => {
 
   it("leaves the projector out when there is none", () => {
     const m = menu({ projector: { model: "none", power: "unknown", fault: "" } });
-    expect(m.labels()).toEqual(["Show clock", "Pointer"]);
+    expect(m.labels()).toEqual(["Show clock", "Pointer", "Calibrate phone"]);
   });
 
   it("will not switch off under a film, and says why", () => {

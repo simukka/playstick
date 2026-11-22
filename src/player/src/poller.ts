@@ -17,7 +17,7 @@ export function pollDelay(state: PlayerState, hidden: boolean): number {
   if (hidden) {
     return 5000;
   }
-  if (state === "playing" || state === "paused" || state === "preparing") {
+  if (state === "playing" || state === "paused" || state === "preparing" || state === "calibrating") {
     return 1000;
   }
   return 3000;

@@ -62,6 +62,7 @@ from .thumbs import placeholder_svg
 from .player import Busy
 from .projector import ProjectorError, Refused
 from . import pointer as pointer_mod
+from . import profiles as profiles_mod
 from .projector import probe as projector_probe
 
 
@@ -288,6 +289,10 @@ class Handler(BaseHTTPRequestHandler):
     # The game runner, or None on a daemon built without games. Its status is
     # in /api/status and its phones are on /api/game/socket.
     game = None
+    # The calibration wizard's projector side, and the profiles it saves. None
+    # in a daemon built without them, and the routes then answer 404.
+    calibration = None
+    profiles = None
 
     # BaseHTTPRequestHandler logs every request to stderr, i.e. into the
     # journal, and a page polling once a second per phone would be the only
@@ -413,6 +418,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_time()
         if path == "/api/game/socket":
             return self._api_game_socket()
+        if path == "/api/calibrate/socket":
+            return self._api_calibrate_socket()
+        if path == "/api/profiles":
+            return self._api_profiles()
+        if path.startswith("/api/profile/"):
+            return self._api_profile_get(path[len("/api/profile/"):])
         if path == "/":
             return self._serve_ui()
         if path == "/api/library":
@@ -471,6 +482,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_clock_wake()
         if path == "/api/pointer":
             return self._api_pointer()
+        if path == "/api/calibrate/start":
+            return self._api_calibrate_start()
+        if path.startswith("/api/profile/"):
+            return self._api_profile_save(path[len("/api/profile/"):])
         if path in ("/api/pause", "/api/resume"):
             self.player.set_pause(path.endswith("pause"))
             return self._api_status()
@@ -851,6 +866,68 @@ class Handler(BaseHTTPRequestHandler):
         shown = self.pointer.update(x, y, bool(body.get("on", True)),
                                     size=size, color=color)
         return self._json({"shown": shown})
+
+    # -- the calibration wizard and the profiles it saves (calibrate.py,
+    #    profiles.py)
+
+    CALIBRATE_ITEM = {"id": "calibrate", "kind": "calibrate",
+                      "title": "Calibration"}
+
+    def _api_calibrate_start(self):
+        """Put the wizard's black screen on the projector. Through the
+        projectionist, like a film, so the lamp is lit and the input chosen;
+        the page watches /api/status for "calibrating". Asking again while it
+        is already up is not an error: a phone that reloads mid-wizard asks
+        again."""
+        if self.calibration is None:
+            return self._json({"error": "Calibration is not set up here."}, 404)
+        state = self.projectionist.state()
+        item = self.projectionist.current_item() or {}
+        if state == "calibrating" or (state == "preparing" and
+                                      item.get("kind") == "calibrate"):
+            return self._json({"ok": True, "state": state})
+        try:
+            self.projectionist.begin(dict(self.CALIBRATE_ITEM))
+        except Busy as exc:
+            return self._json({"error": str(exc)}, 409)
+        return self._json({"ok": True, "state": self._state()})
+
+    def _api_calibrate_socket(self):
+        """The wizard's telemetry and scene, up from the phone. One thread per
+        socket, like the gamepad's."""
+        if self.calibration is None:
+            return self._json({"error": "Calibration is not set up here."}, 404)
+        conn = ws.accept(self)
+        if conn is None:
+            return None
+        self.calibration.serve(conn)
+        return None
+
+    def _api_profiles(self):
+        if self.profiles is None:
+            return self._json({"profiles": []})
+        return self._json({"profiles": self.profiles.list()})
+
+    def _api_profile_get(self, ident):
+        if self.profiles is None or not profiles_mod.ID_RE.match(ident):
+            return self._json({"error": "not found"}, 404)
+        profile = self.profiles.get(ident)
+        if profile is None:
+            return self._json({"error": "not found"}, 404)
+        return self._json(profile)
+
+    def _api_profile_save(self, ident):
+        if self.profiles is None:
+            return self._json({"error": "Profiles are not set up here."}, 404)
+        if not profiles_mod.ID_RE.match(ident):
+            return self._json({"error": "That is not a phone id."}, 400)
+        try:
+            profile = profiles_mod.validate(self._body())
+            saved = self.profiles.save(ident, profile)
+        except ValueError as exc:
+            return self._json({"error": str(exc)}, 400)
+        log("calibration profile saved for %s (%s)", ident, saved["name"])
+        return self._json(saved)
 
     def _api_admin_tls(self):
         """The HTTPS certificate as the admin app's Device page shows it: off,

@@ -50,8 +50,9 @@ export class ReloadPolicy {
     if (!statusBuild || statusBuild === this.build) {
       return false;
     }
-    // Not while there is something to throw away.
-    if (state === "playing" || state === "paused" || state === "preparing") {
+    // Not while there is something to throw away -- a calibration half done
+    // included.
+    if (state === "playing" || state === "paused" || state === "preparing" || state === "calibrating") {
       return false;
     }
     // reload() asks for a navigation, it does not end this turn: polls already

@@ -31,6 +31,15 @@
 // RELEASE_DEG. A hand that rests at exactly the threshold would otherwise
 // flicker the button on and off every reading, which in a game is a character
 // that stutters.
+//
+// CALIBRATION
+//
+// Those are the defaults. A phone that has been through the calibration wizard
+// (calibrate.ts) has a TiltCalibration of its own: a press point for each
+// direction, measured from how far this person comfortably tilts, the release
+// point as a fraction of it, and a sign per axis for a hand that holds the
+// phone the other way round. TILT_CALIBRATION_DEFAULT is exactly the constants
+// above, so a phone with no profile behaves as it always did.
 
 export const UP = 1;
 export const DOWN = 2;
@@ -44,6 +53,24 @@ export const DPAD = UP | DOWN | LEFT | RIGHT;
 
 export const PRESS_DEG = 12;
 export const RELEASE_DEG = 8;
+
+export interface TiltCalibration {
+  /** Degrees past the baseline at which each direction presses. */
+  press: { left: number; right: number; up: number; down: number };
+  /** Where a held direction lets go, as a fraction of its press point. */
+  release_ratio: number;
+  /** 1, or -1 to swap left and right. */
+  roll_sign: number;
+  /** 1, or -1 to swap up and down. */
+  pitch_sign: number;
+}
+
+export const TILT_CALIBRATION_DEFAULT: TiltCalibration = {
+  press: { left: PRESS_DEG, right: PRESS_DEG, up: PRESS_DEG, down: PRESS_DEG },
+  release_ratio: RELEASE_DEG / PRESS_DEG,
+  roll_sign: 1,
+  pitch_sign: 1,
+};
 
 /** One DeviceOrientationEvent's beta and gamma, in degrees. */
 export interface Tilt {
@@ -87,10 +114,24 @@ function wrap(deg: number): number {
 }
 
 export class TiltPad {
+  cal: TiltCalibration;
   private base: { roll: number; pitch: number } | null = null;
   private mask = 0;
   /** The last reading, so re-centre can use it without waiting for another. */
   private last: { roll: number; pitch: number } | null = null;
+  /** The last reading's distance from the baseline, signs applied. */
+  private delta: { roll: number; pitch: number } | null = null;
+
+  constructor(cal: TiltCalibration = TILT_CALIBRATION_DEFAULT) {
+    this.cal = cal;
+  }
+
+  /** How far from level the phone is now, in degrees, with the calibration's
+   * signs applied: roll positive is LEFT, pitch negative is UP. Null until
+   * there is a baseline. The calibration wizard measures with this. */
+  get offset(): { roll: number; pitch: number } | null {
+    return this.delta;
+  }
 
   /** The directions currently held, as UP | DOWN | LEFT | RIGHT bits. */
   get held(): number {
@@ -107,6 +148,7 @@ export class TiltPad {
   reset(): void {
     this.base = null;
     this.last = null;
+    this.delta = null;
     this.mask = 0;
   }
 
@@ -119,20 +161,23 @@ export class TiltPad {
       this.base = now;
       return this.mask;
     }
-    const roll = wrap(now.roll - this.base.roll);
-    const pitch = wrap(now.pitch - this.base.pitch);
+    const roll = this.cal.roll_sign * wrap(now.roll - this.base.roll);
+    const pitch = this.cal.pitch_sign * wrap(now.pitch - this.base.pitch);
+    this.delta = { roll, pitch };
+    const p = this.cal.press;
     this.mask =
-      this.axis(roll, LEFT, RIGHT) | this.axis(-pitch, UP, DOWN);
+      this.axis(roll, LEFT, p.left, RIGHT, p.right) |
+      this.axis(-pitch, UP, p.up, DOWN, p.down);
     return this.mask;
   }
 
-  private axis(delta: number, pos: number, neg: number): number {
-    for (const [bit, value] of [
-      [pos, delta],
-      [neg, -delta],
+  private axis(delta: number, pos: number, posAt: number, neg: number, negAt: number): number {
+    for (const [bit, value, at] of [
+      [pos, delta, posAt],
+      [neg, -delta, negAt],
     ] as const) {
       const held = (this.mask & bit) !== 0;
-      if (value >= PRESS_DEG || (held && value >= RELEASE_DEG)) {
+      if (value >= at || (held && value >= at * this.cal.release_ratio)) {
         return bit;
       }
     }

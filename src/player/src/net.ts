@@ -88,6 +88,28 @@ export class ApiClient {
     return this.post("/api/clock/wake");
   }
 
+  /** Put the calibration wizard's black screen on the projector. */
+  calibrateStart(): Promise<PostResult> {
+    return this.post("/api/calibrate/start");
+  }
+
+  /** The calibration profiles the stick keeps: id and name only. */
+  async profiles(): Promise<{ id: string; name: string }[]> {
+    const r = await this.fetchFn("/api/profiles");
+    const data = (await r.json()) as { profiles?: { id: string; name: string }[] };
+    return data.profiles ?? [];
+  }
+
+  /** One phone's profile, or null if the stick has none for it. */
+  async profile(id: string): Promise<unknown> {
+    const r = await this.fetchFn("/api/profile/" + encodeURIComponent(id));
+    return r.ok ? await r.json() : null;
+  }
+
+  saveProfile(id: string, body: unknown): Promise<PostResult> {
+    return this.post("/api/profile/" + encodeURIComponent(id), body);
+  }
+
   /** One pointer sample. The sender in pointer.ts decides how often. */
   pointer(sample: {
     x: number;

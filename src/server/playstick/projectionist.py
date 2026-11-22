@@ -330,7 +330,10 @@ class Projectionist:
             # -- but with the lamp already started, because it takes a minute
             # to warm whatever else is happening and the NAS takes longer.
             struck_at = None
-            if not self._share_here():
+            # The calibration wizard draws on a black screen and reads nothing
+            # off the share, so it does not wait for the NAS to wake.
+            needs_share = item.get("kind") != "calibrate"
+            if needs_share and not self._share_here():
                 if power == STANDBY:
                     struck_at = self._light()
                 ok, message = self._await_share(prep)

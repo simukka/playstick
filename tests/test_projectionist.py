@@ -732,6 +732,22 @@ class SleepingNas(Base):
         self.assertFalse([c for c in self.projector.calls if c.startswith("nas:")])
         self.assertEqual(steps, ["warming", "input", "display", "starting"])
 
+    def test_calibration_does_not_wait_for_the_films(self):
+        """The wizard draws on a black screen and reads nothing off the share,
+        so a sleeping NAS must not stand between a phone and it."""
+        nas = ScriptedNas(self.projector.calls, up=False)
+        share = Share(False)
+        with settings():
+            projectionist = self.build_with(nas, share)
+            steps = self.steps_of(projectionist)
+            self.run_prepare(projectionist, item={"id": "calibrate",
+                                                  "kind": "calibrate",
+                                                  "title": "Calibration"})
+        self.assertEqual(share.asked, 0)
+        self.assertFalse([c for c in self.projector.calls if c.startswith("nas:")])
+        self.assertNotIn("share", steps)
+        self.assertEqual(self.player.calls, [("start", "calibrate")])
+
     def test_no_nas_configured_gives_the_automount_a_moment_then_says_so(self):
         with settings(SHARE_UNMANAGED_SECONDS=6.0):
             projectionist = self.build_with(None, Share(False))

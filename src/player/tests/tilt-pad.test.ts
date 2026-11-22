@@ -7,6 +7,7 @@ import {
   PRESS_DEG,
   RELEASE_DEG,
   RIGHT,
+  TILT_CALIBRATION_DEFAULT,
   TiltPad,
   UP,
   rollPitch,
@@ -82,5 +83,39 @@ describe("TiltPad hysteresis", () => {
     expect(pad.held).toBe(0);
     expect(pad.update(roll(30), LANDSCAPE)).toBe(0);
     expect(pad.update(roll(10), LANDSCAPE)).toBe(RIGHT);
+  });
+});
+
+describe("TiltPad calibration", () => {
+  const roll = (deg: number) => ({ beta: -deg, gamma: -50 });
+  const padWith = (cal: typeof TILT_CALIBRATION_DEFAULT) => {
+    const pad = new TiltPad(cal);
+    pad.update(rest, LANDSCAPE);
+    return pad;
+  };
+
+  it("presses each direction at its own angle", () => {
+    const pad = padWith({ ...TILT_CALIBRATION_DEFAULT, press: { left: 6, right: 20, up: 12, down: 12 } });
+    expect(pad.update(roll(7), LANDSCAPE)).toBe(LEFT);
+    expect(pad.update(roll(-15), LANDSCAPE)).toBe(0);
+    expect(pad.update(roll(-21), LANDSCAPE)).toBe(RIGHT);
+  });
+
+  it("lets go at the release share of the press", () => {
+    const pad = padWith({ ...TILT_CALIBRATION_DEFAULT, release_ratio: 0.5 });
+    pad.update(roll(13), LANDSCAPE);
+    expect(pad.update(roll(7), LANDSCAPE)).toBe(LEFT);
+    expect(pad.update(roll(5), LANDSCAPE)).toBe(0);
+  });
+
+  it("swaps left and right for a flipped roll", () => {
+    const pad = padWith({ ...TILT_CALIBRATION_DEFAULT, roll_sign: -1 });
+    expect(pad.update(roll(20), LANDSCAPE)).toBe(RIGHT);
+  });
+
+  it("reports how far from level it is", () => {
+    const pad = padWith(TILT_CALIBRATION_DEFAULT);
+    pad.update(roll(20), LANDSCAPE);
+    expect(pad.offset!.roll).toBeCloseTo(20, 0);
   });
 });

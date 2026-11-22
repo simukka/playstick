@@ -47,7 +47,7 @@ from .config import DB_PATH, log
 # bottom of this file; a database at version N is brought forward by running
 # every statement from N onwards. There is no downgrade, and there does not
 # need to be: the whole store is rebuilt by one sync from the admin app.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 SCHEMA = """
@@ -219,9 +219,23 @@ ALTER TABLE film ADD COLUMN system TEXT;
 ALTER TABLE film ADD COLUMN players INTEGER;
 """
 
+# A phone's calibration profile, saved by the wizard (see profiles.py). `id`
+# is made up by the phone once and kept in its own storage; it names a phone,
+# not a person. `data` is the profile as JSON, checked by profiles.validate
+# before it is written. A table of its own, not rows in `meta`, so listing the
+# profiles is a query rather than a scan of keys.
+PHONE_PROFILE = """
+CREATE TABLE phone_profile (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  data        TEXT NOT NULL,
+  updated_at  REAL NOT NULL
+);
+"""
+
 # Applied in order to bring a database forward. Index 0 creates everything from
 # nothing; later entries are the deltas. Keep them append-only.
-MIGRATIONS = (SCHEMA, EPISODES, SERIES_ART, GAMES)
+MIGRATIONS = (SCHEMA, EPISODES, SERIES_ART, GAMES, PHONE_PROFILE)
 
 # Where two branches numbered their own migrations. cleanup-src made 3
 # SERIES_ART and games made 3 GAMES, and a device may have been deployed from
