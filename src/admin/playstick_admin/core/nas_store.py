@@ -140,8 +140,10 @@ def place(nas_root, ident, rels, progress=None):
 
 def _move_one(src, dest):
     part = dest + ".part"
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
     try:
+        # Inside the try: an unmounted or full share fails here first, and
+        # place() promises a NasError, not an OSError, for that.
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
         try:
             # Free, since staging is on the share. The copy below is for a
             # share whose .playstick is a different mount from its root.
