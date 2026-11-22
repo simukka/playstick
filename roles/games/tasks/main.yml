@@ -1,0 +1,75 @@
+---
+# Games: the emulator cores and SDL for playstick-game, and the frontend itself.
+# The daemon that starts a game is the player role's; this role only puts in
+# place what that daemon runs. See the games section of group_vars/all.yml.
+- name: Games are enabled
+  when: games_enabled | bool
+  block:
+
+    - name: Install the emulator cores and SDL for Python
+      ansible.builtin.apt:
+        name: "{{ games_apt_packages }}"
+        state: present
+        install_recommends: false
+        update_cache: true
+        cache_valid_time: 3600
+
+    # The core paths in settings.toml are where the packages put them on this
+    # release. A package that moved its .so would otherwise surface as "this
+    # stick cannot play nes games yet" on a phone, long after the deploy.
+    - name: Find each configured core
+      ansible.builtin.stat:
+        path: "{{ item.value }}"
+      loop: "{{ games_cores | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      register: games_core_stat
+
+    - name: Refuse a core that is not where settings.toml will say it is
+      ansible.builtin.assert:
+        that: item.stat.exists
+        fail_msg: >-
+          The {{ item.item.key }} core is not at {{ item.item.value }}.
+          Find where the package put it (dpkg -L, then the libretro
+          directory) and set games_cores.{{ item.item.key }} to that path.
+        quiet: true
+      loop: "{{ games_core_stat.results }}"
+      loop_control:
+        label: "{{ item.item.key }}"
+
+    # The cheapest proof the frontend can run: python3-sdl2 imports, and
+    # libSDL2 underneath it has the KMSDRM driver this box has no X for.
+    - name: Check SDL offers the KMSDRM video driver
+      ansible.builtin.command:
+        cmd: >-
+          {{ games_python }} -c "import sdl2;
+          n = sdl2.SDL_GetNumVideoDrivers();
+          print(' '.join(sdl2.SDL_GetVideoDriver(i).decode() for i in range(n)))"
+      register: games_sdl_drivers
+      changed_when: false
+
+    # Lowered first: SDL names the driver "KMSDRM", and matches the
+    # SDL_VIDEODRIVER the frontend sets regardless of case.
+    - name: Refuse an SDL without KMSDRM
+      ansible.builtin.assert:
+        that: "'kmsdrm' in (games_sdl_drivers.stdout | lower).split()"
+        fail_msg: >-
+          SDL here offers {{ games_sdl_drivers.stdout }}, and playstick-game
+          needs kmsdrm to draw without an X server.
+        quiet: true
+
+    - name: Install the game frontend
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/src/server/playstick-game.py"
+        dest: "{{ games_frontend }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Make the directory for game saves
+      ansible.builtin.file:
+        path: "{{ games_saves }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"

@@ -9,7 +9,7 @@ import { TAIL } from "./seek";
 import type { Status } from "./types";
 import { WORDMARK } from "./brand";
 
-export type ViewName = "library" | "preparing" | "playing";
+export type ViewName = "library" | "preparing" | "playing" | "gamepad";
 
 const PLAY_GLYPH = "\u25B6"; // ▶
 const PAUSE_GLYPH = "\u2759\u2759"; // ❙❙
@@ -175,6 +175,8 @@ export interface SwitcherViews {
   library: HTMLElement;
   preparing: HTMLElement;
   playing: HTMLElement;
+  /** The gamepad. Absent in the tests that predate games. */
+  gamepad?: HTMLElement;
   /** The funnel, built by the sheet manager: it belongs to the grid alone. */
   filterBtn: HTMLElement;
 }
@@ -203,6 +205,9 @@ export class ViewSwitcher {
     toggleClass(this.views.library, "on", name === "library");
     toggleClass(this.views.preparing, "on", name === "preparing");
     toggleClass(this.views.playing, "on", name === "playing");
+    if (this.views.gamepad) {
+      toggleClass(this.views.gamepad, "on", name === "gamepad");
+    }
     // The funnel belongs only to the grid: nothing on the now-playing view is a
     // list, so a control for narrowing one there would only be a mis-tap.
     toggleClass(this.views.filterBtn, "on", name === "library");

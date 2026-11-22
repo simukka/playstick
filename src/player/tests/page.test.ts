@@ -135,7 +135,7 @@ describe("the page boots", () => {
     expect(order).toEqual([
       "banner", "audioBtn", "filterBtn", "subsBtn", "tapToListen", "sheetScrim",
       "sheet", "subsSheet", "fsheet", "esheet", "secretSheet", "pointerSheet",
-      "library", "preparing", "playing",
+      "library", "preparing", "playing", "gamepad",
     ]);
   });
 
@@ -237,6 +237,23 @@ describe("the sheets, from a real tap", () => {
     p.tap("audioBtn");
     expect(p.css("tuneList").display).toBe("block");
     expect(p.el("tuneList").children.length).toBeGreaterThan(0);
+  });
+});
+
+describe("the view a game brings up", () => {
+  it("shows the gamepad, with its thumb buttons, while a game is on", async () => {
+    const p = await boot({
+      state: "gaming",
+      id: "g",
+      title: "Lan Master",
+      game: { system: "nes", players: 2, seats: [false, false], rate: 24000 },
+    } as Partial<Status>);
+    await until(() => p.css("gamepad").display === "flex");
+    expect(p.css("library").display).toBe("none");
+    expect(p.css("filterBtn").display).toBe("none");
+    expect(p.el("padTitle").textContent).toBe("Lan Master");
+    expect(p.el("padA").textContent).toBe("A");
+    expect(p.el("padB").textContent).toBe("B");
   });
 });
 
@@ -354,7 +371,7 @@ describe("the offer to switch the NAS on", () => {
   it("draws a real, styled, tappable button under the sentence", async () => {
     const p = await boot(nasOff as Partial<Status>);
     await until(() => p.css("banner").display === "block");
-    expect(p.el("bannerMsg").textContent).toMatch(/the NAS is off/);
+    expect(p.el("bannerMsg").textContent).toMatch(/The NAS is off/);
     // The CSS reached it: without the stylesheet this is "inline", which is
     // the failure a stub DOM cannot see.
     expect(p.css("bannerAct").display).toBe("block");

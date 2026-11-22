@@ -34,6 +34,14 @@ def _film(p, c):
         p.drawLine(QPointF(17, y), QPointF(21, y))
 
 
+def _gamepad(p, c):
+    p.drawRoundedRect(QRectF(2.5, 7, 19, 11), 5, 5)
+    p.drawLine(QPointF(7, 10.5), QPointF(7, 14.5))
+    p.drawLine(QPointF(5, 12.5), QPointF(9, 12.5))
+    p.drawEllipse(QPointF(15.5, 13.5), 0.9, 0.9)
+    p.drawEllipse(QPointF(18, 11.5), 0.9, 0.9)
+
+
 def _library(p, c):
     p.drawRoundedRect(QRectF(3, 4, 18, 16), 2, 2)
     p.drawLine(QPointF(3, 9), QPointF(21, 9))
@@ -197,7 +205,7 @@ def _poster(p, c):
 
 
 DRAW = {
-    "film": _film, "library": _library, "monitor": _monitor, "gear": _gear,
+    "film": _film, "gamepad": _gamepad, "library": _library, "monitor": _monitor, "gear": _gear,
     "search": _search, "plus": _plus, "refresh": _refresh,
     "up": lambda p, c: _arrow(p, True), "down": lambda p, c: _arrow(p, False),
     "trash": _trash, "check": _check, "stop": _stop, "close": _close,

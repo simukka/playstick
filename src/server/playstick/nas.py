@@ -9,7 +9,9 @@ walk to the NAS and press its button.
 This module is the missing half. It answers two questions and does one thing:
 
     snapshot()  is the NAS awake?      -- polled by /api/status
-    wake()      make it awake          -- POST /api/nas/wake
+    wake()      make it awake          -- POST /api/nas/wake, and a film
+                                          picked while it sleeps (see
+                                          Projectionist._await_share)
 
 WHY A SEPARATE PROBE RATHER THAN library.available. The library flag is derived
 from a walk of the share that runs every SCAN_INTERVAL (300 s by default), and
@@ -199,6 +201,34 @@ class NasWatcher:
             # only question being asked: can the share be reached. Which of
             # them it was is not something the page could act on differently.
             return False
+
+    def ping(self):
+        """One ICMP echo. True if the NAS answered within a second.
+
+        Not the 445 probe above, and that difference is the point: this is the
+        first sign of life after a wake-on-LAN, long before smbd is listening,
+        and Projectionist uses it to tell "the packet did nothing" from "it is
+        booting". Whether the films are there is a separate question it asks of
+        the mount itself afterwards. `ping` rather than a socket of our own
+        because NoNewPrivileges keeps its capability from it anyway, and the
+        unprivileged ICMP socket it then falls back to is allowed for every
+        group by Ubuntu's ping_group_range.
+        """
+        if not self._host:
+            return False
+        try:
+            res = subprocess.run(["ping", "-n", "-q", "-c", "1", "-W", "1",
+                                  self._host],
+                                 capture_output=True, timeout=5)
+        except Exception as exc:                     # noqa: BLE001
+            log("nas: ping %s: %s", self._host, exc)
+            return False
+        return res.returncode == 0
+
+    def recover(self):
+        """The public face of _recover, for a caller that knows the NAS is back
+        before the keeper's next tick does -- a film waiting on it."""
+        self._recover()
 
     def interval(self):
         with self._lock:

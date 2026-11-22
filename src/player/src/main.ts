@@ -24,12 +24,16 @@ import { EpisodeSheet } from "./episode-sheet";
 import { SheetManager } from "./sheet";
 import { SecretSheet, holdToOpen } from "./secret-menu";
 import { PointerSender, PointerSheet, type Orientation } from "./pointer";
-import { browserStorage } from "./prefs";
+import { browserStorage, loadShelf, saveShelf } from "./prefs";
 import { TimeDriver } from "./time-driver";
 import { Poller } from "./poller";
 import { toggleClass } from "./dom";
 import { installStyles } from "./styles";
 import type { Status } from "./types";
+import { GameAudio, type AudioContextLike } from "./game-audio";
+import { GameLink, socketUrl, type SocketLike } from "./game-link";
+import { GamepadView } from "./gamepad";
+import type { Tilt } from "./tilt-pad";
 
 function boot(): void {
   const doc = document;
@@ -178,6 +182,61 @@ function boot(): void {
     },
   });
 
+  // --- the gamepad ---------------------------------------------------------
+  const gameAudio = new GameAudio({
+    makeContext: () => {
+      const Ctx =
+        (window as unknown as { AudioContext?: new () => AudioContextLike }).AudioContext ||
+        (window as unknown as { webkitAudioContext?: new () => AudioContextLike })
+          .webkitAudioContext;
+      return Ctx ? new Ctx() : null;
+    },
+    session: (navigator as unknown as { audioSession?: { type: string } }).audioSession ?? null,
+  });
+  const gameLink = new GameLink({
+    open: (url) => new WebSocket(url) as unknown as SocketLike,
+    url: socketUrl(window.location),
+    schedule: (fn, ms) => window.setTimeout(fn, ms),
+    cancel: (id) => window.clearTimeout(id),
+    every: (fn, ms) => window.setInterval(fn, ms),
+    stopEvery: (id) => window.clearInterval(id),
+    onRole: (role, info) => gamepad.onRole(role, info),
+    onSound: (pcm) => gameAudio.push(pcm),
+  });
+  const gamepad = new GamepadView(doc, {
+    link: gameLink,
+    audio: gameAudio,
+    tiltAvailable: window.isSecureContext && orientation !== null,
+    requestTilt:
+      orientation && typeof orientation.requestPermission === "function"
+        ? () =>
+            orientation.requestPermission!().then(
+              (answer) => answer === "granted",
+              () => false,
+            )
+        : undefined,
+    listenTilt: (fn: (t: Tilt) => void) => {
+      const onTurn = (ev: DeviceOrientationEvent): void => {
+        if (ev.beta !== null && ev.gamma !== null) {
+          fn({ beta: ev.beta, gamma: ev.gamma });
+        }
+      };
+      window.addEventListener("deviceorientation", onTurn);
+      return () => window.removeEventListener("deviceorientation", onTurn);
+    },
+    angle: () =>
+      screen.orientation?.angle ??
+      Number((window as unknown as { orientation?: number }).orientation) ??
+      0,
+    stop: () => {
+      void api.stop().then((r) => onStatus(r.data as unknown as Status));
+    },
+    schedule: (fn, ms) => window.setTimeout(fn, ms),
+    cancel: (id) => window.clearTimeout(id),
+    vibrate:
+      typeof navigator.vibrate === "function" ? (ms) => void navigator.vibrate(ms) : undefined,
+  });
+
   const sheets = new SheetManager(doc, {
     sound: soundSheet.root,
     subs: subsSheet.root,
@@ -205,7 +264,10 @@ function boot(): void {
       play(id);
     }
   };
-  const libraryView = new LibraryView(doc, model, stamp, openTile, sheets.filterBtn);
+  model.setShelf(loadShelf(browserStorage()));
+  const libraryView = new LibraryView(doc, model, stamp, openTile, sheets.filterBtn, Date.now, (shelf) =>
+    saveShelf(browserStorage(), shelf),
+  );
 
   // The one control that is not a playback button, so it is not the Controls'
   // business -- but it wants the same double-tap lock, for the same reason:
@@ -241,6 +303,7 @@ function boot(): void {
     filterBtn: sheets.filterBtn,
     subsBtn: sheets.subsBtn,
     wakeNas,
+    gamepad,
   });
 
   const hold = {
@@ -289,6 +352,7 @@ function boot(): void {
     libraryView.root,
     presenter.preparing.root,
     presenter.playing.root,
+    gamepad.root,
   ]) {
     doc.body.appendChild(el);
   }
@@ -341,7 +405,10 @@ function boot(): void {
       pointerSheet.paint();
     }
     const onGrid =
-      s.state !== "playing" && s.state !== "paused" && s.state !== "preparing";
+      s.state !== "playing" &&
+      s.state !== "paused" &&
+      s.state !== "preparing" &&
+      s.state !== "gaming";
     if (onGrid) {
       // The film went away -- it ended, or somebody else stopped it. A skip
       // queued against a timeline that no longer exists must not be sent.
@@ -391,6 +458,11 @@ function boot(): void {
     const item = model.all.find((i) => i.id === id);
     if (!item) {
       return;
+    }
+    // A game wants the sound and the tilt switched on, and a phone only allows
+    // either from inside a tap. This is that tap.
+    if (item.kind === "game") {
+      gamepad.prime();
     }
     // Drawn before the POST answers, with the poster the grid already has, so
     // the tap makes a picture of the right film immediately.

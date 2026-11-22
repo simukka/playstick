@@ -262,6 +262,28 @@ MPV_SOCKET = _get("mpv", "socket", "/run/playstick/mpv.sock")
 # session has no controlling terminal. Empty disables it.
 MPV_TTY = _get("mpv", "tty", "/dev/tty1")
 
+# Games. playstick-game is the frontend; it is run with the system python so
+# it finds python3-sdl2, and handed the core for the game's system. A system
+# with no core here is refused at play time with a sentence, not a crash.
+GAMES_ENABLED = bool(_get("games", "enabled", True))
+GAME_FRONTEND = _get("games", "frontend", "/usr/local/bin/playstick-game.py")
+GAME_PYTHON = _get("games", "python", "/usr/bin/python3")
+GAME_SOCKET = _get("games", "socket", "/run/playstick/game.sock")
+GAME_AUDIO_RATE = int(_get("games", "audio_rate", 24000) or 24000)
+GAME_MAX_SOCKETS = int(_get("games", "max_sockets", 8) or 8)
+# Where a cartridge's battery-backed memory is kept between games. Under the
+# unit's StateDirectory, so it survives a reboot and a re-provision.
+GAME_SAVES = _get("games", "saves", "/var/lib/playstick/saves")
+# Extra arguments for the frontend. Empty on the stick; the tests pass
+# --headless.
+GAME_EXTRA_ARGS = list(_get("games", "extra_args", []))
+GAME_CORES = dict(_get("games", "cores", {
+    "nes": "/usr/lib/x86_64-linux-gnu/libretro/nestopia_libretro.so",
+    "gb": "/usr/lib/x86_64-linux-gnu/libretro/gambatte_libretro.so",
+    "gbc": "/usr/lib/x86_64-linux-gnu/libretro/gambatte_libretro.so",
+    "sms": "/usr/lib/x86_64-linux-gnu/libretro/genesis_plus_gx_libretro.so",
+}) or {})
+
 BUSY_FILE = _get("display", "busy_file", "/run/playstick/playing")
 # Written before the AirPlay unit is stopped and removed after it is started
 # again. Its presence is how a restarted daemon -- or the unit's ExecStopPost --

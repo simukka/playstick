@@ -9,6 +9,7 @@
 import { toggleClass } from "./dom";
 import type { ReloadPolicy } from "./build";
 import { Banner, PlayingView, PreparingView, ViewSwitcher } from "./views";
+import type { GamepadView } from "./gamepad";
 import type { PlayerState, Status } from "./types";
 
 export interface PresenterDeps {
@@ -28,6 +29,9 @@ export interface PresenterDeps {
   /** Tapped when the banner offers to switch the NAS on. Absent in the tests
    * that do not care, and then the offer is simply never made. */
   wakeNas?: () => void;
+  /** The gamepad, built by the composition root. Absent in the tests that
+   * predate games, and then "gaming" falls through to the grid. */
+  gamepad?: GamepadView;
 }
 
 export class StatusPresenter {
@@ -39,6 +43,7 @@ export class StatusPresenter {
   private readonly reload: ReloadPolicy;
   private readonly wakeNas?: () => void;
   private readonly subsBtn?: HTMLElement;
+  private readonly gamepad?: GamepadView;
 
   /** The state the last poll reported, read by the controls to decide what the
    * play/pause button does. */
@@ -52,8 +57,10 @@ export class StatusPresenter {
       library: deps.library,
       preparing: this.preparing.root,
       playing: this.playing.root,
+      gamepad: deps.gamepad?.root,
       filterBtn: deps.filterBtn,
     });
+    this.gamepad = deps.gamepad;
     this.grid = deps.grid;
     this.reload = deps.reload;
     this.wakeNas = deps.wakeNas;
@@ -64,6 +71,17 @@ export class StatusPresenter {
     this.state = s.state;
     this.reload.consider(s.build, s.state);
     this.paintSubsBtn(s);
+
+    if (s.state === "gaming" && this.gamepad) {
+      this.views.show("gamepad");
+      this.banner.show(
+        s.projector?.fault ? "The game is on, but I couldn't reach the projector." : "",
+      );
+      this.gamepad.apply(s);
+      return;
+    }
+    // Not a game, or not any more: the socket and the sound go with the view.
+    this.gamepad?.leave();
 
     if (s.state === "preparing") {
       this.views.show("preparing");
@@ -146,8 +164,11 @@ export class StatusPresenter {
       return;
     }
     if (s.nas?.power === "off" && s.nas.can_wake && this.wakeNas) {
+      // Picking a film wakes it too (the daemon does it as the first step of
+      // starting one), so the button is for somebody who wants the NAS on
+      // without choosing yet.
       this.banner.show(
-        "Can't reach the movies \u2014 the NAS is off.",
+        "The NAS is off \u2014 pick a movie and I'll switch it on.",
         0,
         { label: "Turn it on", onTap: this.wakeNas },
       );

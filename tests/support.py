@@ -175,7 +175,7 @@ class FakeNas:
 
 
 class FakeLibrary:
-    """Library's three-method surface. `snapshot` returns the same five-tuple
+    """Library's surface as the handler uses it. `snapshot` returns the same five-tuple
     the real one does, in the same order, because the handler unpacks it
     positionally."""
 
@@ -203,6 +203,9 @@ class FakeLibrary:
         self.snapshots += 1
         return (list(self.order), dict(self.items), self.available,
                 self.scanned_at, self.error)
+
+    def share(self):
+        return self.available, self.scanned_at, self.error
 
     def get(self, ident):
         return self.items.get(ident)

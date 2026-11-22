@@ -1,3 +1,39 @@
+playstick (1.1.5) unstable; urgency=medium
+
+  * Adds Run all to the Deploy tab, and stops naming actl in the app.
+
+ -- simukka <kylesimukka@gmail.com>  Sun, 22 Nov 2026 09:45:26 +0100
+
+playstick (1.1.4) unstable; urgency=medium
+
+  * Lets the games role through on an SDL that names its driver KMSDRM in capitals.
+
+ -- simukka <kylesimukka@gmail.com>  Sun, 22 Nov 2026 09:31:37 +0100
+
+playstick (1.1.3) unstable; urgency=medium
+
+  * Brings a library or a stick from either branch's numbering forward, rather than failing on a table it already has.
+
+ -- simukka <kylesimukka@gmail.com>  Sun, 22 Nov 2026 09:18:41 +0100
+
+playstick (1.1.2) unstable; urgency=medium
+
+  * Stops the admin app crashing at start on a library that a series-and-settings build had already moved to version 4.
+
+ -- simukka <kylesimukka@gmail.com>  Sun, 22 Nov 2026 09:12:50 +0100
+
+playstick (1.1.1) unstable; urgency=medium
+
+  * Keeps the phone page answering while the NAS is off, and wakes the NAS when a film is picked.
+
+ -- simukka <kylesimukka@gmail.com>  Sun, 22 Nov 2026 09:02:49 +0100
+
+playstick (1.1.0) unstable; urgency=medium
+
+  * Plays NES, Game Boy and Master System games from the library, with the phone as the gamepad and the speaker.
+
+ -- simukka <kylesimukka@gmail.com>  Sun, 22 Nov 2026 08:51:29 +0100
+
 playstick (1.0.4) unstable; urgency=medium
 
   * Add pointer.

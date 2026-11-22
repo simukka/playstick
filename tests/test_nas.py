@@ -296,6 +296,40 @@ class Recovery(unittest.TestCase):
         self.run.assert_not_called()
 
 
+class Ping(unittest.TestCase):
+    """The first sign of life after a wake, which a film waiting on the NAS
+    watches for before it asks the mount."""
+
+    def run_with(self, returncode=0, side_effect=None):
+        result = mock.Mock(returncode=returncode)
+        return mock.patch.object(nasmod.subprocess, "run",
+                                 return_value=result, side_effect=side_effect)
+
+    def test_an_answer_is_true_and_asks_once_with_a_deadline(self):
+        with self.run_with(0) as run:
+            self.assertTrue(NasWatcher(host="10.0.0.5").ping())
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[0], "ping")
+        self.assertEqual(argv[-1], "10.0.0.5")
+        self.assertIn("-c", argv)
+        self.assertIn("-W", argv)
+        self.assertIn("timeout", run.call_args[1])
+
+    def test_no_answer_is_false(self):
+        with self.run_with(1):
+            self.assertFalse(NasWatcher(host="10.0.0.5").ping())
+
+    def test_a_ping_that_cannot_run_is_false_not_an_exception(self):
+        with self.run_with(side_effect=FileNotFoundError("ping")), \
+                mock.patch.object(nasmod, "log"):
+            self.assertFalse(NasWatcher(host="10.0.0.5").ping())
+
+    def test_no_host_does_not_ping_at_all(self):
+        with self.run_with(0) as run:
+            self.assertFalse(NasWatcher(host="").ping())
+        run.assert_not_called()
+
+
 class Thread(unittest.TestCase):
     def test_an_unconfigured_nas_costs_a_thread_that_exits(self):
         watcher = NasWatcher(host="", mac="")

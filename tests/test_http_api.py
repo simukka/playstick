@@ -137,7 +137,7 @@ class Routing(ApiTest):
         self.assertEqual(first.status, 200)
         second = self.fetch("/api/resume", method="POST", body={}, conn=conn)
         self.assertEqual(second.status, 200)
-        self.assertEqual(self.assertJson(second)["state"], "idle")
+        self.assertEqual(self.assertJson(second)["state"], "playing")
         third = self.fetch("/api/stop", method="POST", body={}, conn=conn)
         self.assertEqual(third.status, 200)
 
@@ -420,6 +420,15 @@ class State(ApiTest):
     def test_unavailable_when_the_share_is_not_there(self):
         self.library.available = False
         self.assertEqual(self._state(), "unavailable")
+
+    def test_status_never_reads_the_table(self):
+        """It did, once a second per phone, to learn one bool -- and reading
+        the table stat'ed the share, so a NAS that dropped off the network took
+        /api/status down with it, one stuck thread per poll. The keeper's
+        answer is all this needs."""
+        self.library.available = False
+        self.assertEqual(self._state(), "unavailable")
+        self.assertEqual(self.library.snapshots, 0)
 
     def test_airplay_outranks_an_unmounted_share(self):
         """Somebody is mirroring. That is the more useful thing to say, and it

@@ -76,7 +76,7 @@ class Schema(unittest.TestCase):
         """A device in a cupboard runs whatever schema it last started with.
         Its films must survive the step forward, and simply read as films."""
         import sqlite3
-        from playstick.db import Database, SCHEMA
+        from playstick.db import Database, SCHEMA, SCHEMA_VERSION
         path = os.path.join(TMP, "old-v1.sqlite")
         conn = sqlite3.connect(path)
         conn.executescript(SCHEMA)
@@ -88,10 +88,38 @@ class Schema(unittest.TestCase):
         conn.close()
         db = Database(path)
         with mock.patch("playstick.db.log"):
-            self.assertEqual(db.migrate(), 2)
+            self.assertEqual(db.migrate(), SCHEMA_VERSION)
         row = db.one("SELECT title, series, season, episode FROM film")
         db.close()
         self.assertEqual(tuple(row), ("Ponyo", None, None, None))
+
+    def test_a_version_three_file_from_either_branch_comes_forward(self):
+        """games and cleanup-src each made their own migration 3 -- GAMES on
+        one, SERIES_ART on the other -- so a device at 3 may have either. Both
+        must end up with everything, and neither may trip over what it has."""
+        import sqlite3
+        from playstick.db import (Database, EPISODES, GAMES, SCHEMA,
+                                  SCHEMA_VERSION, SERIES_ART)
+        for name, third in (("games", GAMES), ("series", SERIES_ART)):
+            with self.subTest(branch=name):
+                path = os.path.join(TMP, "old-v3-%s.sqlite" % name)
+                if os.path.exists(path):
+                    os.remove(path)
+                conn = sqlite3.connect(path)
+                for step in (SCHEMA, EPISODES, third):
+                    conn.executescript(step)
+                conn.execute("PRAGMA user_version=3")
+                conn.commit()
+                conn.close()
+                db = Database(path)
+                with mock.patch("playstick.db.log"):
+                    self.assertEqual(db.migrate(), SCHEMA_VERSION)
+                columns = {row[1] for row in db.query("PRAGMA table_info(film)")}
+                tables = {row[0] for row in db.query(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                db.close()
+                self.assertLessEqual({"kind", "system", "players"}, columns)
+                self.assertIn("series_art", tables)
 
     def test_it_is_in_wal(self):
         """A poster extraction landing a blob must not block six phones polling
@@ -436,6 +464,86 @@ class AdminRows(unittest.TestCase):
         row = library.rows()[0]
         self.assertEqual(row["title"], "Ponyo")
         self.assertEqual(row["overrides"], {"title": "Corrected"})
+
+
+class ReadingNeverWaitsOnTheShare(unittest.TestCase):
+    """The NAS can vanish at any moment, and a stat against a CIFS mount whose
+    server has gone does not fail, it waits. /api/status and /api/library read
+    this table for every phone every second, so reading it must not stat."""
+
+    def test_a_read_makes_no_filesystem_call(self):
+        _db, library, _thumbs = real_store("no-stat")
+        library.sync([film(subtitles=[{"rel": "subs/Ponyo.eng.srt",
+                                       "lang": "eng"}])])
+        boom = mock.Mock(side_effect=AssertionError("touched the share"))
+        with mock.patch("os.path.realpath", boom), \
+                mock.patch("os.path.isfile", boom), \
+                mock.patch("os.stat", boom), \
+                mock.patch("os.lstat", boom):
+            order, items, _a, _s, _e = library.snapshot()
+            library.get(FILM)
+        self.assertEqual(order, [FILM])
+        # Kept, though no such file exists: the player drops a missing one
+        # when it plays, which is the one moment that is worth asking.
+        self.assertEqual([s["lang"] for s in items[FILM]["subs"]], ["eng"])
+
+    def test_a_path_that_escapes_by_its_text_is_still_dropped(self):
+        _db, library, _thumbs = real_store("text-escape")
+        library.sync([film()])
+        _db.write().execute("UPDATE film SET media_rel = '../../etc/passwd'")
+        with mock.patch("playstick.library.log"):
+            self.assertEqual(library.snapshot()[0], [])
+
+    def test_share_reads_the_keepers_answer_and_nothing_else(self):
+        _db, library, _thumbs = real_store("share")
+        with mock.patch.object(library, "_read_all",
+                               side_effect=AssertionError("read the table")):
+            self.assertEqual(library.share()[0], False)
+
+
+class ShareProbe(unittest.TestCase):
+    """share_present gives up rather than waiting with a dead mount."""
+
+    def setUp(self):
+        from playstick import library as module
+        self.module = module
+        module._probe_stuck = None
+        self.addCleanup(setattr, module, "_probe_stuck", None)
+
+    def test_a_directory_that_is_there(self):
+        self.assertIs(self.module.share_present(LIBRARY_DIR, timeout=2), True)
+
+    def test_a_directory_that_is_not(self):
+        self.assertIs(self.module.share_present(
+            os.path.join(TMP, "no-such-share"), timeout=2), False)
+
+    def test_a_mount_that_does_not_answer_is_none_and_costs_one_thread(self):
+        import threading
+        release = threading.Event()
+        calls = []
+
+        def hung(_path):
+            calls.append(1)
+            release.wait(5)
+            return True
+        self.addCleanup(release.set)
+        with mock.patch("os.path.isdir", hung):
+            self.assertIsNone(self.module.share_present(LIBRARY_DIR, timeout=0.05))
+            # Still stuck: answered at once, and no second thread joins it.
+            self.assertIsNone(self.module.share_present(LIBRARY_DIR, timeout=0.05))
+            self.assertEqual(len(calls), 1)
+            release.set()
+            self.module._probe_stuck.join(2)
+            self.assertIs(self.module.share_present(LIBRARY_DIR, timeout=2), True)
+
+    def test_the_keeper_records_a_share_that_does_not_answer(self):
+        _db, library, _thumbs = real_store("probe")
+        with mock.patch("playstick.library.share_present", return_value=None), \
+                mock.patch("playstick.library.log"):
+            library._probe()
+        available, _at, error = library.share()
+        self.assertFalse(available)
+        self.assertEqual(error, "the share is not answering")
 
 
 if __name__ == "__main__":

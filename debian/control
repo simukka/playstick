@@ -27,5 +27,5 @@ Description: desktop admin and library manager for the playstick appliance
  share the stick reads, and tells the stick what is there.
  .
  Runs on the machine that encodes the library, not on the stick. The
- Config tab edits a playstick checkout's Ansible variables and runs its
- actl, so it needs a clone of the repo named in Settings.
+ Config tab edits the Ansible variables and deploys to the stick from the
+ playstick checkout named in Settings.

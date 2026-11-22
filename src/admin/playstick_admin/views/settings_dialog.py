@@ -126,7 +126,7 @@ class SettingsForm(QWidget):
         # somebody wants titles and plots in another language.
         if not first_run:
             form.addRow("TMDb language", self._tmdb_lang)
-            form.addRow("Repo root (for actl)", self._repo)
+            form.addRow("Repo root (for deploys)", self._repo)
 
         # --- logging in to it -----------------------------------------------
         self._ssh_user = QLineEdit(settings.ssh_user)

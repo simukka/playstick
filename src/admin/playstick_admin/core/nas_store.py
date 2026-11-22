@@ -53,7 +53,7 @@ LOG = logging.getLogger(__name__)
 # The directories under the share that this app owns. Everything else there is
 # somebody's film collection and is never touched -- a sweep that walked the
 # whole share would be one bug away from deleting it.
-OWNED = ("media", "subs", "audio")
+OWNED = ("media", "subs", "audio", "roms")
 
 
 class NasError(Exception):
@@ -235,6 +235,8 @@ def orphans(db, nas_root):
         claimed.add(row["source_rel"])
     for table in ("prepared_subtitle", "prepared_audio"):
         claimed |= {r["rel"] for r in db.query("SELECT rel FROM %s" % table)}
+    # The games' ROMs, which are under roms/ and claimed by the game table.
+    claimed |= {r["rel"] for r in db.query("SELECT rel FROM game")}
 
     found = []
     for name in OWNED:

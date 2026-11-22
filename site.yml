@@ -69,4 +69,7 @@
     # to take DRM master, so it asserts that unit is installed, and it needs
     # drm_card_path from graphics and uxplay_port for the mirroring gate.
     - player
+    # After the player: the daemon that starts a game is the player's, and a
+    # game deploy without one would install cores nothing can run.
+    - games
     - probe

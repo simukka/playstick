@@ -14,7 +14,7 @@ import threading
 import time
 import unittest
 
-from support import ApiTest, api, audio_track, patched, write_file
+from support import LIBRARY_DIR, ApiTest, api, audio_track, patched, write_file
 
 
 FILM = "0123456789abcdef"
@@ -30,8 +30,10 @@ class AudioTest(ApiTest):
 
     def setUp(self):
         super().setUp()
-        self.jpn = write_file("tracks/%s.0.m4a" % FILM, DATA)
-        self.eng = write_file("tracks/%s.1.m4a" % FILM, b"english " * 64)
+        # Under the library root: the route resolves the path and refuses
+        # anything that lands outside it, the way Player.start does a film.
+        self.jpn = write_file("movies/tracks/%s.0.m4a" % FILM, DATA)
+        self.eng = write_file("movies/tracks/%s.1.m4a" % FILM, b"english " * 64)
         self.library.add(FILM, "Ponyo", audio=[
             audio_track(0, "jpn", "Japanese", path=self.jpn),
             audio_track(1, "eng", "English", path=self.eng),
@@ -86,11 +88,25 @@ class Route(AudioTest):
         """Listed in the index, gone from the NAS -- somebody re-prepped the
         library, or the share went away mid-film. The page can put a 404 into
         words."""
-        self.library.items[FILM]["audio"][0]["path"] = "/srv/movies/gone.m4a"
+        self.library.items[FILM]["audio"][0]["path"] = os.path.join(
+            LIBRARY_DIR, "gone.m4a")
         body = self.assertJson(self.get(), 404)
         self.assertEqual(body, {"error": "That soundtrack is not on the share."})
         # And it does not name the path it failed to open.
-        self.assertNotIn("/srv/movies", str(body))
+        self.assertNotIn(LIBRARY_DIR, str(body))
+
+    def test_a_symlink_out_of_the_library_is_not_served(self):
+        """The library checks a row's path by its text only, so that reading
+        the table never waits on the share; this route is where a symlink on
+        the share gets resolved, right before the file would be opened."""
+        outside = write_file("not-the-library/secret.m4a", b"secret")
+        link = os.path.join(LIBRARY_DIR, "tracks", "escape.m4a")
+        if os.path.lexists(link):
+            os.unlink(link)
+        os.symlink(outside, link)
+        self.addCleanup(os.unlink, link)
+        self.library.items[FILM]["audio"][0]["path"] = link
+        self.assertEqual(self.get().status, 404)
 
     def test_a_build_without_phone_audio_does_not_serve_audio(self):
         with patched(PHONE_AUDIO=False):

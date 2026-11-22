@@ -108,6 +108,10 @@ class ConfigTab(QWidget):
     # The Sources tab added (True) or removed (False) a folder; Prepare scans
     # or redraws.
     sourcesChanged = Signal(bool)
+    # "Run all" on the Deploy panel: the whole playbook, which needs the
+    # stick's sudo password. The main window asks for it, as it does for
+    # Update device, and hands it back through deploy().
+    runAllRequested = Signal()
 
     def __init__(self, settings, db, parent=None):
         super().__init__(parent)
@@ -143,7 +147,7 @@ class ConfigTab(QWidget):
             lambda i: self._sources.reload()
             if self._tabs.widget(i) is self._sources else None)
         self._console_page = self._build_console_tab()
-        self._tabs.addTab(self._console_page, "Deploy / actl")
+        self._tabs.addTab(self._console_page, "Deploy")
         self._tabs.setCurrentIndex(0)
         outer.addWidget(self._tabs)
 
@@ -483,20 +487,27 @@ class ConfigTab(QWidget):
                 return text
         return text
 
-    # --- actl console ------------------------------------------------------
+    # --- deploy console ----------------------------------------------------
 
     def _build_console_tab(self):
         page = QWidget()
         layout = QVBoxLayout(page)
 
         note = QLabel(
-            "Runs ./actl in the repo. The presets need no password. To "
-            "deploy, use Update device on the Device page: it asks for the "
-            "stick's sudo password and runs the playbook here.")
+            "Runs Ansible against the stick from the playstick checkout. Run "
+            "all applies the whole playbook, as Update device on the Device "
+            "page does, and asks for the stick's sudo password first. The "
+            "other presets need no password.")
         note.setWordWrap(True)
         layout.addWidget(note)
 
         presets = QHBoxLayout()
+        run_all = QPushButton("Run all")
+        run_all.setObjectName("primary")
+        run_all.setToolTip("ansible-playbook site.yml: everything a deploy "
+                           "does, whether or not the stick is up to date")
+        run_all.clicked.connect(self.runAllRequested)
+        presets.addWidget(run_all)
         for label, command in (
                 ("Syntax check", ""),
                 ("Ping device", "ansible -m ping vivostick"),

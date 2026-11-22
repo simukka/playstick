@@ -254,6 +254,98 @@ class Episodes(AdminTest):
                          "Bluey S1 E2 · Hospital")
 
 
+GAME = "00000000000000aa"
+
+
+def game(ident=GAME, rel=".playstick/roms/00000000000000aa.nes",
+         system="nes", **extra):
+    payload = {"id": ident, "source_rel": rel, "title": "Lan Master",
+               "kind": "game", "system": system}
+    payload.update(extra)
+    return payload
+
+
+class Games(AdminTest):
+    """A game is a film row with kind 'game'. These tests check what a game
+    batch must prove on top of a film's, and that a reconcile of one kind never
+    touches rows of the other."""
+
+    def sync_games(self, games, reconcile=False, status=200):
+        resp = self.fetch("/api/admin/films", method="POST",
+                          body={"films": games, "reconcile": reconcile,
+                                "kind": "game"})
+        self.assertEqual(resp.status, status, resp.body)
+        return resp.json
+
+    def test_a_game_reaches_the_grid_as_a_game(self):
+        self.sync_games([game(players=2)])
+        self.sync([entry(OTHER)])
+        by_id = {i["id"]: i for i in
+                 self.assertJson(self.fetch("/api/library"))["items"]}
+        self.assertEqual((by_id[GAME]["kind"], by_id[GAME]["system"],
+                          by_id[GAME]["players"]), ("game", "nes", 2))
+        # A film's row is what an older page has always been sent.
+        self.assertNotIn("kind", by_id[OTHER])
+        self.assertEqual(self.real_library.get(GAME)["kind"], "game")
+
+    def test_a_game_defaults_to_one_player(self):
+        self.sync_games([game()])
+        self.assertEqual(self.real_library.get(GAME)["players"], 1)
+
+    def test_a_game_must_name_a_system_the_stick_has(self):
+        for system in (None, "snes", "NES", 3):
+            with self.subTest(system=system):
+                self.sync_games([game(system=system)], status=400)
+
+    def test_a_rom_must_be_the_file_its_system_expects(self):
+        """A .nes file handed to the Game Boy core is a crash on the
+        projector, so it is refused at the door."""
+        self.sync_games([game(system="gb")], status=400)
+        self.sync_games([game(rel="roms/x.gbc", system="gb")])
+        self.sync_games([game(rel="roms/x.sms", system="sms")])
+
+    def test_a_rom_outside_the_library_is_refused(self):
+        self.sync_games([game(rel="../../etc/x.nes")], status=400)
+        self.sync_games([game(rel="/etc/x.nes")], status=400)
+
+    def test_a_game_carries_no_soundtracks(self):
+        self.sync_games([game(audio=[{"n": 1, "rel": "a.m4a"}])], status=400)
+
+    def test_a_batch_cannot_mix_kinds(self):
+        self.sync_games([game(), entry(OTHER)], status=400)
+        self.sync([game()], status=400)
+
+    def test_an_unknown_kind_is_refused(self):
+        resp = self.fetch("/api/admin/films", method="POST",
+                          body={"films": [], "kind": "app"})
+        self.assertEqual(resp.status, 400)
+
+    def test_a_film_reconcile_leaves_the_games_alone(self):
+        """The admin app pushes films and games separately. A full film push
+        names no games, and must not take that as an instruction to delete
+        them all."""
+        self.sync_games([game()])
+        self.sync([entry(FILM), entry(OTHER, rel="Gone/Gone.mkv")])
+        self.assertEqual(self.sync([entry(FILM)], reconcile=True),
+                         {"written": 1, "removed": 1})
+        self.assertIsNotNone(self.real_library.get(GAME))
+
+    def test_a_game_reconcile_leaves_the_films_alone(self):
+        self.sync([entry(FILM)])
+        self.sync_games([game()])
+        self.assertEqual(self.sync_games([], reconcile=True),
+                         {"written": 0, "removed": 1})
+        self.assertIsNotNone(self.real_library.get(FILM))
+        self.assertIsNone(self.real_library.get(GAME))
+
+    def test_a_game_with_no_poster_is_never_sent_for_extraction(self):
+        """mpv cannot grab a frame from a ROM."""
+        self.sync_games([game()])
+        resp = self.fetch("/api/thumb/" + GAME)
+        self.assertEqual(resp.status, 200)
+        self.assertNotIn(GAME, self.real_thumbs._queued)
+
+
 class RemovingOneFilm(AdminTest):
     """POST /api/admin/films/delete, and why it is not reconcile.
 

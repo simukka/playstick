@@ -32,6 +32,7 @@ execute_after_dh_auto_install:
 	mkdir -p $(SHARE)/src/server $(SHARE)/src/player/dist
 	cp -r --preserve=mode $(DEPLOY) $(SHARE)/
 	cp -r --preserve=mode src/server/playstick src/server/playstick-web.py \
+		src/server/playstick-game.py \
 		$(SHARE)/src/server/
 	cp src/player/dist/playstick-ui.html $(SHARE)/src/player/dist/
 	install -D -m 0755 scripts/release_id.py $(SHARE)/scripts/release_id.py

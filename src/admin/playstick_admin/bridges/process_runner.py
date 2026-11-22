@@ -10,8 +10,6 @@ it gets the NAS password instead, as a variable in a file actl mounts for that
 one run (core/site_vars.py). Neither is ever on a command line this shows.
 """
 
-import os
-
 from PySide6.QtCore import QObject, QProcess, Signal
 
 from .. import paths
@@ -49,8 +47,9 @@ class ActlRunner(QObject):
         proc.errorOccurred.connect(self._on_error)
         self._proc = proc
         args = [command] if command else []
-        display = "%s %s" % (os.path.basename(actl),
-                             repr(command) if command else "(syntax check)")
+        # The command Ansible is given, not the wrapper that gives it: the
+        # wrapper is how the container is run, not what is being done.
+        display = command or "ansible-playbook --syntax-check site.yml fetch-results.yml"
         self.started.emit(display)
         self.output.emit("$ %s\n" % display)
         proc.start(actl, args)

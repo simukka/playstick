@@ -936,6 +936,39 @@ player_projector_airplay_wake_ticks: 2
 # every tick costs one ss invocation.
 player_projector_tick_seconds: 15
 
+# --- player: games ---------------------------------------------------------
+# Games are played by playstick-game (src/server/playstick-game.py), a small
+# libretro frontend the daemon starts on tty1 the way it starts mpv. It loads
+# one emulator core per system from the Ubuntu libretro packages the games
+# role installs, and the paths below are where those packages put them.
+# Gambatte plays both Game Boy and Game Boy Color cartridges.
+games_enabled: true
+games_frontend: /usr/local/bin/playstick-game.py
+games_python: /usr/bin/python3
+games_cores:
+  nes: /usr/lib/x86_64-linux-gnu/libretro/nestopia_libretro.so
+  gb: /usr/lib/x86_64-linux-gnu/libretro/gambatte_libretro.so
+  gbc: /usr/lib/x86_64-linux-gnu/libretro/gambatte_libretro.so
+  sms: /usr/lib/x86_64-linux-gnu/libretro/genesis_plus_gx_libretro.so
+games_apt_packages:
+- libretro-nestopia
+- libretro-gambatte
+- libretro-genesisplusgx
+- python3-sdl2
+# The frontend's control socket: button state in, game sound out.
+games_socket: /run/playstick/game.sock
+# Cartridge saves (battery-backed RAM), one file per game, kept between games
+# and across re-provisions. Under the player unit's StateDirectory.
+games_saves: /var/lib/playstick/saves
+# The game sound sent to the phones: mono 16-bit PCM at this rate. 24 kHz is
+# well above what these consoles' sound chips make audible, and is 48 KB/s
+# per listening phone, which this box's Wi-Fi carries for six phones with room
+# to spare. Raw PCM rather than a codec, so neither end has to encode.
+games_audio_rate: 24000
+# How many phones may hold the game socket at once: two players and the rest
+# listening. Each one is a thread on the daemon for as long as it is connected.
+games_max_sockets: 8
+
 # --- probe --------------------------------------------------------------
 probe_results_dir: /var/log/uxplay-probe
 probe_clip_dir: /usr/local/share/uxplay-probe
