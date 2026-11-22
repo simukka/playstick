@@ -128,6 +128,26 @@ def setup(argv=None, stream=None):
     return level
 
 
+# Called with (exc_type, exc_value, traceback, thread_name) for every unhandled
+# exception, after it is logged. The terminal is the complete account, but it
+# is not where anybody is looking when a button does nothing: the window shows
+# these too (views/error_dialog.py), and registers itself here so this module
+# stays free of Qt.
+_listeners = []
+
+
+def on_unhandled(callback):
+    _listeners.append(callback)
+
+
+def _tell(kind, value, tb, where):
+    for callback in list(_listeners):
+        try:
+            callback(kind, value, tb, where)
+        except Exception:  # noqa: BLE001 -- a broken listener must not loop
+            LOG.exception("an error listener failed")
+
+
 def install_hooks():
     """Send the three kinds of unhandled failure through the same channel."""
 
@@ -136,15 +156,17 @@ def install_hooks():
             sys.__excepthook__(kind, value, tb)
             return
         LOG.error("unhandled %s", kind.__name__, exc_info=(kind, value, tb))
+        _tell(kind, value, tb, threading.current_thread().name)
 
     sys.excepthook = on_exception
 
     def on_thread_exception(args):
         if issubclass(args.exc_type, SystemExit):
             return
-        LOG.error("unhandled %s on %s", args.exc_type.__name__,
-                  args.thread.name if args.thread else "a worker thread",
+        where = args.thread.name if args.thread else "a worker thread"
+        LOG.error("unhandled %s on %s", args.exc_type.__name__, where,
                   exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+        _tell(args.exc_type, args.exc_value, args.exc_traceback, where)
 
     threading.excepthook = on_thread_exception
 

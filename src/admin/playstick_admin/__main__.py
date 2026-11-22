@@ -35,6 +35,8 @@ def main(argv=None):
     QGuiApplication.setDesktopFileName("playstick")
     app = QApplication(argv)
     theme.apply(app)
+    from .views import error_dialog
+    error_dialog.install()
     # Imported here so a headless import of this module (e.g. in a test) does
     # not require the widgets to be constructed.
     from .app import MainWindow
