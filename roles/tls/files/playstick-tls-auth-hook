@@ -1,0 +1,90 @@
+#!/bin/sh
+# certbot --manual-auth-hook for a DNS-01 challenge, with no DNS provider in it.
+#
+# certbot runs this once per name with CERTBOT_DOMAIN and CERTBOT_VALIDATION
+# set. It does two things:
+#
+#   1. Writes the TXT record Let's Encrypt wants to $STATE/pending.json, where
+#      the daemon reads it and the playstick app shows it on the Device page.
+#      A person adds it at whoever hosts the domain's DNS.
+#   2. Waits until every one of the domain's authoritative name servers answers
+#      with that value, then returns so certbot can tell Let's Encrypt to look.
+#
+# The authoritative servers rather than the local resolver, because the local
+# resolver has almost certainly just cached "no such record" -- the first
+# lookup happened before anybody had added it -- and would go on saying so for
+# the zone's negative-cache time, which at many providers is half an hour.
+# Let's Encrypt itself asks the authoritative servers, so agreeing with them
+# is the test that matters.
+#
+# pending.json is NOT removed here or by a cleanup hook. A run that times out
+# leaves it, so the Device page can still show what is wanted; the deploy hook
+# removes it once a certificate is issued.
+#
+# Exit 0 when the record is seen, 1 when the wait runs out.
+set -u
+
+state=${PLAYSTICK_TLS_STATE:-/var/lib/playstick/tls}
+wait=${PLAYSTICK_TLS_WAIT:-900}
+interval=${PLAYSTICK_TLS_INTERVAL:-10}
+dig=${PLAYSTICK_TLS_DIG:-dig}
+
+domain=${CERTBOT_DOMAIN:?certbot sets CERTBOT_DOMAIN}
+value=${CERTBOT_VALIDATION:?certbot sets CERTBOT_VALIDATION}
+record="_acme-challenge.$domain"
+started=$(date +%s)
+
+# The zone's name servers: walk up from the name until something answers NS.
+zone=$domain
+servers=""
+while :; do
+    servers=$("$dig" +short +time=3 +tries=2 NS "$zone" 2>/dev/null | grep -v '^;')
+    [ -n "$servers" ] && break
+    case $zone in
+        *.*) zone=${zone#*.} ;;
+        *) break ;;
+    esac
+done
+
+# Written after the zone is known, so the app can show the record's name the
+# way most DNS providers' forms want it: relative to the zone. Every field is a
+# hostname or a base64url token, so no quote or backslash can occur and printf
+# is enough to make this JSON.
+[ -n "$servers" ] || zone=""
+mkdir -p "$state"
+tmp="$state/.pending.json.$$"
+printf '{"domain": "%s", "zone": "%s", "record": "%s", "value": "%s", "since": %s, "wait": %s}\n' \
+    "$domain" "$zone" "$record" "$value" "$started" "$wait" > "$tmp"
+mv "$tmp" "$state/pending.json"
+
+has_value() {   # $1: a server, or "" for the local resolver
+    if [ -n "$1" ]; then
+        "$dig" +short +time=3 +tries=1 TXT "$record" "@$1" 2>/dev/null
+    else
+        "$dig" +short +time=3 +tries=1 TXT "$record" 2>/dev/null
+    fi | tr -d '"' | grep -qxF -- "$value"
+}
+
+seen() {
+    if [ -z "$servers" ]; then
+        has_value ""
+        return
+    fi
+    for server in $servers; do
+        has_value "$server" || return 1
+    done
+    return 0
+}
+
+echo "waiting up to ${wait}s for TXT $record = $value"
+while :; do
+    if seen; then
+        echo "TXT $record is published on every name server for $zone"
+        exit 0
+    fi
+    if [ $(( $(date +%s) - started )) -ge "$wait" ]; then
+        echo "TXT $record did not appear within ${wait}s" >&2
+        exit 1
+    fi
+    sleep "$interval"
+done

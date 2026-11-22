@@ -587,6 +587,51 @@ player_bind: "0.0.0.0"
 # would fail before printing anything useful.
 player_port: 80
 
+# --- player: HTTPS --------------------------------------------------------
+# A second listener, beside port 80 rather than instead of it, so the page can
+# be a "secure context". Browsers keep the motion sensors -- and a few other
+# APIs -- for HTTPS pages, and a page at http://10.0.1.x can never be one.
+# Plain HTTP keeps working exactly as before; nothing redirects.
+#
+# The certificate is a real one from Let's Encrypt, so no phone has to be told
+# to trust anything. It is proved with a DNS challenge, and nothing here knows
+# who hosts the DNS: certbot asks for a TXT record, the playstick app shows it
+# on the Device page, a person adds it at the DNS provider, and the stick
+# watches the domain's own name servers until it appears. Nothing on this
+# device is reachable from the internet, and no API token is kept anywhere.
+#
+# The cost of that is a person: Let's Encrypt may ask for a new TXT value at
+# each renewal, roughly every two months, and the Device page says so when it
+# does. A daily timer on the stick does the asking.
+#
+# The name is a site value and comes from the playstick app (Settings ->
+# HTTPS), like the NAS. Empty, the default, turns all of this off: the tls
+# role is skipped and the daemon listens on 80 only. The A record pointing the
+# name at the stick is created by hand as well.
+player_tls_name: ""
+
+# 443, so the address is https://<name>/ with no port, for the same reason
+# player_port is 80.
+player_tls_port: 443
+
+# Let's Encrypt's staging service: certificates no browser trusts, and rate
+# limits nobody will hit. For proving a new setup without spending the real
+# service's limits on mistakes. Switching back to false and deploying again
+# replaces the staging certificate with a real one -- which means a new TXT
+# record, shown on the Device page like the first.
+player_tls_staging: false
+
+# How long one attempt waits for the TXT record to appear on the domain's
+# name servers before giving up. Long enough to read it off the Device page and
+# type it into a DNS provider's form; an attempt that runs out leaves the
+# record on the Device page, and "Check now" there starts another.
+player_tls_dns_wait_minutes: 15
+
+# Where the challenge hook leaves the record it is waiting for, for the daemon
+# to report to the app. Kept until a certificate is issued, so a failed
+# attempt still says what it wanted.
+player_tls_state_dir: /var/lib/playstick/tls
+
 # Advertise the UI as _http._tcp so it is reachable at
 # http://<hostname>.local:<port>/ without anyone typing an IP address.
 # avahi-daemon is already required for AirPlay, so this is free -- and at port

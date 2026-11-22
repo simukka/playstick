@@ -7,6 +7,7 @@ import { h, setText, toggleClass } from "./dom";
 import { timeLeft, barWidth, clockTime, jumpLabel } from "./format";
 import { TAIL } from "./seek";
 import type { Status } from "./types";
+import { WORDMARK } from "./brand";
 
 export type ViewName = "library" | "preparing" | "playing";
 
@@ -332,6 +333,10 @@ export class PreparingView {
 
 export class PlayingView {
   readonly root: HTMLElement;
+  /** The wordmark, small, over the remote: the same hidden menu as the grid's,
+   * because during a film this is the view a phone shows -- and the pointer
+   * is for during a film. */
+  readonly brand: HTMLElement;
   // The six the controls wire. They live here because they are drawn here.
   readonly toggle: HTMLElement;
   readonly stop: HTMLElement;
@@ -353,6 +358,13 @@ export class PlayingView {
   private duration = 0;
 
   constructor(doc: Document) {
+    // Its own ids: the grid's copy is display:none during a film, and a
+    // gradient referenced from inside a hidden subtree does not paint, so
+    // sharing the grid's #psWord would draw this one without its colours.
+    this.brand = h(doc, "div", {
+      class: "brand",
+      html: WORDMARK.replace(/ps(Word|KArms)/g, "ps$1Now"),
+    });
     this.title = h(doc, "div", { id: "nowTitle" });
     this.sub = h(doc, "div", { id: "nowSub" });
     this.bar = h(doc, "div", { id: "barFill" });
@@ -380,6 +392,7 @@ export class PlayingView {
     this.volUp = h(doc, "button", { id: "volUp", aria: "Louder", text: "+" });
     this.volume = h(doc, "div", { id: "volume" }, [this.volDown, this.volUp]);
     this.root = h(doc, "div", { id: "playing", class: "view" }, [
+      this.brand,
       this.title,
       this.sub,
       h(doc, "div", { id: "bar" }, [this.bar, this.ghost]),

@@ -92,6 +92,8 @@ h1 svg { display: block; height: 28px; width: auto; margin-top: 6px; }
 export class LibraryView {
   /** The view, mounted by the composition root and shown by the switcher. */
   readonly root: HTMLElement;
+  /** The wordmark, which hides the menu -- main.ts wires the gesture. */
+  readonly brand: HTMLElement;
   /** The tiles' parent, which the presenter blocks during AirPlay. */
   readonly gridEl: HTMLElement;
   private readonly doc: Document;
@@ -134,8 +136,9 @@ export class LibraryView {
     });
     this.count = h(doc, "div", { id: "libCount" });
     this.chips = h(doc, "div", { id: "chips" });
+    this.brand = h(doc, "h1", { class: "brand", html: WORDMARK });
     this.root = h(doc, "div", { id: "library", class: "view on" }, [
-      h(doc, "h1", { html: WORDMARK }),
+      this.brand,
       h(doc, "div", { id: "libHead" }, [h(doc, "h2", { text: "Library" }), this.count]),
       this.chips,
       this.chip,

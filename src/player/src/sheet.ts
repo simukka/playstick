@@ -142,13 +142,21 @@ export interface SheetManagerDeps {
   subs: HTMLElement;
   filter: HTMLElement;
   episodes: HTMLElement;
+  /** The menu in the logo, and the pointer it opens -- see secret-menu.ts. */
+  secret: HTMLElement;
+  pointer: HTMLElement;
   onSoundOpen: () => void;
   onSubsOpen: () => void;
   onFilterOpen: () => void;
   onEpisodesOpen: () => void;
+  onSecretOpen: () => void;
+  onPointerOpen: () => void;
+  /** Told when the pointer sheet goes away, however it goes: the dot it drew
+   * should not stay on the film. */
+  onPointerClose?: () => void;
 }
 
-type SheetName = "sound" | "subs" | "filter" | "episodes";
+type SheetName = "sound" | "subs" | "filter" | "episodes" | "secret" | "pointer";
 
 export class SheetManager {
   /** The chrome, mounted by the composition root. */
@@ -161,6 +169,7 @@ export class SheetManager {
   // which is how the third sheet would have introduced a case nobody wrote.
   private readonly roots: Record<SheetName, HTMLElement>;
   private readonly opened: Record<SheetName, () => void>;
+  private readonly onPointerClose?: () => void;
 
   constructor(doc: Document, deps: SheetManagerDeps) {
     this.roots = {
@@ -168,12 +177,17 @@ export class SheetManager {
       subs: deps.subs,
       filter: deps.filter,
       episodes: deps.episodes,
+      secret: deps.secret,
+      pointer: deps.pointer,
     };
+    this.onPointerClose = deps.onPointerClose;
     this.opened = {
       sound: deps.onSoundOpen,
       subs: deps.onSubsOpen,
       filter: deps.onFilterOpen,
       episodes: deps.onEpisodesOpen,
+      secret: deps.onSecretOpen,
+      pointer: deps.onPointerOpen,
     };
 
     // Left empty: main.ts paints it with the speaker or the crossed-out speaker
@@ -217,8 +231,15 @@ export class SheetManager {
   get episodesOpen(): boolean {
     return this.isOpen("episodes");
   }
+  get secretOpen(): boolean {
+    return this.isOpen("secret");
+  }
+  get pointerOpen(): boolean {
+    return this.isOpen("pointer");
+  }
 
   show(name: SheetName, on: boolean): void {
+    const pointerWasOpen = this.isOpen("pointer");
     for (const key of Object.keys(this.roots) as SheetName[]) {
       toggleClass(this.roots[key], "on", on && key === name);
     }
@@ -227,6 +248,9 @@ export class SheetManager {
       "on",
       (Object.keys(this.roots) as SheetName[]).some((k) => this.isOpen(k)),
     );
+    if (pointerWasOpen && !this.isOpen("pointer")) {
+      this.onPointerClose?.();
+    }
     if (on) {
       this.opened[name]();
     }
@@ -244,11 +268,21 @@ export class SheetManager {
   showEpisodes(on: boolean): void {
     this.show("episodes", on);
   }
+  showSecret(on: boolean): void {
+    this.show("secret", on);
+  }
+  showPointer(on: boolean): void {
+    this.show("pointer", on);
+  }
 
   closeAll(): void {
+    const pointerWasOpen = this.isOpen("pointer");
     for (const key of Object.keys(this.roots) as SheetName[]) {
       toggleClass(this.roots[key], "on", false);
     }
     toggleClass(this.scrim, "on", false);
+    if (pointerWasOpen) {
+      this.onPointerClose?.();
+    }
   }
 }

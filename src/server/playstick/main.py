@@ -7,7 +7,7 @@ from http.server import ThreadingHTTPServer
 
 from .config import (
     BIND, LIBRARY, PORT, PROJECTOR_DEVICE, PROJECTOR_MODEL, PROJECTOR_TIMEOUT,
-    log
+    TLS_CERT, TLS_KEY, TLS_PORT, log
 )
 from .db import Database
 from .library import Library
@@ -17,6 +17,8 @@ from .player import Player
 from .projectionist import Projectionist
 from .projector import open_projector
 from .http import Handler
+from .pointer import PointerOverlay
+from . import tls
 
 
 def main():
@@ -71,6 +73,9 @@ def main():
     Handler.thumbs = thumbs
     Handler.player = player
     Handler.projectionist = projectionist
+    pointer = PointerOverlay(player)
+    threading.Thread(target=pointer.run, args=(stopping,), daemon=True).start()
+    Handler.pointer = pointer
 
     httpd = ThreadingHTTPServer((BIND, PORT), Handler)
     httpd.daemon_threads = True
@@ -79,11 +84,20 @@ def main():
     threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.5},
                      daemon=True).start()
 
+    # After the plain listener, so that nothing about a certificate -- missing,
+    # mismatched, mid-renewal -- can stand between a phone and the page. A
+    # thread of its own because the certificate may not exist yet: on a first
+    # deploy it is issued after a person adds a DNS record, long after this
+    # process started, and HTTPS should come up then without a restart.
+    https = tls.Listener(BIND, TLS_PORT, TLS_CERT, TLS_KEY, Handler)
+    threading.Thread(target=https.run, args=(stopping,), daemon=True).start()
+
     while not stopping.is_set():
         time.sleep(0.25)
 
     log("shutting down")
     httpd.shutdown()
+    https.shutdown()
     # Stopping the daemon must not leave the projector showing a film with
     # nothing able to stop it, and must not leave AirPlay switched off.
     # Through the projectionist so that a preparation caught mid-warm-up is

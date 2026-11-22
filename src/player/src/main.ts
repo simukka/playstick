@@ -22,6 +22,9 @@ import { SubsSheet } from "./subs-sheet";
 import { FilterSheet } from "./filter-sheet";
 import { EpisodeSheet } from "./episode-sheet";
 import { SheetManager } from "./sheet";
+import { SecretSheet, holdToOpen } from "./secret-menu";
+import { PointerSender, PointerSheet, type Orientation } from "./pointer";
+import { browserStorage } from "./prefs";
 import { TimeDriver } from "./time-driver";
 import { Poller } from "./poller";
 import { toggleClass } from "./dom";
@@ -132,15 +135,63 @@ function boot(): void {
     sheets.closeAll();
     play(id);
   });
+  // --- the menu in the logo, and the pointer it opens ---------------------
+  const secretSheet = new SecretSheet(doc, {
+    power: (on) => api.projectorPower(on),
+    wakeClock: () => api.wakeClock(),
+    openPointer: () => sheets.showPointer(true),
+  });
+  const pointerSender = new PointerSender({
+    post: (sample) => api.pointer(sample),
+    now: () => performance.now(),
+    schedule: (fn, ms) => window.setTimeout(fn, ms),
+  });
+  // Orientation only reaches a secure context, so on plain http:// the pointer
+  // is the pad alone and its settings say why.
+  type Asking = { requestPermission?: () => Promise<string> };
+  const orientation =
+    typeof DeviceOrientationEvent !== "undefined"
+      ? (DeviceOrientationEvent as unknown as Asking)
+      : null;
+  const pointerSheet = new PointerSheet(doc, {
+    sender: pointerSender,
+    storage: browserStorage(),
+    schedule: (fn, ms) => window.setTimeout(fn, ms),
+    cancel: (id) => window.clearTimeout(id),
+    tiltAvailable: window.isSecureContext && orientation !== null,
+    requestTilt:
+      orientation && typeof orientation.requestPermission === "function"
+        ? () =>
+            orientation.requestPermission!().then(
+              (answer) => answer === "granted",
+              () => false,
+            )
+        : undefined,
+    listenTilt: (fn: (o: Orientation) => void) => {
+      const onTurn = (ev: DeviceOrientationEvent): void => {
+        if (ev.alpha !== null && ev.beta !== null) {
+          fn({ alpha: ev.alpha, beta: ev.beta });
+        }
+      };
+      window.addEventListener("deviceorientation", onTurn);
+      return () => window.removeEventListener("deviceorientation", onTurn);
+    },
+  });
+
   const sheets = new SheetManager(doc, {
     sound: soundSheet.root,
     subs: subsSheet.root,
     filter: filterSheet.root,
     episodes: episodeSheet.root,
+    secret: secretSheet.root,
+    pointer: pointerSheet.root,
     onSoundOpen: () => soundSheet.paint(),
     onSubsOpen: () => subsSheet.paint(),
     onFilterOpen: () => filterSheet.paint(),
     onEpisodesOpen: () => episodeSheet.paint(),
+    onSecretOpen: () => secretSheet.opened(),
+    onPointerOpen: () => pointerSheet.paint(),
+    onPointerClose: () => pointerSheet.closed(),
   });
 
   // A tile is a film to play or a series to choose from. The model knows which,
@@ -192,6 +243,14 @@ function boot(): void {
     wakeNas,
   });
 
+  const hold = {
+    schedule: (fn: () => void, ms: number) => window.setTimeout(fn, ms),
+    cancel: (id: number) => window.clearTimeout(id),
+  };
+  for (const brand of [libraryView.brand, presenter.playing.brand]) {
+    holdToOpen(brand, () => sheets.showSecret(true), hold);
+  }
+
   const controls = new Controls(
     {
       toggle: presenter.playing.toggle,
@@ -225,6 +284,8 @@ function boot(): void {
     subsSheet.root,
     filterSheet.root,
     episodeSheet.root,
+    secretSheet.root,
+    pointerSheet.root,
     libraryView.root,
     presenter.preparing.root,
     presenter.playing.root,
@@ -266,6 +327,18 @@ function boot(): void {
     subsSheet.onStatus(s);
     if (sheets.subsOpen) {
       subsSheet.paint();
+    }
+    secretSheet.onStatus(s);
+    if (sheets.secretOpen) {
+      secretSheet.paint();
+    }
+    // Only repainted when whether a film is up changes: a repaint rebuilds the
+    // settings, and doing that under a finger on the speed slider every poll
+    // would snatch it away.
+    const wasPlaying = pointerSheet.playingNow;
+    pointerSheet.onStatus(s);
+    if (sheets.pointerOpen && pointerSheet.playingNow !== wasPlaying) {
+      pointerSheet.paint();
     }
     const onGrid =
       s.state !== "playing" && s.state !== "paused" && s.state !== "preparing";

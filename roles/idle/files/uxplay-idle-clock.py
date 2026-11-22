@@ -253,12 +253,19 @@ def main():
     # these pixels on the next kernel message.
     write_tty("\033[H\033[2J\033[?25l")
 
-    state = {"stop": False}
+    state = {"stop": False, "woken": False}
 
     def stop(_sig, _frm):
         state["stop"] = True
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+
+    # "Show clock" in the phone page's hidden menu: the daemon sends SIGUSR1
+    # (systemctl kill --signal=SIGUSR1). Treated as activity, so a blanked
+    # screen comes back and the blank countdown starts again from now.
+    def wake(_sig, _frm):
+        state["woken"] = True
+    signal.signal(signal.SIGUSR1, wake)
 
     blank_seconds = BLANK_MINUTES * 60
     last_active = time.time()
@@ -268,6 +275,12 @@ def main():
     while not state["stop"]:
         now = time.time()
         stamp = time.strftime(TIME_FORMAT)
+
+        if state["woken"]:
+            state["woken"] = False
+            last_active = now
+            blanked = False
+            shown = None            # redraw now, not at the next minute
 
         if session_active():
             last_active = now
@@ -282,9 +295,11 @@ def main():
             screen.show(compose(screen, font, stamp, SUBTITLE))
             shown = stamp
 
-        # Sleep in short slices so SIGTERM is handled promptly.
+        # Sleep in short slices so SIGTERM -- and a wake -- are handled
+        # promptly.
         deadline = now + POLL_SECONDS
-        while not state["stop"] and time.time() < deadline:
+        while (not state["stop"] and not state["woken"]
+               and time.time() < deadline):
             time.sleep(0.25)
 
     screen.show(screen.blank_frame())

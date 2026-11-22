@@ -77,4 +77,25 @@ export class ApiClient {
   wakeNas(): Promise<PostResult> {
     return this.post("/api/nas/wake");
   }
+
+  /** The logo's hidden menu: the projector's lamp, by hand. */
+  projectorPower(on: boolean): Promise<PostResult> {
+    return this.post("/api/projector/power", { on });
+  }
+
+  /** Bring the projector's idle clock back after it has blanked. */
+  wakeClock(): Promise<PostResult> {
+    return this.post("/api/clock/wake");
+  }
+
+  /** One pointer sample. The sender in pointer.ts decides how often. */
+  pointer(sample: {
+    x: number;
+    y: number;
+    on: boolean;
+    size: string;
+    color: string;
+  }): Promise<PostResult> {
+    return this.post("/api/pointer", sample);
+  }
 }

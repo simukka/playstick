@@ -50,10 +50,14 @@ export function makeShell(doc: FakeDocument = makePage(), plays: string[] = []):
     subs: h(d, "div", { id: "subsSheet", class: "sheet" }),
     filter: h(d, "div", { id: "fsheet", class: "sheet" }),
     episodes: h(d, "div", { id: "esheet", class: "sheet" }),
+    secret: h(d, "div", { id: "secretSheet", class: "sheet" }),
+    pointer: h(d, "div", { id: "pointerSheet", class: "sheet" }),
     onSoundOpen: () => soundPaints++,
     onSubsOpen: () => subsPaints++,
     onFilterOpen: () => filterPaints++,
     onEpisodesOpen: () => {},
+    onSecretOpen: () => {},
+    onPointerOpen: () => {},
   });
   const library = new LibraryView(
     d,

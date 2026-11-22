@@ -1,3 +1,15 @@
+playstick (1.0.4) unstable; urgency=medium
+
+  * Add pointer.
+
+ -- simukka <kylesimukka@gmail.com>  Sat, 21 Nov 2026 20:51:05 +0100
+
+playstick (1.0.3) unstable; urgency=medium
+
+  * Add HTTPS
+
+ -- simukka <kylesimukka@gmail.com>  Sat, 21 Nov 2026 20:32:40 +0100
+
 playstick (1.0.2) unstable; urgency=medium
 
   * Fixed save error.

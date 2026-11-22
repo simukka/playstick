@@ -17,6 +17,18 @@ bind = {{ player_bind | to_json }}
 port = {{ player_port | int | to_json }}
 ui_file = {{ player_ui_file | to_json }}
 allow_networks = {{ player_allow_networks | to_json }}
+{# HTTPS is on whenever a name is set, whether or not the certificate exists
+   yet: the daemon starts the listener once the files appear, and in the
+   meantime reports the TXT record the tls role's hook is waiting for. certbot's
+   live/ paths are stable links across renewals, which the daemon follows and
+   reloads by itself -- see src/server/playstick/tls.py. #}
+{% set tls_on = player_tls_name | length > 0 %}
+tls_name = {{ (player_tls_name if tls_on else '') | to_json }}
+tls_port = {{ (player_tls_port | int if tls_on else 0) | to_json }}
+tls_cert = {{ ('/etc/letsencrypt/live/' ~ player_tls_name ~ '/fullchain.pem' if tls_on else '') | to_json }}
+tls_key = {{ ('/etc/letsencrypt/live/' ~ player_tls_name ~ '/privkey.pem' if tls_on else '') | to_json }}
+tls_state_dir = {{ player_tls_state_dir | to_json }}
+tls_unit = "playstick-tls.service"
 
 {# The share, and how often to check it is still there. There is no index and
    no overlay here any more: the film table lives in the database below, put

@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 from .device_status_bar import DeviceStatusBar
+from .https_box import HttpsBox
 from ..core import prepared, release, sync
 from ..core.device_client import DeviceClient
 from ..bridges import net_worker
@@ -91,6 +92,11 @@ class DeviceTab(QWidget):
         row.addWidget(self._update_btn)
         outer.addWidget(software)
         self._device_release = None
+
+        # Only when Settings names an HTTPS name: the certificate, or the DNS
+        # record it is waiting for. See https_box.py.
+        self._https = HttpsBox(self._settings)
+        outer.addWidget(self._https)
 
         self._playing = QLabel("")
         outer.addWidget(self._playing)
@@ -162,10 +168,19 @@ class DeviceTab(QWidget):
         self._monitor.set_active(True)
         if self._settings.device_url:
             self.refresh_library()
+        self._https.start()
 
     def hideEvent(self, event):
         super().hideEvent(event)
         self._monitor.set_active(False)
+        self._https.stop()
+
+    def refresh_https(self):
+        """After Settings are saved: the HTTPS name may have changed."""
+        if self.isVisible():
+            self._https.start()
+        else:
+            self._https.setVisible(bool(self._settings.tls_name))
 
     # --- helpers -----------------------------------------------------------
 

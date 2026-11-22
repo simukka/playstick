@@ -129,6 +129,15 @@ class DeviceClient:
         return self._request("/api/admin/projector/probe",
                              timeout=max(self.timeout, 15.0))
 
+    def tls_status(self):
+        """The HTTPS certificate: off, in place until when, or the TXT record
+        the stick is waiting for somebody to add at the DNS provider."""
+        return self._request("/api/admin/tls")
+
+    def tls_check(self):
+        """Start a certificate attempt now, after the record was added."""
+        return self._request("/api/admin/tls/check", "POST", {})
+
     def thumb_url(self, film_id):
         return self._url("/api/thumb/%s" % film_id)
 

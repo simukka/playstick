@@ -161,6 +161,18 @@ class Settings:
     def nas_share(self, value):
         self._set("nas_share", value)
 
+    # The name the stick serves its page on over HTTPS, as well as on plain
+    # HTTP; empty is off. A site value like the NAS, so it goes to the
+    # playbook through core.site_vars. The certificate is proved with a TXT
+    # record somebody adds by hand; the Device page shows it.
+    @property
+    def tls_name(self):
+        return str(self._get("tls_name", "")).strip().lower()
+
+    @tls_name.setter
+    def tls_name(self, value):
+        self._set("tls_name", (value or "").strip().lower())
+
     # Optional; for the page's wake-on-LAN button.
     @property
     def nas_mac(self):

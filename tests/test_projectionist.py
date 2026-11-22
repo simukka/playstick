@@ -513,5 +513,51 @@ class Shutdown(Base):
         self.assertTrue(self.projector.closed)
 
 
+class ByHand(Base):
+    """The page's hidden menu: on and off because somebody asked."""
+
+    def test_on_owes_the_input_and_restarts_the_idle_count(self):
+        projectionist = self.build()
+        self.clock.advance(3600)
+        with settings():
+            self.assertIn("Switching on", projectionist.power(True))
+            self.assertEqual(self.projector.calls, ["power_on"])
+            # Reported as on at once, so the menu offers "off" next.
+            self.assertEqual(projectionist.projector_status()["power"], "on")
+            # The next tick sees the lamp lit and selects the input...
+            projectionist.tick()
+        self.assertIn("set_input:HD3", self.projector.calls)
+        # ...and the idle switch-off counts from the press, not from an hour ago.
+        self.assertNotIn("power_off", self.projector.calls)
+
+    def test_off_while_idle(self):
+        self.projector.power = "on"
+        projectionist = self.build()
+        with settings():
+            self.assertEqual(projectionist.power(False), "Switching off.")
+        self.assertEqual(self.projector.calls, ["power_off"])
+        self.assertEqual(projectionist.projector_status()["power"], "standby")
+
+    def test_off_is_refused_mid_film(self):
+        self.player.playing = "playing"
+        projectionist = self.build()
+        with settings(), self.assertRaises(Busy):
+            projectionist.power(False)
+        self.assertNotIn("power_off", self.projector.calls)
+
+    def test_a_cooling_projector_refuses_and_says_so(self):
+        self.projector.fail["power_on"] = Refused("ER401")
+        projectionist = self.build()
+        with settings(), self.assertRaises(Refused):
+            projectionist.power(True)
+
+    def test_no_projector_is_busy_not_a_crash(self):
+        from playstick.projector import NullProjector
+        projectionist = Projectionist(NullProjector(), self.player,
+                                      clock=self.clock, sleep=self.clock.sleep)
+        with self.assertRaises(Busy):
+            projectionist.power(True)
+
+
 if __name__ == "__main__":
     unittest.main()
