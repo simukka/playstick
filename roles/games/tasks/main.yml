@@ -48,9 +48,11 @@
       register: games_sdl_drivers
       changed_when: false
 
+    # Lowered first: SDL names the driver "KMSDRM", and matches the
+    # SDL_VIDEODRIVER the frontend sets regardless of case.
     - name: Refuse an SDL without KMSDRM
       ansible.builtin.assert:
-        that: "'kmsdrm' in games_sdl_drivers.stdout.split()"
+        that: "'kmsdrm' in (games_sdl_drivers.stdout | lower).split()"
         fail_msg: >-
           SDL here offers {{ games_sdl_drivers.stdout }}, and playstick-game
           needs kmsdrm to draw without an X server.
