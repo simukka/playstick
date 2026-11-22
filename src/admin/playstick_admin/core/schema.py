@@ -44,7 +44,7 @@ a machine that did not change.
 # from somewhere else -- the metadata corrections in `override` and the record
 # of what is on the NAS exist nowhere but here -- so a migration that drops
 # data is a migration that loses it.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 
 SCHEMA = """
@@ -278,6 +278,45 @@ ALTER TABLE prepared ADD COLUMN episode INTEGER;
 """
 
 
+# A series, as distinct from its episodes: which TMDb show it was matched to,
+# and the posters for the show and each of its seasons. Keyed by the folded
+# name (core.series.key), the same key the stick stores its copy under. Not
+# foreign-keyed to the episodes, for the reason the stick gives: a series whose
+# last episode was taken out and a new season prepared is the same series, and
+# its art should still be here.
+SERIES = """
+CREATE TABLE series (
+  key         TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  tmdb_id     INTEGER,
+  updated_at  REAL NOT NULL
+);
+
+CREATE TABLE series_art (
+  key         TEXT NOT NULL,
+  season      INTEGER NOT NULL,      -- -1 for the show's own poster
+  mime        TEXT NOT NULL,
+  bytes       BLOB NOT NULL,
+  etag        TEXT NOT NULL,
+  source      TEXT NOT NULL DEFAULT '',
+  updated_at  REAL NOT NULL,
+  PRIMARY KEY (key, season)
+);
+"""
+
+
+# The device's configuration as changed here: one row per variable whose value
+# differs from group_vars/all.yml, JSON-encoded. Secrets are not here -- see
+# core.deploy_vars, which keeps them in the desktop keyring.
+DEPLOY_VARS = """
+CREATE TABLE deploy_var (
+  key         TEXT PRIMARY KEY,
+  value       TEXT NOT NULL,
+  updated_at  REAL NOT NULL
+);
+"""
+
+
 # Games. A table of their own here, where on the stick they share `film`: a
 # game is never probed, queued, encoded or matched on TMDb, so none of the
 # film-shaped columns of `prepared` or its children apply, and bending them to
@@ -311,4 +350,4 @@ CREATE TABLE game (
 
 # Applied in order to bring a database forward. Index 0 creates everything from
 # nothing; later entries are the deltas. Keep them append-only.
-MIGRATIONS = (SCHEMA, EPISODES, GAMES)
+MIGRATIONS = (SCHEMA, EPISODES, SERIES, DEPLOY_VARS, GAMES)

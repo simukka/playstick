@@ -1,3 +1,9 @@
+playstick (1.1.2) unstable; urgency=medium
+
+  * Stops the admin app crashing at start on a library that a series-and-settings build had already moved to version 4.
+
+ -- simukka <kylesimukka@gmail.com>  Sun, 22 Nov 2026 09:12:50 +0100
+
 playstick (1.1.1) unstable; urgency=medium
 
   * Keeps the phone page answering while the NAS is off, and wakes the NAS when a film is picked.
