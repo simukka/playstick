@@ -42,6 +42,14 @@ APP = "admin"
 SETTINGS_VERSION = 3
 
 
+def _mount_point(path):
+    """The mount `path` lives on: itself or the nearest parent that is one."""
+    path = os.path.realpath(path)
+    while not os.path.ismount(path):
+        path = os.path.dirname(path)
+    return path
+
+
 class Settings:
     def __init__(self):
         self._s = QSettings(ORG, APP)
@@ -85,6 +93,12 @@ class Settings:
         if not os.path.isdir(root):
             return "%s is not a directory." % root
         if not os.access(root, os.W_OK):
+            # The usual cause is not a read-only mount but no mount at all:
+            # with the NAS off, the root is the bare mount point on this
+            # machine's own disk, owned by root.
+            if _mount_point(root) == "/":
+                return ("Nothing is mounted at %s. Is the NAS on, and the "
+                        "share mounted?" % root)
             return ("%s is not writable. The stick mounts the share read-only, "
                     "but this machine is the one that puts films on it." % root)
         return None

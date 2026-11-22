@@ -192,6 +192,12 @@ class GamesTab(QWidget):
         The copies are small and local, so they run here; the push is a
         network call, so it goes to a worker.
         """
+        # Before the first file, not per file: with the NAS off every one
+        # fails the same way, and one sentence saying why beats thirty.
+        problem = self._settings.nas_root_problem()
+        if problem:
+            QMessageBox.warning(self, "No games were added", problem)
+            return
         nas_root = self._settings.nas_root
         added, refused = [], []
         for path, rom in found:

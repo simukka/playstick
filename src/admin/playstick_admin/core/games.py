@@ -107,10 +107,17 @@ def import_rom(db, nas_root, rom):
     ident, rel = rom.ident, rel_for(rom)
     staging = nas_store.staging_for(nas_root, ident)
     src = os.path.join(staging, rel.replace("/", os.sep))
-    os.makedirs(os.path.dirname(src), exist_ok=True)
     try:
-        with open(src, "wb") as handle:
-            handle.write(rom.data)
+        # makedirs and the write fail as plain OSError -- a share that is not
+        # mounted, a full one, a permission -- and the Games page reports a
+        # NasError per file where an OSError would end the whole app.
+        try:
+            os.makedirs(os.path.dirname(src), exist_ok=True)
+            with open(src, "wb") as handle:
+                handle.write(rom.data)
+        except OSError as exc:
+            raise nas_store.NasError("could not write to the share: %s"
+                                     % exc) from exc
         nas_store.place(nas_root, ident, [rel])
     finally:
         shutil.rmtree(staging, ignore_errors=True)
