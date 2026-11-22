@@ -88,7 +88,7 @@ class Schema(unittest.TestCase):
         conn.close()
         db = Database(path)
         with mock.patch("playstick.db.log"):
-            self.assertEqual(db.migrate(), 2)
+            self.assertEqual(db.migrate(), 3)
         row = db.one("SELECT title, series, season, episode FROM film")
         db.close()
         self.assertEqual(tuple(row), ("Ponyo", None, None, None))

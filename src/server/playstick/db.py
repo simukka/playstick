@@ -47,7 +47,7 @@ from .config import DB_PATH, log
 # bottom of this file; a database at version N is brought forward by running
 # every statement from N onwards. There is no downgrade, and there does not
 # need to be: the whole store is rebuilt by one sync from the admin app.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 SCHEMA = """
@@ -189,9 +189,23 @@ ALTER TABLE film ADD COLUMN episode INTEGER;
 """
 
 
+# Games. A game is a row in `film` with kind 'game', rather than a table of its
+# own. The reason is that thumb, override, playback and film_genre all hang off
+# film(id) by foreign key. A separate table would need a copy of each one, and
+# the poster, the hidden flag and the shelf order would all have to be written
+# twice. For a game, source_rel and media_rel both name the ROM, which is
+# placed under the library root like any prepared film. `system` says which
+# emulator core plays it: 'nes', 'gb', 'gbc' or 'sms'. It is NULL on a film.
+# `players` is how many controllers the game uses, 1 or 2.
+GAMES = """
+ALTER TABLE film ADD COLUMN kind TEXT NOT NULL DEFAULT 'film';
+ALTER TABLE film ADD COLUMN system TEXT;
+ALTER TABLE film ADD COLUMN players INTEGER;
+"""
+
 # Applied in order to bring a database forward. Index 0 creates everything from
 # nothing; later entries are the deltas. Keep them append-only.
-MIGRATIONS = (SCHEMA, EPISODES)
+MIGRATIONS = (SCHEMA, EPISODES, GAMES)
 
 
 class Database:

@@ -41,6 +41,13 @@ export interface LibraryItem {
   /** 0 for specials. Present whenever `series` is. */
   season?: number | null;
   episode?: number | null;
+  /** "game" on a game, absent on a film. A game goes on the Games shelf and
+   * starts the gamepad rather than the remote. */
+  kind?: "game";
+  /** Which console a game is for: "nes", "gb", "gbc" or "sms". */
+  system?: string;
+  /** How many controllers a game uses, 1 or 2. */
+  players?: number;
 }
 
 export interface Projector {
@@ -66,7 +73,9 @@ export type PlayerState =
   | "playing"
   | "paused"
   | "airplay"
-  | "unavailable";
+  | "unavailable"
+  /** A game is on the projector: the phones show the gamepad. */
+  | "gaming";
 
 export interface Status {
   state: PlayerState;
@@ -96,6 +105,15 @@ export interface Status {
   /** Absent on a daemon from before wake-on-LAN existed, which is why the
    * presenter falls back to the plain sentence rather than assuming. */
   nas?: Nas;
+  /** While a game is on: its system, how many pads, which are held, and the
+   * sound's sample rate. Null otherwise, and absent on an older daemon. */
+  game?: {
+    system?: string;
+    players?: number;
+    seats?: boolean[];
+    listeners?: number;
+    rate?: number;
+  } | null;
 }
 
 export interface LibraryReply {

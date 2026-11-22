@@ -44,7 +44,7 @@ a machine that did not change.
 # from somewhere else -- the metadata corrections in `override` and the record
 # of what is on the NAS exist nowhere but here -- so a migration that drops
 # data is a migration that loses it.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 SCHEMA = """
@@ -278,6 +278,37 @@ ALTER TABLE prepared ADD COLUMN episode INTEGER;
 """
 
 
+# Games. A table of their own here, where on the stick they share `film`: a
+# game is never probed, queued, encoded or matched on TMDb, so none of the
+# film-shaped columns of `prepared` or its children apply, and bending them to
+# fit would put a NULL in most of them.
+#
+# `source_path` is where the ROM was found on this machine and `rel` is where
+# its copy sits on the share, which is the path the stick is sent. The poster is
+# kept here as bytes, as `poster` keeps a film's, because the stick serves
+# posters from its own database and never opens an image off the share.
+GAMES = """
+CREATE TABLE game (
+  id           TEXT PRIMARY KEY,
+  source_path  TEXT NOT NULL,
+  rel          TEXT NOT NULL,
+  system       TEXT NOT NULL,
+  title        TEXT NOT NULL,
+  sort_title   TEXT NOT NULL DEFAULT '',
+  year         INTEGER,
+  players      INTEGER NOT NULL DEFAULT 1,
+  plot         TEXT NOT NULL DEFAULT '',
+  hidden       INTEGER NOT NULL DEFAULT 0,
+  warning      TEXT NOT NULL DEFAULT '',
+  poster_mime  TEXT,
+  poster_bytes BLOB,
+  poster_etag  TEXT,
+  added_at     REAL NOT NULL,
+  pushed_at    REAL
+);
+"""
+
+
 # Applied in order to bring a database forward. Index 0 creates everything from
 # nothing; later entries are the deltas. Keep them append-only.
-MIGRATIONS = (SCHEMA, EPISODES)
+MIGRATIONS = (SCHEMA, EPISODES, GAMES)

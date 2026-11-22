@@ -1,7 +1,7 @@
-"""mpv, and the arbitration around starting it.
+"""mpv: the class that actually puts a film on the projector.
 
-The class that actually puts a film on the projector, and the one place that
-stops and restarts the AirPlay receiver. It also publishes the TIMECODE -- the
+Taking the display from the AirPlay receiver and giving it back is in
+stage.py, shared with the game runner. It also publishes the TIMECODE -- the
 master clock every listening phone pins its headphone audio to. See _advance()
 for what that is and why it is shaped the way it is.
 """
@@ -15,11 +15,9 @@ import subprocess
 import threading
 import time
 
-from .config import (
-    AIRPLAY_UNIT, BUSY_FILE, LIBRARY, MPV, MPV_ARGS, MPV_SOCKET,
-    MPV_TTY, RESTORE_FILE, SETTLE_SECONDS, SUBTITLES, log
-)
-from .airplay import airplay_confirmed, systemctl, unit_active
+from .config import LIBRARY, MPV, MPV_ARGS, MPV_SOCKET, SUBTITLES, log
+from .airplay import airplay_confirmed
+from . import stage
 
 
 class Busy(Exception):
@@ -134,27 +132,7 @@ class Player:
             if not (real == root or real.startswith(root + os.sep)):
                 raise Busy("That file is not in the library.")
 
-            if progress:
-                progress("display")
-
-            # Only ever restore what we took away. The repo installs
-            # uxplay-kms.service without enabling it -- which output path wins
-            # is a probe result -- so an operator may deliberately be running
-            # neither, and starting one here would be this daemon inventing a
-            # configuration nobody chose.
-            self._restore_airplay = unit_active(AIRPLAY_UNIT)
-            if self._restore_airplay:
-                log("stopping %s to take DRM master", AIRPLAY_UNIT)
-                self._write_flag(RESTORE_FILE, AIRPLAY_UNIT)
-                systemctl("stop", AIRPLAY_UNIT)
-                deadline = time.time() + 20
-                while unit_active(AIRPLAY_UNIT) and time.time() < deadline:
-                    time.sleep(0.25)
-                # The card is released when the process exits and the kernel
-                # closes its fd; give that a moment before mpv reaches for it.
-                time.sleep(SETTLE_SECONDS)
-
-            self._write_flag(BUSY_FILE, str(os.getpid()))
+            self._restore_airplay = stage.take_display(progress)
             try:
                 os.unlink(MPV_SOCKET)
             except OSError:
@@ -205,24 +183,10 @@ class Player:
 
     @staticmethod
     def _open_tty():
-        """An fd on tty1 for mpv's stdin/stdout, or None.
-
-        mpv's DRM backend sets up a VT switcher so the console can be taken
-        back with chvt, and it needs a terminal to do it on. Without one it
-        warns and carries on -- usually. `--input-terminal=no` in the argv is
-        what stops it putting that terminal into raw mode and reacting to
-        stray keystrokes on a console nobody is typing at.
-
-        getty@tty1 is masked by claim_tty1, and the idle clock only writes
-        pixels, so nothing else wants this device.
-        """
-        if not MPV_TTY:
-            return None
-        try:
-            return os.open(MPV_TTY, os.O_RDWR | os.O_NOCTTY)
-        except OSError as exc:
-            log("no tty for mpv (%s): %s -- carrying on without one", MPV_TTY, exc)
-            return None
+        """mpv's DRM backend wants a VT; see stage.open_tty. `--input-terminal=no`
+        in the argv is what stops it putting that terminal into raw mode and
+        reacting to stray keystrokes on a console nobody is typing at."""
+        return stage.open_tty()
 
     def _connect_ipc(self):
         deadline = time.time() + 15
@@ -282,12 +246,8 @@ class Player:
                 os.unlink(MPV_SOCKET)
             except OSError:
                 pass
-            self._clear_flag(BUSY_FILE)
-            if self._restore_airplay:
-                self._restore_airplay = False
-                log("restoring %s", AIRPLAY_UNIT)
-                systemctl("start", AIRPLAY_UNIT)
-                self._clear_flag(RESTORE_FILE)
+            restore, self._restore_airplay = self._restore_airplay, False
+            stage.give_back_display(restore)
 
     def stop(self):
         with self._lock:
@@ -308,50 +268,9 @@ class Player:
             if self._proc is proc:
                 self._teardown()
 
-    # -- flag files in /run: the busy flag the idle clock watches, and the
-    #    restore record that survives this process being killed
-
-    @staticmethod
-    def _write_flag(path, contents):
-        if not path:
-            return
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w") as fh:
-                fh.write(contents + "\n")
-        except OSError as exc:
-            log("could not write %s: %s", path, exc)
-
-    @staticmethod
-    def _clear_flag(path):
-        if not path:
-            return
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-
     def reconcile(self):
-        """Put the display back where it belongs after an unclean exit.
-
-        /run is tmpfs, so a reboot clears these files and this does nothing --
-        which is right, because a boot starts the AirPlay unit itself. What
-        this catches is the daemon being SIGKILLed mid-film: systemd restarts
-        it, mpv is already gone with it (KillMode=control-group), and the only
-        thing left is an AirPlay receiver somebody stopped and never restarted.
-        """
-        self._clear_flag(BUSY_FILE)
-        if not RESTORE_FILE or not os.path.exists(RESTORE_FILE):
-            return
-        try:
-            with open(RESTORE_FILE) as fh:
-                unit = fh.read().strip() or AIRPLAY_UNIT
-        except OSError:
-            unit = AIRPLAY_UNIT
-        if not unit_active(unit):
-            log("recovering from an unclean stop: restoring %s", unit)
-            systemctl("start", unit)
-        self._clear_flag(RESTORE_FILE)
+        """After an unclean exit; see stage.reconcile."""
+        stage.reconcile()
 
     # -- mpv JSON IPC
 

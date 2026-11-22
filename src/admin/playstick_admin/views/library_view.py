@@ -309,6 +309,9 @@ class LibraryTab(QWidget):
                  else "No device IP set -- Config, Settings.") + note)
             return
 
+        # Games are on the Games page. This one is the films.
+        device_films = [f for f in device_films
+                        if (f.get("kind") or "film") == "film"]
         local = {row["item_id"]: row for row in prepared.all_prepared(self._db)}
         movies = device_library.device_movies(device_films, local)
         self._model.set_movies(movies)

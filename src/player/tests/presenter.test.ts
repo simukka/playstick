@@ -231,3 +231,11 @@ describe("the CC button", () => {
     expect(doc.getElementById("subsBtn")!.classList.contains("live")).toBe(false);
   });
 });
+
+describe("StatusPresenter and games", () => {
+  it("falls through to the grid when no gamepad was built", () => {
+    const { doc, p } = present();
+    p.apply(status({ state: "gaming" }));
+    expect(on(doc, "library")).toBe(true);
+  });
+});

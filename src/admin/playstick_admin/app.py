@@ -1,4 +1,4 @@
-"""The main window: four tabs, a menu, and the wiring between them.
+"""The main window: five tabs, a menu, and the wiring between them.
 
 The tabs are steps in an order, and the order is the thing to know.
 
@@ -12,13 +12,16 @@ here, and not a merge of the two: a film reaches the admin database and the
 stick in the same job now, so "prepared but not over there" is a job that
 failed, and that lives in Prepare.
 
+GAMES is the games: imported from ROM files here, copied onto the share and
+sent to the stick in one step, because a game needs no preparing.
+
 DEVICE is recovery and a remote control. It used to be how films got onto the
 stick; they arrive one at a time from Prepare now, and what is left here is for
 when that did not get through.
 
 CONFIG edits the Ansible variables and is unrelated to any of it.
 
-The four are pages behind a sidebar rather than tabs, each under a heading that
+The five are pages behind a sidebar rather than tabs, each under a heading that
 says what it is for -- see theme.py for the look.
 
 WHAT THE WINDOW OWNS
@@ -50,6 +53,7 @@ from .core import (device_state, identity, import_legacy, nas_store, release,
 from .core.db import Database
 from .settings import Settings
 from .views.library_view import LibraryTab
+from .views.games_view import GamesTab
 from .views.prepare_view import PrepareTab
 from .views.device_panel import DeviceTab
 from .views.config_editor import ConfigTab
@@ -63,6 +67,7 @@ LOG = logging.getLogger(__name__)
 PAGES = (
     ("film", "Prepare", "Choose films from your sources and prepare them for the stick"),
     ("library", "Library", "What the stick is holding"),
+    ("gamepad", "Games", "Games for the stick, played with a phone"),
     ("monitor", "Device", "Recovery, and a remote control for the stick"),
     ("gear", "Config", "This app's settings, the appliance's variables, and deploys"),
 )
@@ -88,10 +93,12 @@ class MainWindow(QMainWindow):
 
         self._prepare = PrepareTab(self._db, self._settings, self._monitor)
         self._library = LibraryTab(self._db, self._settings, self._monitor)
+        self._games = GamesTab(self._db, self._settings, self._monitor)
         self._device = DeviceTab(self._db, self._settings, self._monitor)
         self._config = ConfigTab(self._settings, self._db)
         self._build_pages(
-            (self._prepare, self._library, self._device, self._config))
+            (self._prepare, self._library, self._games, self._device,
+             self._config))
 
         self._wire()
         LOG.info("share: %s", self._settings.nas_root or "not set")
@@ -268,6 +275,7 @@ class MainWindow(QMainWindow):
         self._prepare.refresh_roots()
         self._prepare.reload()
         self._library.reload()
+        self._games.reload()
 
     def _check_share(self):
         return

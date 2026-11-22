@@ -157,3 +157,39 @@ describe("LibraryModel performance", () => {
     expect(ms).toBeLessThan(800);
   });
 });
+
+describe("LibraryModel shelves", () => {
+  const GAMES: LibraryItem[] = [
+    ...SAMPLE,
+    item({ id: "g1", title: "Lan Master", kind: "game", system: "nes" }),
+    item({ id: "g2", title: "Hidden Game", kind: "game", system: "gb", hidden: true }),
+  ];
+
+  it("shows only films until the games shelf is chosen", () => {
+    const m = new LibraryModel();
+    m.setItems(GAMES);
+    expect(m.hasGames).toBe(true);
+    expect(m.visible().map((i) => i.id)).not.toContain("g1");
+    m.setShelf("games");
+    expect(m.visible().map((i) => i.id)).toEqual(["g1"]);
+  });
+
+  it("has no games shelf when every game is hidden or there are none", () => {
+    const m = new LibraryModel();
+    m.setItems(SAMPLE);
+    m.setShelf("games");
+    expect(m.hasGames).toBe(false);
+    expect(m.shelf).toBe("films");
+    expect(m.visible().length).toBeGreaterThan(0);
+  });
+
+  it("drops a film filter when the shelf changes", () => {
+    const m = new LibraryModel();
+    m.setItems(GAMES);
+    m.setGenre("Anime");
+    m.setShelf("games");
+    expect(m.genre).toBe("");
+    expect(m.facets.genres).toEqual([]);
+    expect(m.visible().map((i) => i.id)).toEqual(["g1"]);
+  });
+});

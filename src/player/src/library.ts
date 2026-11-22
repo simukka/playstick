@@ -18,6 +18,14 @@ import type { LibraryItem } from "./types";
 
 export type SortKey = "name" | "year-desc" | "year-asc";
 
+/** Which shelf the grid shows. Films include episodes; a daemon with no games
+ * only ever has the one shelf, and the switch is not drawn. */
+export type Shelf = "films" | "games";
+
+export function isGame(item: LibraryItem): boolean {
+  return item.kind === "game";
+}
+
 /** What the grid draws: a film, or a series standing in for its episodes. */
 export type GridItem = LibraryItem & { thumb?: string };
 
@@ -98,6 +106,8 @@ export class LibraryModel {
   private _minScore = 0;
   private _ready = false;
   private _sort: SortKey = "name";
+  private _shelf: Shelf = "films";
+  private _hasGames = false;
 
   private cache: GridItem[] | null = null;
   private _facets: Facets = { genres: [], langs: [] };
@@ -127,8 +137,32 @@ export class LibraryModel {
     return this._sort;
   }
 
+  /** The shelf being shown. Always "films" while the library has no games,
+   * whatever was asked for, so a phone that last looked at the games is not
+   * left on an empty shelf after they are all removed. */
+  get shelf(): Shelf {
+    return this._hasGames ? this._shelf : "films";
+  }
+
+  /** Whether there is a Games shelf to switch to. */
+  get hasGames(): boolean {
+    return this._hasGames;
+  }
+
+  setShelf(shelf: Shelf): void {
+    if (shelf !== this._shelf) {
+      this._shelf = shelf;
+      // The genres and languages belong to one shelf. A genre picked among
+      // the films would empty the games shelf with nothing there to un-pick.
+      this.clearFilters();
+      this.computeFacets();
+      this.cache = null;
+    }
+  }
+
   setItems(items: LibraryItem[]): void {
     this.items = items;
+    this._hasGames = items.some((i) => isGame(i) && !i.hidden);
     this.computeFacets();
     this.computeShows();
     this.cache = null;
@@ -220,7 +254,7 @@ export class LibraryModel {
     let n = 0;
     const seen = new Set<string>();
     for (const item of this.items) {
-      if (!predicate(item)) {
+      if (!this.onShelf(item) || !predicate(item)) {
         continue;
       }
       if (isEpisode(item)) {
@@ -237,10 +271,14 @@ export class LibraryModel {
 
   scoreOf = scoreOf;
 
+  private onShelf(item: LibraryItem): boolean {
+    return isGame(item) === (this.shelf === "games");
+  }
+
   private matches(item: LibraryItem): boolean {
     // The admin/curator view was cut, so a hidden film simply leaves the grid;
     // there is no listener that keeps it.
-    if (item.hidden) {
+    if (item.hidden || !this.onShelf(item)) {
       return false;
     }
     if (this._genre && (item.genres || []).indexOf(this._genre) < 0) {
@@ -333,6 +371,9 @@ export class LibraryModel {
     const genres = new Set<string>();
     const langs = new Set<string>();
     for (const item of this.items) {
+      if (!this.onShelf(item)) {
+        continue;
+      }
       if (item.genres) {
         for (const g of item.genres) {
           genres.add(g);

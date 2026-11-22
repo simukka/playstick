@@ -180,7 +180,7 @@ class DeviceClient:
         poster etags. What a sync diffs against."""
         return self._request("/api/admin/library")
 
-    def sync_films(self, films, reconcile=True):
+    def sync_films(self, films, reconcile=True, kind="film"):
         """Push the film table. `reconcile` deletes films this batch does not
         mention, which is what a full library sync means.
 
@@ -190,9 +190,11 @@ class DeviceClient:
         than the default for the same reason -- this is the one call that is
         not instant.
         """
+        # `kind` scopes the reconcile on the stick: a film push deletes only
+        # films and a game push only games.
         return self._request("/api/admin/films", "POST",
                              {"films": list(films),
-                              "reconcile": bool(reconcile)},
+                              "reconcile": bool(reconcile), "kind": kind},
                              timeout=max(self.timeout, 60.0))
 
     def delete_films(self, ids):

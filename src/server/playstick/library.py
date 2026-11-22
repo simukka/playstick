@@ -56,8 +56,14 @@ EDITABLE = frozenset((
 SYNC_COLUMNS = (
     "id", "source_rel", "media_rel", "title", "sort_title", "year", "rating",
     "plot", "duration", "width", "height", "vcodec", "acodec", "tmdb_id",
-    "hidden", "pos", "series", "season", "episode",
+    "hidden", "pos", "series", "season", "episode", "kind", "system",
+    "players",
 )
+
+# What a row can be. A film is played by mpv and a game by the emulator
+# frontend; the projectionist picks between them on this, and a reconcile only
+# ever deletes rows of the kind it was sent.
+KINDS = ("film", "game")
 
 
 class Library:
@@ -222,6 +228,12 @@ class Library:
                 "series": row["series"] or None,
                 "season": row["season"],
                 "episode": row["episode"],
+                # 'film' or 'game'. A game's `path` is its ROM, `system` names
+                # the core that plays it, and its subs and audio lists are
+                # empty: a game's sound is made live, not prepared.
+                "kind": row["kind"] or "film",
+                "system": row["system"] or None,
+                "players": row["players"],
             }
             # The overlay, laid on top. A plain update, which is why EDITABLE
             # keeps paths out of the override table: this is the join, and it
@@ -314,7 +326,7 @@ class Library:
 
     # -- syncing ------------------------------------------------------------
 
-    def sync(self, films, reconcile=False):
+    def sync(self, films, reconcile=False, kind="film"):
         """Replace the film table with what the admin app just sent.
 
         Upsert, never delete-and-reinsert, and that is not a micro-optimisation
@@ -323,6 +335,10 @@ class Library:
         pressed the button. Films absent from the batch are deleted only when
         `reconcile` is set, which is what a full library push asks for and what
         a single corrected film does not.
+
+        A reconcile is scoped to `kind`. The admin app pushes its films and its
+        games separately, and a full push of the films must not delete every
+        game because none of them were in the batch, nor the other way round.
 
         Every path in `films` has already been validated by the HTTP layer.
         The whole thing is one transaction: a sync that fails halfway leaves
@@ -340,10 +356,11 @@ class Library:
                 keep = [f["id"] for f in films]
                 if keep:
                     cur = conn.execute(
-                        "DELETE FROM film WHERE id NOT IN (%s)"
-                        % self._marks(keep), tuple(keep))
+                        "DELETE FROM film WHERE kind = ? AND id NOT IN (%s)"
+                        % self._marks(keep), (kind,) + tuple(keep))
                 else:
-                    cur = conn.execute("DELETE FROM film")
+                    cur = conn.execute("DELETE FROM film WHERE kind = ?",
+                                       (kind,))
                 removed = cur.rowcount
             self._renumber(conn)
             conn.execute(
@@ -387,6 +404,9 @@ class Library:
     def _upsert(self, conn, film, pos, now):
         values = [film.get(c) for c in SYNC_COLUMNS]
         values[SYNC_COLUMNS.index("pos")] = pos
+        # A row synced without a kind is a film, which is every row an older
+        # admin app sends.
+        values[SYNC_COLUMNS.index("kind")] = film.get("kind") or "film"
         conn.execute(
             "INSERT INTO film (%s, updated_at) VALUES (%s, ?) "
             "ON CONFLICT (id) DO UPDATE SET %s, updated_at = excluded.updated_at"
@@ -485,6 +505,9 @@ class Library:
                 "series": row["series"],
                 "season": row["season"],
                 "episode": row["episode"],
+                "kind": row["kind"] or "film",
+                "system": row["system"],
+                "players": row["players"],
                 "genres": [r["genre"] for r in genres.get(ident, ())],
                 "overrides": overrides.get(ident, {}),
                 "thumb_etag": thumb["etag"] if thumb else "",

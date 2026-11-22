@@ -19,6 +19,7 @@ import { FILTER_CSS } from "./filter-sheet";
 import { EPISODE_CSS } from "./episode-sheet";
 import { SECRET_CSS } from "./secret-menu";
 import { POINTER_CSS } from "./pointer";
+import { GAMEPAD_CSS } from "./gamepad";
 
 /* Everything here is sized for a child holding a phone in a dark room. The
    poster tiles are the buttons, and the play/pause control is 40% of the
@@ -76,6 +77,7 @@ export const CSS = [
   EPISODE_CSS,
   SECRET_CSS,
   POINTER_CSS,
+  GAMEPAD_CSS,
 ].join("\n");
 
 /** Put the stylesheet in the head. Called first, before any view is built. */

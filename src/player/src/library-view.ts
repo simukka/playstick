@@ -4,7 +4,7 @@
 // the model's memoised visible() means an unchanged render is cheap, and the
 // grid reconciler makes it cheaper still by moving nothing.
 import { h, setText, toggleClass, Grid } from "./dom";
-import type { LibraryModel } from "./library";
+import type { LibraryModel, Shelf } from "./library";
 import { WORDMARK } from "./brand";
 
 export const LIBRARY_CSS = `
@@ -15,6 +15,18 @@ h1 svg { display: block; height: 28px; width: auto; margin-top: 6px; }
 #libHead { margin: 18px 4px 14px; }
 #libHead h2 { font-size: 30px; font-weight: 750; margin: 0; letter-spacing: .1px; }
 #libCount { color: var(--dim); font-size: 16px; margin-top: 2px; }
+
+/* Films | Games, under the heading. Only drawn when the library has games. */
+#shelves {
+  display: flex; gap: 4px; padding: 4px; margin: 0 4px 14px; border-radius: 14px;
+  background: var(--card); border: 1px solid var(--line);
+}
+#shelves[hidden] { display: none; }
+#shelves button {
+  flex: 1; min-height: 48px; border-radius: 10px; font-size: 17px;
+  font-weight: 650; color: #c9d2e6;
+}
+#shelves button.sel { background: var(--accent); color: #fff; }
 
 /* The genres, one tap each, in a row that scrolls sideways rather than wraps:
    the same filter as the sheet's Kind list, without opening the sheet. */
@@ -105,6 +117,8 @@ export class LibraryView {
   private readonly count: HTMLElement;
   private readonly chips: HTMLElement;
   private chipsKey = "";
+  private readonly shelves: HTMLElement;
+  private readonly shelfBtns: Record<Shelf, HTMLElement>;
 
   constructor(
     doc: Document,
@@ -115,8 +129,25 @@ export class LibraryView {
     /** The funnel, built by the sheet manager: lit while a filter is on. */
     private readonly filterBtn: HTMLElement,
     now: () => number = Date.now,
+    /** The shelf was switched, so the phone can remember it. */
+    private readonly onShelf: (shelf: Shelf) => void = () => {},
   ) {
     this.doc = doc;
+    const shelfBtn = (shelf: Shelf, label: string): HTMLElement =>
+      h(doc, "button", {
+        type: "button",
+        text: label,
+        onTap: () => {
+          this.model.setShelf(shelf);
+          this.onShelf(shelf);
+          this.render();
+        },
+      });
+    this.shelfBtns = { films: shelfBtn("films", "Films"), games: shelfBtn("games", "Games") };
+    this.shelves = h(doc, "div", { id: "shelves", hidden: true }, [
+      this.shelfBtns.films,
+      this.shelfBtns.games,
+    ]);
     this.gridEl = h(doc, "div", { id: "grid" });
     this.grid = new Grid(doc, this.gridEl, stamp, onOpen, now);
     this.empty = h(doc, "div", { id: "empty", hidden: true });
@@ -140,6 +171,7 @@ export class LibraryView {
     this.root = h(doc, "div", { id: "library", class: "view on" }, [
       this.brand,
       h(doc, "div", { id: "libHead" }, [h(doc, "h2", { text: "Library" }), this.count]),
+      this.shelves,
       this.chips,
       this.chip,
       this.gridEl,
@@ -152,17 +184,26 @@ export class LibraryView {
     const items = this.model.visible();
     this.grid.update(items);
 
+    const games = this.model.shelf === "games";
     const emptyByFilter = this.model.filtersOn() && this.model.all.length > 0;
     this.empty.hidden = items.length > 0;
     if (!items.length) {
       setText(
         this.empty,
-        emptyByFilter ? "Nothing matches what you picked." : "No movies found yet.",
+        emptyByFilter
+          ? "Nothing matches what you picked."
+          : games
+            ? "No games yet."
+            : "No movies found yet.",
       );
     }
     // Only ever offered when clearing would actually bring films back.
     toggleClass(this.emptyClear, "on", items.length === 0 && emptyByFilter);
-    setText(this.count, items.length === 1 ? "1 film" : items.length + " films");
+    const noun = games ? "game" : "film";
+    setText(this.count, items.length === 1 ? "1 " + noun : items.length + " " + noun + "s");
+    this.shelves.hidden = !this.model.hasGames;
+    toggleClass(this.shelfBtns.films, "sel", !games);
+    toggleClass(this.shelfBtns.games, "sel", games);
     this.paintChip();
     this.paintChips();
   }

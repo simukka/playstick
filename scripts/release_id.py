@@ -41,6 +41,7 @@ PARTS = (
     "roles",
     "src/server/playstick",
     "src/server/playstick-web.py",
+    "src/server/playstick-game.py",
     "src/player/dist/playstick-ui.html",
 )
 

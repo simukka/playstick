@@ -53,7 +53,8 @@ from .config import (
 )
 from .airplay import airplay_active, systemctl
 from . import tls
-from .library import Library
+from . import ws
+from .library import KINDS, Library
 from .thumbs import placeholder_svg
 from .player import Busy
 from .projector import ProjectorError, Refused
@@ -205,6 +206,19 @@ def _episode(entry):
     return {"series": series, "season": season, "episode": episode}
 
 
+# The systems a game may be, and the ROM extensions each one accepts. Checked at
+# the sync so a row can never name a core the stick does not have, and so a
+# file called .nes is never handed to the Game Boy core. GB and GBC share the
+# gambatte core, which plays either kind of cartridge, so a colour game whose
+# file is named .gb is accepted under 'gbc' too.
+GAME_SYSTEMS = {
+    "nes": (".nes",),
+    "gb": (".gb", ".gbc"),
+    "gbc": (".gb", ".gbc"),
+    "sms": (".sms",),
+}
+
+
 def _float_or_none(value):
     if isinstance(value, bool) or value is None:
         return None
@@ -268,6 +282,9 @@ class Handler(BaseHTTPRequestHandler):
     # The dot over the film. None in a daemon built without it -- the tests'
     # handler, say -- and the route then answers that nothing is drawn.
     pointer = None
+    # The game runner, or None on a daemon built without games. Its status is
+    # in /api/status and its phones are on /api/game/socket.
+    game = None
 
     # BaseHTTPRequestHandler logs every request to stderr, i.e. into the
     # journal, and a page polling once a second per phone would be the only
@@ -389,6 +406,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "not on the local network"}, 403)
         if path == "/api/time":
             return self._api_time()
+        if path == "/api/game/socket":
+            return self._api_game_socket()
         if path == "/":
             return self._serve_ui()
         if path == "/api/library":
@@ -595,6 +614,13 @@ class Handler(BaseHTTPRequestHandler):
                         "season": items[ident]["season"],
                         "episode": items[ident]["episode"]}
                        if items[ident].get("series") else {}),
+                    # Absent on a film, so a film row is as it always was. On
+                    # a game, what puts it on the Games shelf, and the system
+                    # and player count the tile and the gamepad show.
+                    **({"kind": "game",
+                        "system": items[ident]["system"],
+                        "players": items[ident]["players"] or 1}
+                       if items[ident].get("kind") == "game" else {}),
                 }
                 for ident in order
             ],
@@ -860,6 +886,15 @@ class Handler(BaseHTTPRequestHandler):
         raw = body.get("films")
         if not isinstance(raw, list):
             return self._json({"error": "films must be a list."}, 400)
+        # Which kind of row this batch is: 'film' unless the admin app says
+        # otherwise, so an older admin app is still a film push. Every entry
+        # must be that kind, because a reconcile only deletes rows of the
+        # batch's kind -- a batch that mixed them could not say which rows its
+        # absence was meant to remove.
+        kind = body.get("kind", "film")
+        if kind not in KINDS:
+            return self._json({"error": "kind must be one of %s."
+                                        % ", ".join(KINDS)}, 400)
         if len(raw) > ADMIN_SYNC_MAX:
             return self._json(
                 {"error": "That is more than %d films." % ADMIN_SYNC_MAX}, 400)
@@ -868,7 +903,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(entry, dict):
                 return self._json(
                     {"error": "Film %d is not an object." % index}, 400)
-            film, error = self._sync_film(entry)
+            film, error = self._sync_film(entry, kind)
             if error:
                 return self._json({"error": "Film %d: %s" % (index, error)}, 400)
             if film["id"] in seen:
@@ -877,8 +912,8 @@ class Handler(BaseHTTPRequestHandler):
                               % (index, film["id"])}, 400)
             seen.add(film["id"])
             films.append(film)
-        written, removed = self.library.sync(films,
-                                             bool(body.get("reconcile")))
+        written, removed = self.library.sync(
+            films, bool(body.get("reconcile")), kind)
         return self._json({"written": written, "removed": removed})
 
     def _api_admin_films_delete(self):
@@ -914,8 +949,13 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"removed": self.library.delete(ids)})
 
     @staticmethod
-    def _sync_film(entry):
+    def _sync_film(entry, kind="film"):
         """One film's row, coerced and proved. Returns (film, error).
+
+        `kind` is the batch's. An entry may repeat it but not contradict it.
+        A game is held to its own rules on top of the shared ones: a `system`
+        from GAME_SYSTEMS, a ROM whose extension that system accepts, and no
+        subtitles or prepared audio, because a game's sound is made live.
 
         Every path here is checked with the same Library._under_root the player
         uses, against the real library root -- so a `rel` of "../../etc/passwd"
@@ -946,6 +986,23 @@ class Handler(BaseHTTPRequestHandler):
         title = str(entry.get("title") or "").strip()
         if not title:
             return None, "title is required."
+        if entry.get("kind", kind) != kind:
+            return None, "kind is %r, but this batch is %r." % (
+                entry.get("kind"), kind)
+        system, players = None, None
+        if kind == "game":
+            system = entry.get("system")
+            if system not in GAME_SYSTEMS:
+                return None, "system must be one of %s." % ", ".join(
+                    sorted(GAME_SYSTEMS))
+            if not media_rel.lower().endswith(GAME_SYSTEMS[system]):
+                return None, "a %s game must be a %s file." % (
+                    system, " or ".join(GAME_SYSTEMS[system]))
+            if entry.get("subtitles") or entry.get("audio"):
+                return None, "a game has no subtitles or audio tracks."
+            players = _int_or_none(entry.get("players")) or 1
+            if players not in (1, 2):
+                return None, "players must be 1 or 2."
 
         subs = []
         for sub in entry.get("subtitles") or ():
@@ -998,6 +1055,9 @@ class Handler(BaseHTTPRequestHandler):
             "genres": genres[:20],
             "subtitles": subs,
             "audio": audio,
+            "kind": kind,
+            "system": system,
+            "players": players,
         }, ""
 
     def _api_admin_thumb(self, ident):
@@ -1060,7 +1120,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "not found"}, 404)
         found = self.thumbs.get(ident)
         if found is None:
-            self.thumbs.request(ident)
+            # A ROM is not something mpv can grab a frame from, so a game with
+            # no uploaded poster keeps the placeholder rather than queueing an
+            # extraction that could only fail.
+            if item.get("kind") != "game":
+                self.thumbs.request(ident)
             # no-store, so the next request after the frame is extracted gets
             # the real thing without the page having to cache-bust.
             return self._send(200, placeholder_svg(item["title"]),
@@ -1264,7 +1328,28 @@ class Handler(BaseHTTPRequestHandler):
             # to match: "unavailable" still means "no library", so a page
             # cached from before this existed keeps working exactly as it did.
             "nas": self.nas.snapshot(),
+            # While a game is on: its system, how many pads it has, which of
+            # them a phone holds, and the sound's sample rate. Null otherwise.
+            # The pads themselves and the sound go over /api/game/socket.
+            "game": self.game.status() if self.game is not None else None,
         })
+
+    def _api_game_socket(self):
+        """The gamepad: button state up, the game's sound down, one
+        WebSocket per phone. See game.py and ws.py.
+
+        Open whether or not a game is running, so a phone that opens the
+        gamepad as the lamp warms up is already connected when the game
+        starts and is told its role then. This thread belongs to the socket
+        until it closes.
+        """
+        if self.game is None:
+            return self._json({"error": "Games are not set up here."}, 404)
+        conn = ws.accept(self)
+        if conn is None:
+            return None
+        self.game.serve(conn)
+        return None
 
     def _api_audio(self, ident, track):
         """One prepared audio track, streamed to one phone's headphones.

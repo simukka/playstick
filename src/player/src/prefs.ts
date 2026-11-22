@@ -61,3 +61,22 @@ export function browserStorage(): StorageLike | null {
     return null;
   }
 }
+
+const SHELF_KEY = "playstick.shelf";
+
+/** The shelf this phone last looked at: "games" or "films". */
+export function loadShelf(storage: StorageLike | null): "films" | "games" {
+  try {
+    return storage?.getItem(SHELF_KEY) === "games" ? "games" : "films";
+  } catch {
+    return "films";
+  }
+}
+
+export function saveShelf(storage: StorageLike | null, shelf: "films" | "games"): void {
+  try {
+    storage?.setItem(SHELF_KEY, shelf);
+  } catch {
+    // Not remembered this time.
+  }
+}

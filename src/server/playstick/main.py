@@ -14,6 +14,8 @@ from .library import Library
 from .nas import NasWatcher
 from .thumbs import Thumbs
 from .player import Player
+from .game import GameRunner
+from .stage import Stage
 from .projectionist import Projectionist
 from .projector import open_projector
 from .http import Handler
@@ -41,7 +43,10 @@ def main():
     # up -- or, with a cable that hangs on open(), prevent it.
     projector = open_projector(PROJECTOR_MODEL, PROJECTOR_DEVICE,
                                PROJECTOR_TIMEOUT)
-    projectionist = Projectionist(projector, player)
+    game = GameRunner()
+    # The projectionist is handed both players behind one interface, and the
+    # item's kind decides which of them starts. See stage.py.
+    projectionist = Projectionist(projector, Stage(player, game))
     # The projectionist rather than the player, so that posters stop being
     # extracted over CIFS while a lamp is warming up as well as while a film
     # is running. Thumbs only ever asks for a state, and this answers with the
@@ -72,6 +77,7 @@ def main():
     Handler.nas = nas
     Handler.thumbs = thumbs
     Handler.player = player
+    Handler.game = game
     Handler.projectionist = projectionist
     pointer = PointerOverlay(player)
     threading.Thread(target=pointer.run, args=(stopping,), daemon=True).start()
