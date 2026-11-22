@@ -1,3 +1,9 @@
+playstick (1.1.1) unstable; urgency=medium
+
+  * Keeps the phone page answering while the NAS is off, and wakes the NAS when a film is picked.
+
+ -- simukka <kylesimukka@gmail.com>  Sun, 22 Nov 2026 09:02:49 +0100
+
 playstick (1.1.0) unstable; urgency=medium
 
   * Plays NES, Game Boy and Master System games from the library, with the phone as the gamepad and the speaker.

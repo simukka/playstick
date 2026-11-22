@@ -116,7 +116,7 @@ describe("StatusPresenter offers to wake the NAS", () => {
   it("offers the button when the NAS is off and can be woken", () => {
     const { doc, p } = present(() => {});
     p.apply(unavailable({ nas: { power: "off", can_wake: true } }));
-    expect(text(doc, "bannerMsg")).toMatch(/the NAS is off/);
+    expect(text(doc, "bannerMsg")).toMatch(/The NAS is off/);
     expect(on(doc, "bannerAct")).toBe(true);
     expect(text(doc, "bannerAct")).toBe("Turn it on");
   });

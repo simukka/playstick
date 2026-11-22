@@ -63,6 +63,17 @@ describe("LibraryView", () => {
     expect(doc.getElementById("empty")!.textContent).toMatch(/Can't reach/);
   });
 
+  it("leaves a full grid alone when the movies cannot be reached", () => {
+    // The films are the stick's own rows, there with the NAS asleep, and
+    // picking one is what wakes it -- an apology over them would contradict that.
+    const { doc, model, v } = view();
+    model.setItems(items);
+    v.render();
+    v.unavailable();
+    expect(doc.getElementById("empty")!.hidden).toBe(true);
+    expect(doc.getElementById("grid")!.children.length).toBeGreaterThan(0);
+  });
+
   it("plays the film a tile was tapped for", () => {
     const { doc, model, v, plays } = view();
     model.setItems(items);

@@ -245,8 +245,15 @@ export class LibraryView {
     }
   }
 
-  /** The daemon could not reach the NAS: say so where the grid would be. */
+  /**
+   * The daemon could not reach the NAS: say so where the grid would be -- but
+   * only when there is no grid. The films come from the stick's own database,
+   * so they are there with the NAS asleep, and picking one is what wakes it.
+   */
   unavailable(): void {
+    if (this.model.all.length > 0) {
+      return;
+    }
     this.empty.hidden = false;
     setText(this.empty, "Can't reach the movies right now.");
     toggleClass(this.emptyClear, "on", false);

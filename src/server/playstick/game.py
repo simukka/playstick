@@ -48,6 +48,7 @@ import time
 from . import config
 from .config import log
 from .airplay import airplay_confirmed
+from .library import resolve_inside
 from .player import Busy
 from . import stage
 from . import ws
@@ -123,6 +124,9 @@ class GameRunner:
     # -- lifecycle ----------------------------------------------------------
 
     def start(self, item, progress=None):
+        # Resolved before the lock, as Player.start does a film: these are
+        # stats on the share, and status() takes the same lock.
+        real = resolve_inside(item["path"])
         with self._lock:
             if not config.GAMES_ENABLED:
                 raise Busy("Games are switched off on this stick.")
@@ -134,9 +138,7 @@ class GameRunner:
             if not core or not os.path.isfile(core):
                 raise Busy("This stick cannot play %s games yet."
                            % (item.get("system") or "these"))
-            real = os.path.realpath(item["path"])
-            root = os.path.realpath(config.LIBRARY)
-            if not real.startswith(root + os.sep):
+            if real is None:
                 raise Busy("That file is not in the library.")
 
             self._restore_airplay = stage.take_display(progress)

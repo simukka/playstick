@@ -10,7 +10,7 @@ from .config import (
     TLS_CERT, TLS_KEY, TLS_PORT, log
 )
 from .db import Database
-from .library import Library
+from .library import Library, share_present
 from .nas import NasWatcher
 from .thumbs import Thumbs
 from .player import Player
@@ -46,7 +46,11 @@ def main():
     game = GameRunner()
     # The projectionist is handed both players behind one interface, and the
     # item's kind decides which of them starts. See stage.py.
-    projectionist = Projectionist(projector, Stage(player, game))
+    #
+    # The NAS watcher and the share probe so that a film picked while the NAS
+    # sleeps wakes it and waits for the films, rather than failing on them.
+    projectionist = Projectionist(projector, Stage(player, game), nas=nas,
+                                  share=share_present)
     # The projectionist rather than the player, so that posters stop being
     # extracted over CIFS while a lamp is warming up as well as while a film
     # is running. Thumbs only ever asks for a state, and this answers with the

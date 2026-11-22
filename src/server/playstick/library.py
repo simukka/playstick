@@ -5,6 +5,21 @@ accepts are the keys of this table, and Library._under_root is what proves a
 path stored in a row actually sits under the library root before any other code
 is allowed to open it.
 
+NOTHING HERE MAY TOUCH THE SHARE ON A REQUEST'S BEHALF
+
+The share is a CIFS mount of a NAS that sleeps, and a stat against a mount
+whose server has gone away does not fail -- it waits, in the kernel, for as
+long as the client keeps retrying. /api/status reads this table once a second
+from every phone, so one stat in that path was enough to make the whole page
+stop answering the moment the NAS dropped off the network, with a request
+thread piling up per poll. So the reads below are pure database: _under_root
+proves a path is inside the library by its text alone, and the checks that
+need the filesystem -- symlinks resolved, a subtitle file actually present --
+are made by whoever is about to open the file (resolve_inside, from
+Player.start and the audio route), which is also the only moment the answer
+is worth anything. share_present() is the one way anything here looks at the
+mount, and it gives up after a few seconds rather than waiting with it.
+
 WHERE THE TABLE COMES FROM, WHICH CHANGED
 
 It used to come from somewhere else: a JSON index the preparer wrote onto the
@@ -33,6 +48,81 @@ import threading
 import time
 
 from .config import LIBRARY, SCAN_INTERVAL, log
+
+
+# How long share_present() waits for the mount to answer. A mounted share that
+# is up answers in milliseconds, and an automount that has to mount first takes
+# a second or two over this box's Wi-Fi; anything past this is a share that is
+# not coming back on its own.
+SHARE_PROBE_SECONDS = 4.0
+
+
+def library_root():
+    """The library root as text: absolute and normalised, never resolved.
+
+    Not realpath, on purpose -- see the module header. Everything that compares
+    a row's path against the root uses this, and everything that is about to
+    open a file re-checks with resolve_inside().
+    """
+    return os.path.abspath(LIBRARY)
+
+
+def resolve_inside(path):
+    """`path` with its symlinks resolved, if it still lands inside the library;
+    None otherwise.
+
+    This one does touch the share, which is why it is called only by code that
+    is about to open the file anyway. A share can contain symlinks, and nothing
+    outside the library is playable or servable whatever the share says.
+    """
+    if not path:
+        return None
+    real = os.path.realpath(path)
+    root = os.path.realpath(LIBRARY)
+    if real == root or real.startswith(root + os.sep):
+        return real
+    return None
+
+
+# The probe thread still waiting on the mount, if any. One at most: a share
+# that has stopped answering would otherwise collect a new stuck thread per
+# question, and every caller would get the same answer from them anyway.
+_probe_lock = threading.Lock()
+_probe_stuck = None
+
+
+def share_present(path=None, timeout=SHARE_PROBE_SECONDS):
+    """Is the share mounted and answering? True, False, or None for "it did not
+    answer in time".
+
+    os.path.isdir, which on an automount trigger is what makes the mount
+    happen -- but run on a thread of its own and abandoned after `timeout`,
+    because against a NAS that has gone away it does not return. While an
+    earlier probe is still stuck, the answer is None at once.
+    """
+    global _probe_stuck
+    path = path or LIBRARY
+    with _probe_lock:
+        if _probe_stuck is not None and _probe_stuck.is_alive():
+            return None
+        result = {}
+
+        def look():
+            try:
+                result["ok"] = os.path.isdir(path)
+            except OSError as exc:
+                result["error"] = exc
+                result["ok"] = False
+
+        worker = threading.Thread(target=look, daemon=True,
+                                  name="share-probe")
+        worker.start()
+        worker.join(timeout)
+        if worker.is_alive():
+            _probe_stuck = worker
+            return None
+        _probe_stuck = None
+        return result.get("ok", False)
 
 
 # What the desktop admin editor is allowed to set. Everything a film carries
@@ -113,6 +203,13 @@ class Library:
         with self._lock:
             return self._available
 
+    def share(self):
+        """(available, scanned_at, error): what the keeper last found, without
+        reading the table. What /api/status needs, and all it needs -- it
+        used to hydrate the whole library once a second to learn one bool."""
+        with self._lock:
+            return self._available, self._scanned_at, self._error
+
     # -- reading ------------------------------------------------------------
 
     def _read_all(self):
@@ -137,7 +234,7 @@ class Library:
         """
         if not rows:
             return {}
-        root = os.path.realpath(LIBRARY)
+        root = library_root()
         ids = [r["id"] for r in rows]
         genres = self._grouped(
             "SELECT film_id, genre FROM film_genre WHERE film_id IN (%s) "
@@ -187,21 +284,18 @@ class Library:
                 # filename, where the database knows what prep actually
                 # extracted.
                 #
-                # Stat'ed, unlike audio below, because these are handed to mpv
-                # on the command line and one that is not there is a hard error
-                # at film start.
+                # Not stat'ed here: that is a round trip over CIFS per film on
+                # every read, and a hang when the NAS is away (module header).
+                # Player.start drops any that are not on the share before it
+                # hands them to mpv, which is the one place a missing file is
+                # a hard error.
                 "subs": [s for s in ({"path": self._under_root(root, r["rel"]),
                                       "lang": (r["lang"] or "und").lower()}
                                      for r in subs.get(ident, ()))
-                         if s["path"] and os.path.isfile(s["path"])],
-                # Not stat'ed, deliberately, where "subs" just above is.
-                #
-                # The difference is what a missing file costs. An audio track
-                # that has gone missing is a 404 on a request nobody is blocked
-                # by, and the page has to be able to explain that case anyway.
-                # Stat'ing them would mean up to four more round trips per film
-                # over CIFS on every library read, which is the exact cost the
-                # database exists to avoid.
+                         if s["path"]],
+                # Not stat'ed either. An audio track that has gone missing is a
+                # 404 on a request nobody is blocked by, and the audio route
+                # resolves the path again before it opens anything.
                 "audio": [t for t in (
                     {"n": r["n"],
                      "path": self._under_root(root, r["rel"]),
@@ -269,10 +363,15 @@ class Library:
         and this refuses to use one, so neither a bug in the first nor a
         database edited by hand can put a path outside the share in front of
         mpv.
+
+        By the path's text alone: `root` is library_root(), and this
+        normalises away any "..", but it does not resolve symlinks, because
+        that means asking the share. resolve_inside() does that part, at the
+        moment a file is opened.
         """
         if not rel:
             return None
-        candidate = os.path.realpath(os.path.join(root, rel))
+        candidate = os.path.normpath(os.path.join(root, rel))
         if candidate == root or candidate.startswith(root + os.sep):
             return candidate
         return None
@@ -531,16 +630,17 @@ class Library:
 
         os.path.isdir on an automount trigger is what causes the mount to
         happen, which is the behaviour wanted: the point of asking is to find
-        out whether a film could be played right now.
+        out whether a film could be played right now. Through share_present,
+        so a NAS that has vanished costs this thread a few seconds rather than
+        the rest of the night.
         """
+        present = share_present(LIBRARY)
+        available = bool(present)
         error = ""
-        try:
-            available = os.path.isdir(LIBRARY)
-            if not available:
-                error = "the share is not mounted"
-        except OSError as exc:
-            available = False
-            error = os.strerror(exc.errno) if exc.errno else str(exc)
+        if present is None:
+            error = "the share is not answering"
+        elif not present:
+            error = "the share is not mounted"
         if not available and self.available():
             log("library unavailable: %s", error)
         with self._lock:

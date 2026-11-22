@@ -371,7 +371,7 @@ describe("the offer to switch the NAS on", () => {
   it("draws a real, styled, tappable button under the sentence", async () => {
     const p = await boot(nasOff as Partial<Status>);
     await until(() => p.css("banner").display === "block");
-    expect(p.el("bannerMsg").textContent).toMatch(/the NAS is off/);
+    expect(p.el("bannerMsg").textContent).toMatch(/The NAS is off/);
     // The CSS reached it: without the stylesheet this is "inline", which is
     // the failure a stub DOM cannot see.
     expect(p.css("bannerAct").display).toBe("block");

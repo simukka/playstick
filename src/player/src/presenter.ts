@@ -164,8 +164,11 @@ export class StatusPresenter {
       return;
     }
     if (s.nas?.power === "off" && s.nas.can_wake && this.wakeNas) {
+      // Picking a film wakes it too (the daemon does it as the first step of
+      // starting one), so the button is for somebody who wants the NAS on
+      // without choosing yet.
       this.banner.show(
-        "Can't reach the movies \u2014 the NAS is off.",
+        "The NAS is off \u2014 pick a movie and I'll switch it on.",
         0,
         { label: "Turn it on", onTap: this.wakeNas },
       );

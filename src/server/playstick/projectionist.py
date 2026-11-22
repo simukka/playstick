@@ -37,6 +37,19 @@ nobody.
 
 mpv failing is different, and keeps the behaviour it always had: the attempt
 ends, the message reaches the page, and the grid comes back.
+
+WHEN THE NAS IS ASLEEP
+
+The films are rows in the local database, so the grid is there whether or not
+the NAS is, and a child can pick a film off it at any time. When they pick one
+and the share is not answering, the sequence grows a front: the lamp is sent
+PON at once (it takes a minute either way, so it might as well be spent while
+the NAS boots), then a wake-on-LAN goes out, then the sequence waits for the
+NAS to answer a ping, then for the mount itself to answer -- smbd comes up well
+after the network stack does, and the mount is the only proof that matters.
+Only then does it go on to the lamp, which by then has usually finished
+warming. Each wait is cancellable and has a deadline, and missing one ends the
+attempt with a sentence on the page rather than a film that cannot be read.
 """
 
 import threading
@@ -44,7 +57,7 @@ import time
 
 from .airplay import airplay_active, airplay_confirmed
 from .config import (
-    PROJECTOR_AIRPLAY_WAKE_TICKS, PROJECTOR_IDLE_SECONDS, PROJECTOR_INPUT,
+    NAS_WAKE_WINDOW, PROJECTOR_AIRPLAY_WAKE_TICKS, PROJECTOR_IDLE_SECONDS, PROJECTOR_INPUT,
     PROJECTOR_READY_SECONDS, PROJECTOR_TICK_SECONDS, PROJECTOR_WAKE_ON_AIRPLAY,
     PROJECTOR_WARMUP_SECONDS, log,
 )
@@ -57,6 +70,8 @@ from .projector import ON, STANDBY, UNKNOWN, ProjectorError
 # the lamp" is what is happening; "polling QPW until 001" is in the journal.
 STEPS = (
     ("waking", "Waking the projector up…"),
+    ("nas", "Waking the movie server up…"),
+    ("share", "Opening the movie library…"),
     ("warming", "Waiting for the lamp…"),
     ("input", "Pointing it at the movie…"),
     ("display", "Making room on the screen…"),
@@ -78,6 +93,25 @@ RESTRIKE_INTERVAL = 20.0
 # during a lamp warm-up feels immediate, large enough not to spin.
 NAP = 0.25
 
+# How long to wait for the share once the NAS answers ping. smbd starts well
+# after the network does -- twenty seconds on a Synology woken from sleep, more
+# from cold -- and an automount that failed against the sleeping NAS has to be
+# reset and retried on top of that.
+SHARE_MOUNT_SECONDS = 120.0
+
+# How long to give a share that has no NAS behind it to manage: no wake to send,
+# no ping to watch, so this is only an automount that is slow, or not coming.
+SHARE_UNMANAGED_SECONDS = 20.0
+
+# Between looks at the NAS and the mount while waiting. Each look is a ping or a
+# bounded stat, so this is a pace, not a cost.
+SHARE_POLL_SECONDS = 2.0
+
+# What the page says when the wait for the films gives up. The detail -- which
+# of the waits it was, and for how long -- goes to the journal.
+NAS_ASLEEP_TEXT = "The movie server didn't wake up."
+SHARE_MISSING_TEXT = "Can't reach the movies right now."
+
 # How long a failed preparation keeps saying so on /api/status.
 #
 # It has to be a window rather than a message consumed by the first reader:
@@ -92,9 +126,16 @@ NOTICE_SECONDS = 15.0
 class Projectionist:
     """The facade the HTTP layer asks about state, and the thread that acts."""
 
-    def __init__(self, projector, player, clock=time.monotonic, sleep=time.sleep):
+    def __init__(self, projector, player, clock=time.monotonic, sleep=time.sleep,
+                 nas=None, share=None):
         self._projector = projector
         self._player = player
+        # The NasWatcher, to wake and ping, and a callable answering whether
+        # the share is there right now: True, False, or None for "did not
+        # answer" -- library.share_present in the daemon. No `share` means
+        # "assume it is", which is every test that is not about the NAS.
+        self._nas = nas
+        self._share = share
         # Injected so the tests can drive a thirty-minute idle timeout by
         # advancing a variable instead of waiting. The same technique
         # tests/js/clock.js already uses on the headphone sync controller.
@@ -285,12 +326,23 @@ class Projectionist:
         try:
             power = self._observe_power()
 
+            # The films first, because without them there is nothing to show
+            # -- but with the lamp already started, because it takes a minute
+            # to warm whatever else is happening and the NAS takes longer.
+            struck_at = None
+            if not self._share_here():
+                if power == STANDBY:
+                    struck_at = self._light()
+                ok, message = self._await_share(prep)
+                if not ok:
+                    return self._abandon(prep, message)
+
             # UNKNOWN means "no projector, or one that will not say", and both
             # of those must skip the wait rather than sit through it. This is
             # the line that keeps an appliance with no serial cable behaving
             # exactly as it did before this feature existed.
             if power == STANDBY:
-                if not self._strike(prep):
+                if not self._strike(prep, struck_at):
                     return self._abandon(prep, "")
 
             if not self._still_wanted(prep):
@@ -315,27 +367,40 @@ class Projectionist:
         finally:
             prep["done"].set()
 
-    def _strike(self, prep):
+    def _light(self):
+        """Send PON and return when it was sent. Faults are noted, not raised.
+
+        Worth continuing rather than giving up when it is refused: PON is the
+        one command standby is documented to accept, so a refusal here more
+        often means the projector is already on, or mid-cool-down, than that
+        the request was wrong.
+        """
+        try:
+            self._projector.power_on()
+        except ProjectorError as exc:
+            self._note(exc, "PON")
+        return self._clock()
+
+    def _strike(self, prep, struck_at=None):
         """Light the lamp and wait for it to say so. False if cancelled.
+
+        `struck_at` is when PON already went out, if it did -- the sequence
+        sends it before waiting on the NAS -- and the blackout is counted from
+        then rather than spent again.
 
         Returning True on a projector that never lights is not an oversight.
         Past the deadline the sequence carries on and starts the film, for the
         reason in the module header -- the screen may well already be on.
         """
         self._step(prep, "warming")
-        try:
-            self._projector.power_on()
-        except ProjectorError as exc:
-            # Worth continuing rather than giving up: PON is the one command
-            # standby is documented to accept, so a refusal here more often
-            # means the projector is already on, or mid-cool-down, than that
-            # the request was wrong.
-            self._note(exc, "PON")
+        if struck_at is None:
+            struck_at = self._light()
 
         # The documented blackout. Polling inside it produces timeouts that
         # say nothing about the cable, so the wait is spent rather than the
         # port being asked pointless questions.
-        if not self._nap(prep, PROJECTOR_WARMUP_SECONDS):
+        blackout = PROJECTOR_WARMUP_SECONDS - (self._clock() - struck_at)
+        if blackout > 0 and not self._nap(prep, blackout):
             return False
 
         deadline = self._clock() + PROJECTOR_READY_SECONDS
@@ -358,6 +423,72 @@ class Projectionist:
         log("gave up waiting for the lamp after %.0fs; starting the film anyway",
             PROJECTOR_READY_SECONDS)
         return True
+
+    # -- the films, when the NAS is asleep
+
+    def _share_here(self):
+        if self._share is None:
+            return True
+        return self._share() is True
+
+    def _await_share(self, prep):
+        """Wake the NAS and wait until the films can be read. (ok, message).
+
+        Two waits, each with its own deadline, and each ending the attempt
+        when it runs out: for the NAS to answer a ping after the wake-on-LAN,
+        then for the mount to answer once it does. A message of "" is a
+        cancel, which _abandon treats as one.
+        """
+        nas = self._nas
+        if nas is None or not nas.configured:
+            # Nothing to wake. Give an automount that is merely slow its
+            # chance, and then say so.
+            self._step(prep, "share")
+            return self._await_mount(prep, SHARE_UNMANAGED_SECONDS)
+
+        self._step(prep, "nas")
+        if not nas.ping():
+            ok, reason = nas.wake()
+            if ok:
+                log("preparing: sent wake-on-LAN to the NAS")
+            elif reason:
+                # "Already waking it up" is the cooldown and is fine: a packet
+                # went out under a minute ago. Anything else -- no MAC, a send
+                # that failed -- still leaves somebody's finger on the NAS's
+                # button as a way for this to succeed, so the wait goes on.
+                log("preparing: no wake-on-LAN sent: %s", reason)
+            deadline = self._clock() + NAS_WAKE_WINDOW
+            while not nas.ping():
+                if self._clock() >= deadline:
+                    log("the NAS did not answer ping within %.0fs of the wake",
+                        NAS_WAKE_WINDOW)
+                    return False, NAS_ASLEEP_TEXT
+                if not self._nap(prep, SHARE_POLL_SECONDS):
+                    return False, ""
+            log("preparing: the NAS answers ping")
+
+        self._step(prep, "share")
+        # A mount that failed against the sleeping NAS is left failed, and the
+        # automount will not try it again until that is cleared.
+        try:
+            nas.recover()
+        except Exception as exc:                         # noqa: BLE001
+            log("preparing: nas recover: %s", exc)
+        return self._await_mount(prep, SHARE_MOUNT_SECONDS)
+
+    def _await_mount(self, prep, seconds):
+        deadline = self._clock() + seconds
+        while True:
+            if not self._still_wanted(prep):
+                return False, ""
+            if self._share() is True:
+                log("preparing: the share is mounted")
+                return True, ""
+            if self._clock() >= deadline:
+                log("the share did not come up within %.0fs", seconds)
+                return False, SHARE_MISSING_TEXT
+            if not self._nap(prep, SHARE_POLL_SECONDS):
+                return False, ""
 
     def _select_input(self):
         try:

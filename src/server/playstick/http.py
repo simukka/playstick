@@ -17,10 +17,13 @@ of it is load-bearing:
     library root, is a 400 with a sentence -- refused, not silently dropped, so
     a mis-configured admin app is a visible failure rather than a film that
     quietly never appears.
-  * the check is Library._under_root, the same realpath-and-compare that has
-    always stood between a stored path and mpv. It runs twice: once here before
-    a row is written, and again in Library._hydrate before a path is used. A
-    bug in either one alone cannot reach the filesystem.
+  * the check is realpath-and-compare (library.resolve_inside), on top of
+    Library._under_root's check of the text. It runs here before a row is
+    written, and again -- resolved -- by whoever opens the file: Player.start
+    for the film and its subtitles, the audio route for a soundtrack.
+    Library._hydrate checks only the text, because reading the table must
+    never wait on the share. A bug in any one alone cannot reach the
+    filesystem.
   * these routes are the only ones that accept a path in any form.
 
 There is still no authentication -- the CIDR allowlist is the whole control,
@@ -54,7 +57,7 @@ from .config import (
 from .airplay import airplay_active, systemctl
 from . import tls
 from . import ws
-from .library import KINDS, Library
+from .library import KINDS, Library, resolve_inside
 from .thumbs import placeholder_svg
 from .player import Busy
 from .projector import ProjectorError, Refused
@@ -393,7 +396,9 @@ class Handler(BaseHTTPRequestHandler):
             return state
         if airplay_active():
             return "airplay"
-        _order, _items, available, _at, _err = self.library.snapshot()
+        # The keeper's last answer, not a read of the table: this runs once a
+        # second per phone, and nothing on that path may wait on the share.
+        available, _at, _err = self.library.share()
         return "idle" if available else "unavailable"
 
     # -- routes
@@ -963,6 +968,10 @@ class Handler(BaseHTTPRequestHandler):
         The coercion is the boundary work /api/volume does for a delta, applied
         to a bigger shape.
         """
+        # Resolved, unlike the reads in library.py: a sync is one POST from the
+        # admin app, which has just read the share itself, so the NAS is up --
+        # and refusing a symlink out of the library before it becomes a row is
+        # worth the stats.
         root = os.path.realpath(LIBRARY)
 
         def under(rel):
@@ -970,7 +979,9 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             if os.path.isabs(rel):
                 return None
-            return Library._under_root(root, rel)
+            if Library._under_root(root, rel) is None:
+                return None
+            return resolve_inside(os.path.join(root, rel))
 
         ident = entry.get("id")
         if not isinstance(ident, str) or not re.fullmatch(r"[0-9a-f]{16}", ident):
@@ -1372,7 +1383,11 @@ class Handler(BaseHTTPRequestHandler):
         if item is None or not 0 <= track < len(tracks):
             return self._json({"error": "not found"}, 404)
 
-        path = tracks[track]["path"]
+        # The row's path was checked by its text; this is where a symlink on
+        # the share gets its say, right before the file is opened.
+        path = resolve_inside(tracks[track]["path"])
+        if path is None:
+            return self._json({"error": "not found"}, 404)
         try:
             stat = os.stat(path)
             handle = open(path, "rb")

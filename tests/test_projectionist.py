@@ -559,5 +559,187 @@ class ByHand(Base):
             projectionist.power(True)
 
 
+class ScriptedNas:
+    """NasWatcher's surface as the projectionist uses it, scripted.
+
+    Writes into the projector's call list rather than one of its own, so the
+    order of PON, the wake, the pings and the remount is one list to assert.
+    `boot_pings` is how many pings go unanswered after the wake before the NAS
+    answers; None means it never does.
+    """
+
+    configured = True
+
+    def __init__(self, calls, up=False, boot_pings=0, wake_reply=(True, "")):
+        self.calls = calls
+        self.up = up
+        self.boot_pings = boot_pings
+        self.wake_reply = wake_reply
+        self.woken = False
+        self.on_ping = None
+
+    def ping(self):
+        self.calls.append("nas:ping")
+        if self.on_ping:
+            self.on_ping()
+        if self.up:
+            return True
+        if self.woken and self.boot_pings is not None:
+            if self.boot_pings <= 0:
+                self.up = True
+                return True
+            self.boot_pings -= 1
+        return False
+
+    def wake(self):
+        self.calls.append("nas:wake")
+        if self.wake_reply[0]:
+            self.woken = True
+        return self.wake_reply
+
+    def recover(self):
+        self.calls.append("nas:recover")
+
+
+class Share:
+    """The share probe: answers from a script, the last one repeating."""
+
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.asked = 0
+
+    def __call__(self):
+        self.asked += 1
+        if len(self.answers) > 1:
+            return self.answers.pop(0)
+        return self.answers[0]
+
+
+class SleepingNas(Base):
+    """A film picked off the grid while the NAS sleeps. The grid is the local
+    database and is there regardless; the films are not, and this is the
+    sequence that goes and gets them."""
+
+    def build_with(self, nas, share):
+        return self.build(nas=nas, share=share)
+
+    def steps_of(self, projectionist):
+        steps = []
+        real = projectionist._step
+        projectionist._step = lambda prep, name: (steps.append(name),
+                                                  real(prep, name))[1]
+        return steps
+
+    def test_the_lamp_then_the_wake_then_ping_then_the_mount(self):
+        nas = ScriptedNas(self.projector.calls, boot_pings=2)
+        share = Share(False, None, True)
+        with settings(PROJECTOR_WARMUP_SECONDS=10.0):
+            projectionist = self.build_with(nas, share)
+            steps = self.steps_of(projectionist)
+            self.run_prepare(projectionist)
+
+        calls = self.projector.calls
+        self.assertEqual(calls[:4], ["power_state", "power_on", "nas:ping",
+                                     "nas:wake"])
+        # Pinged until it answered, and only then was the mount reset.
+        self.assertEqual(calls[4:7], ["nas:ping"] * 3)
+        self.assertEqual(calls[7], "nas:recover")
+        self.assertEqual(steps, ["nas", "share", "warming", "input", "display",
+                                 "starting"])
+        # PON went out once, before the wait; the strike does not send another.
+        self.assertEqual(calls.count("power_on"), 1)
+        self.assertEqual(self.player.calls, [("start", FILM["id"])])
+
+    def test_the_blackout_is_counted_from_the_early_pon(self):
+        """Twenty seconds waiting on the NAS is twenty seconds of lamp warm-up
+        already done, and the ten-second blackout is not spent again."""
+        nas = ScriptedNas(self.projector.calls, boot_pings=10)
+        with settings(PROJECTOR_WARMUP_SECONDS=10.0):
+            self.run_prepare(self.build_with(nas, Share(False, False, True)))
+        # Ten unanswered pings two seconds apart, one look at a mount not yet
+        # up, and no blackout on top.
+        self.assertEqual(self.clock.slept, 22.0)
+        self.assertEqual(self.player.calls, [("start", FILM["id"])])
+
+    def test_a_short_wait_still_sits_out_the_rest_of_the_blackout(self):
+        nas = ScriptedNas(self.projector.calls, boot_pings=1)
+        with settings(PROJECTOR_WARMUP_SECONDS=10.0):
+            self.run_prepare(self.build_with(nas, Share(False, True)))
+        self.assertEqual(self.clock.slept, 10.0)
+
+    def test_a_nas_that_never_wakes_ends_with_a_sentence(self):
+        nas = ScriptedNas(self.projector.calls, boot_pings=None)
+        with settings(NAS_WAKE_WINDOW=30.0):
+            projectionist = self.build_with(nas, Share(False))
+            self.run_prepare(projectionist)
+            self.assertEqual(projectionist.notice(), module.NAS_ASLEEP_TEXT)
+        self.assertEqual(self.player.calls, [])
+        self.assertNotIn("nas:recover", self.projector.calls)
+        self.assertEqual(projectionist.state(), "idle")
+
+    def test_a_nas_that_wakes_but_whose_share_never_comes(self):
+        nas = ScriptedNas(self.projector.calls, boot_pings=0)
+        with settings(SHARE_MOUNT_SECONDS=10.0):
+            projectionist = self.build_with(nas, Share(False))
+            self.run_prepare(projectionist)
+            self.assertEqual(projectionist.notice(), module.SHARE_MISSING_TEXT)
+        self.assertEqual(self.player.calls, [])
+
+    def test_a_nas_already_answering_ping_is_not_sent_a_packet(self):
+        """Up, with the mount stale or failed: the remount is what is owed."""
+        nas = ScriptedNas(self.projector.calls, up=True)
+        with settings():
+            self.run_prepare(self.build_with(nas, Share(False, True)))
+        self.assertNotIn("nas:wake", self.projector.calls)
+        self.assertIn("nas:recover", self.projector.calls)
+        self.assertEqual(self.player.calls, [("start", FILM["id"])])
+
+    def test_a_refused_wake_still_waits_for_somebodys_finger(self):
+        """No MAC, or a cooldown: no packet from here, but the NAS's own button
+        is still a way for this to work, so the wait goes on."""
+        nas = ScriptedNas(self.projector.calls,
+                          wake_reply=(False, "Already waking it up."))
+        pings = []
+
+        def press_the_button():
+            pings.append(1)
+            if len(pings) == 3:
+                nas.up = True
+        nas.on_ping = press_the_button
+        with settings():
+            self.run_prepare(self.build_with(nas, Share(False, True)))
+        self.assertEqual(self.player.calls, [("start", FILM["id"])])
+
+    def test_stop_during_the_wait_abandons_it(self):
+        nas = ScriptedNas(self.projector.calls, boot_pings=None)
+        with settings():
+            projectionist = self.build_with(nas, Share(False))
+            nas.on_ping = lambda: (len(self.projector.calls) > 6
+                                   and projectionist.stop())
+            self.run_prepare(projectionist)
+            self.assertEqual(projectionist.notice(), "")
+        self.assertNotIn(("start", FILM["id"]), self.player.calls)
+        self.assertEqual(projectionist.state(), "idle")
+
+    def test_a_share_that_is_there_leaves_the_nas_alone(self):
+        nas = ScriptedNas(self.projector.calls, up=True)
+        share = Share(True)
+        with settings():
+            projectionist = self.build_with(nas, share)
+            steps = self.steps_of(projectionist)
+            self.run_prepare(projectionist)
+        self.assertEqual(share.asked, 1)
+        self.assertFalse([c for c in self.projector.calls if c.startswith("nas:")])
+        self.assertEqual(steps, ["warming", "input", "display", "starting"])
+
+    def test_no_nas_configured_gives_the_automount_a_moment_then_says_so(self):
+        with settings(SHARE_UNMANAGED_SECONDS=6.0):
+            projectionist = self.build_with(None, Share(False))
+            self.run_prepare(projectionist)
+            self.assertEqual(projectionist.notice(), module.SHARE_MISSING_TEXT)
+        self.assertEqual(self.clock.slept, 6.0)
+        self.assertEqual(self.player.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

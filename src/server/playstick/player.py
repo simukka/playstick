@@ -15,7 +15,8 @@ import subprocess
 import threading
 import time
 
-from .config import LIBRARY, MPV, MPV_ARGS, MPV_SOCKET, SUBTITLES, log
+from .config import MPV, MPV_ARGS, MPV_SOCKET, SUBTITLES, log
+from .library import resolve_inside
 from .airplay import airplay_confirmed
 from . import stage
 
@@ -119,18 +120,30 @@ class Player:
         steps without this method being split apart -- the ordering below is
         load-bearing in several places and is worth keeping in one piece.
         """
+        # A share can contain symlinks. Nothing outside the library is
+        # playable, whatever the share says -- and the library hands over paths
+        # checked by their text alone (see library.py), so this is where they
+        # are resolved. Before the lock, not inside it: these are stats on the
+        # share, and status() takes the same lock once a second for every phone,
+        # so a share that stopped answering here must not take /api/status with
+        # it.
+        real = resolve_inside(item["path"])
+        if real is None:
+            raise Busy("That file is not in the library.")
+        # Subtitles go to mpv on the command line, where one that is not there
+        # is a hard error at film start, so a missing one is dropped here.
+        subs = []
+        for sub in item.get("subs") or []:
+            path = resolve_inside(sub["path"])
+            if path and os.path.isfile(path):
+                subs.append(dict(sub, path=path))
+        item = dict(item, path=real, subs=subs)
+
         with self._lock:
             if self.state() != "idle":
                 raise Busy("A film is already playing.")
             if airplay_confirmed():
                 raise Busy("The projector is being used for AirPlay.")
-
-            # A share can contain symlinks. Nothing outside the library is
-            # playable, whatever the share says.
-            real = os.path.realpath(item["path"])
-            root = os.path.realpath(LIBRARY)
-            if not (real == root or real.startswith(root + os.sep)):
-                raise Busy("That file is not in the library.")
 
             self._restore_airplay = stage.take_display(progress)
             try:

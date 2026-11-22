@@ -421,6 +421,15 @@ class State(ApiTest):
         self.library.available = False
         self.assertEqual(self._state(), "unavailable")
 
+    def test_status_never_reads_the_table(self):
+        """It did, once a second per phone, to learn one bool -- and reading
+        the table stat'ed the share, so a NAS that dropped off the network took
+        /api/status down with it, one stuck thread per poll. The keeper's
+        answer is all this needs."""
+        self.library.available = False
+        self.assertEqual(self._state(), "unavailable")
+        self.assertEqual(self.library.snapshots, 0)
+
     def test_airplay_outranks_an_unmounted_share(self):
         """Somebody is mirroring. That is the more useful thing to say, and it
         is also the state that explains why pressing play will be refused."""
