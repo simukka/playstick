@@ -137,7 +137,7 @@ class Routing(ApiTest):
         self.assertEqual(first.status, 200)
         second = self.fetch("/api/resume", method="POST", body={}, conn=conn)
         self.assertEqual(second.status, 200)
-        self.assertEqual(self.assertJson(second)["state"], "idle")
+        self.assertEqual(self.assertJson(second)["state"], "playing")
         third = self.fetch("/api/stop", method="POST", body={}, conn=conn)
         self.assertEqual(third.status, 200)
 

@@ -30,7 +30,29 @@ import sqlite3
 import threading
 
 from .. import paths
-from .schema import MIGRATIONS, SCHEMA_VERSION
+from .schema import MIGRATIONS, REPLAY_FROM, SCHEMA_VERSION
+
+
+# What a replayed step may run into: the table it creates is already there.
+# Anything else is a real failure, and is raised as one.
+_ALREADY_APPLIED = ("already exists", "duplicate column name")
+
+
+def _replay(conn, script):
+    """Run a migration the file may already have, one statement at a time,
+    skipping each statement whose effect is already there -- see
+    schema.REPLAY_FROM for why the version alone cannot tell."""
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if not sqlite3.complete_statement(statement):
+            continue
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError as exc:
+            if not any(text in str(exc) for text in _ALREADY_APPLIED):
+                raise
+        statement = ""
 
 
 class Database:
@@ -79,9 +101,15 @@ class Database:
             have = conn.execute("PRAGMA user_version").fetchone()[0]
             if have >= SCHEMA_VERSION:
                 return have
-            for step in MIGRATIONS[have:SCHEMA_VERSION]:
-                with conn:
-                    conn.executescript(step)
+            # Past REPLAY_FROM the number does not say which steps the file
+            # has, so every one from there is run again, tolerantly.
+            diverged = have > REPLAY_FROM
+            for index in range(min(have, REPLAY_FROM), SCHEMA_VERSION):
+                if diverged:
+                    _replay(conn, MIGRATIONS[index])
+                else:
+                    with conn:
+                        conn.executescript(MIGRATIONS[index])
             conn.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
             return SCHEMA_VERSION
 

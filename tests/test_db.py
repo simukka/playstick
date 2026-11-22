@@ -76,7 +76,7 @@ class Schema(unittest.TestCase):
         """A device in a cupboard runs whatever schema it last started with.
         Its films must survive the step forward, and simply read as films."""
         import sqlite3
-        from playstick.db import Database, SCHEMA
+        from playstick.db import Database, SCHEMA, SCHEMA_VERSION
         path = os.path.join(TMP, "old-v1.sqlite")
         conn = sqlite3.connect(path)
         conn.executescript(SCHEMA)
@@ -88,10 +88,38 @@ class Schema(unittest.TestCase):
         conn.close()
         db = Database(path)
         with mock.patch("playstick.db.log"):
-            self.assertEqual(db.migrate(), 3)
+            self.assertEqual(db.migrate(), SCHEMA_VERSION)
         row = db.one("SELECT title, series, season, episode FROM film")
         db.close()
         self.assertEqual(tuple(row), ("Ponyo", None, None, None))
+
+    def test_a_version_three_file_from_either_branch_comes_forward(self):
+        """games and cleanup-src each made their own migration 3 -- GAMES on
+        one, SERIES_ART on the other -- so a device at 3 may have either. Both
+        must end up with everything, and neither may trip over what it has."""
+        import sqlite3
+        from playstick.db import (Database, EPISODES, GAMES, SCHEMA,
+                                  SCHEMA_VERSION, SERIES_ART)
+        for name, third in (("games", GAMES), ("series", SERIES_ART)):
+            with self.subTest(branch=name):
+                path = os.path.join(TMP, "old-v3-%s.sqlite" % name)
+                if os.path.exists(path):
+                    os.remove(path)
+                conn = sqlite3.connect(path)
+                for step in (SCHEMA, EPISODES, third):
+                    conn.executescript(step)
+                conn.execute("PRAGMA user_version=3")
+                conn.commit()
+                conn.close()
+                db = Database(path)
+                with mock.patch("playstick.db.log"):
+                    self.assertEqual(db.migrate(), SCHEMA_VERSION)
+                columns = {row[1] for row in db.query("PRAGMA table_info(film)")}
+                tables = {row[0] for row in db.query(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                db.close()
+                self.assertLessEqual({"kind", "system", "players"}, columns)
+                self.assertIn("series_art", tables)
 
     def test_it_is_in_wal(self):
         """A poster extraction landing a blob must not block six phones polling

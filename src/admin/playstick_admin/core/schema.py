@@ -351,3 +351,11 @@ CREATE TABLE game (
 # Applied in order to bring a database forward. Index 0 creates everything from
 # nothing; later entries are the deltas. Keep them append-only.
 MIGRATIONS = (SCHEMA, EPISODES, SERIES, DEPLOY_VARS, GAMES)
+
+# Where two branches numbered their own migrations. cleanup-src made 3 SERIES
+# and 4 DEPLOY_VARS; games made 3 GAMES, and shipped in 1.1.0 and 1.1.1. So a
+# user_version of 3 or 4 does not say which tables a file has. A file behind
+# SCHEMA_VERSION therefore runs every step from this index again, and a step
+# that finds its table already there is skipped -- see Database.migrate. Each
+# of those steps only creates tables, so running one twice changes nothing.
+REPLAY_FROM = 2

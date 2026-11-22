@@ -47,7 +47,7 @@ from .config import DB_PATH, log
 # bottom of this file; a database at version N is brought forward by running
 # every statement from N onwards. There is no downgrade, and there does not
 # need to be: the whole store is rebuilt by one sync from the admin app.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 SCHEMA = """
@@ -189,6 +189,22 @@ ALTER TABLE film ADD COLUMN episode INTEGER;
 """
 
 
+# Posters for a series and its seasons, which have no film row to hang off --
+# see series_art.py. `series` is the folded name, `season` -1 for the show.
+SERIES_ART = """
+CREATE TABLE series_art (
+  id          INTEGER PRIMARY KEY,
+  series      TEXT NOT NULL,
+  season      INTEGER NOT NULL,
+  mime        TEXT NOT NULL,
+  bytes       BLOB NOT NULL,
+  etag        TEXT NOT NULL,
+  updated_at  REAL NOT NULL,
+  UNIQUE (series, season)
+);
+"""
+
+
 # Games. A game is a row in `film` with kind 'game', rather than a table of its
 # own. The reason is that thumb, override, playback and film_genre all hang off
 # film(id) by foreign key. A separate table would need a copy of each one, and
@@ -205,7 +221,35 @@ ALTER TABLE film ADD COLUMN players INTEGER;
 
 # Applied in order to bring a database forward. Index 0 creates everything from
 # nothing; later entries are the deltas. Keep them append-only.
-MIGRATIONS = (SCHEMA, EPISODES, GAMES)
+MIGRATIONS = (SCHEMA, EPISODES, SERIES_ART, GAMES)
+
+# Where two branches numbered their own migrations. cleanup-src made 3
+# SERIES_ART and games made 3 GAMES, and a device may have been deployed from
+# either. So a device at user_version 3 may have either one. A file behind SCHEMA_VERSION
+# therefore runs every step from this index again, and a statement that finds
+# its table or column already there is skipped -- see _replay. Each of those
+# steps only adds things, so running one twice changes nothing.
+REPLAY_FROM = 2
+
+# What a replayed statement may run into: its table or column is already there.
+# Anything else is a real failure, and is raised as one.
+_ALREADY_APPLIED = ("already exists", "duplicate column name")
+
+
+def _replay(conn, script):
+    """Run a migration the file may already have, one statement at a time,
+    skipping each statement whose effect is already there."""
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if not sqlite3.complete_statement(statement):
+            continue
+        try:
+            conn.execute(statement)
+        except sqlite3.OperationalError as exc:
+            if not any(text in str(exc) for text in _ALREADY_APPLIED):
+                raise
+        statement = ""
 
 
 class Database:
@@ -276,9 +320,15 @@ class Database:
             have = conn.execute("PRAGMA user_version").fetchone()[0]
             if have >= SCHEMA_VERSION:
                 return have
-            for step in MIGRATIONS[have:SCHEMA_VERSION]:
-                with conn:
-                    conn.executescript(step)
+            # Past REPLAY_FROM the number does not say which steps the file
+            # has, so every one from there is run again, tolerantly.
+            diverged = have > REPLAY_FROM
+            for index in range(min(have, REPLAY_FROM), SCHEMA_VERSION):
+                if diverged:
+                    _replay(conn, MIGRATIONS[index])
+                else:
+                    with conn:
+                        conn.executescript(MIGRATIONS[index])
             conn.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
             log("database at %s: schema %d -> %d", self.path, have,
                 SCHEMA_VERSION)

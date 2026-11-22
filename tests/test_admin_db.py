@@ -69,6 +69,36 @@ class Migrations(Fixture):
         self.assertEqual(self.db.migrate(), SCHEMA_VERSION)
         self.assertEqual(self.db.one("PRAGMA user_version")[0], SCHEMA_VERSION)
 
+    def test_a_file_from_either_branch_comes_forward(self):
+        """cleanup-src left a library at 4 with SERIES and DEPLOY_VARS; games
+        1.1.x left one at 3 with GAMES. Either must end up with every table,
+        and a table it already has must not stop the rest."""
+        import sqlite3
+        from playstick_admin.core import schema
+        histories = {
+            "cleanup-src": (4, (schema.SCHEMA, schema.EPISODES, schema.SERIES,
+                                schema.DEPLOY_VARS)),
+            "games": (3, (schema.SCHEMA, schema.EPISODES, schema.GAMES)),
+        }
+        for name, (version, steps) in histories.items():
+            with self.subTest(branch=name):
+                path = os.path.join(self.dir, "%s.db" % name)
+                conn = sqlite3.connect(path)
+                for step in steps:
+                    conn.executescript(step)
+                conn.execute("PRAGMA user_version=%d" % version)
+                conn.commit()
+                conn.close()
+                db = Database(path)
+                try:
+                    self.assertEqual(db.migrate(), SCHEMA_VERSION)
+                    tables = {row[0] for row in db.query(
+                        "SELECT name FROM sqlite_master WHERE type='table'")}
+                finally:
+                    db.close()
+                self.assertLessEqual(
+                    {"series", "series_art", "deploy_var", "game"}, tables)
+
     def test_foreign_keys_are_on(self):
         # Every ON DELETE in the schema depends on this, and it is per
         # connection rather than stored in the file -- so a connection that
