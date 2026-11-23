@@ -360,8 +360,12 @@ class FakeProjectionist:
         self.calls = []
         # Set to an exception instance to make the next begin() raise it.
         self.begin_error = None
-        # ...and power().
+        # ...and power(), and the settings view's two calls.
         self.power_error = None
+        # What projector_settings() answers with.
+        self.settings = [{"name": "picture", "label": "Picture mode",
+                          "value": "CN1",
+                          "choices": [{"value": "CN1", "label": "Cinema 1"}]}]
 
     def state(self):
         if self.prepare is not None:
@@ -390,6 +394,18 @@ class FakeProjectionist:
 
     def projector_status(self):
         return dict(self.projector)
+
+    def projector_settings(self):
+        self.calls.append(("settings",))
+        if self.power_error is not None:
+            raise self.power_error
+        return {"power": "on", "settings": list(self.settings)}
+
+    def change_setting(self, name, value):
+        self.calls.append(("change", name, value))
+        if self.power_error is not None:
+            raise self.power_error
+        return self.projector_settings()
 
     def notice(self):
         return self.message
@@ -461,6 +477,19 @@ class FakeProjector:
         self.calls.append("current_input")
         self._maybe_fail("current_input")
         return self.input_code
+
+    def settings(self):
+        self.calls.append("settings")
+        self._maybe_fail("settings")
+        return [{"name": "picture", "label": "Picture mode",
+                 "value": self.picture, "choices": []}]
+
+    def change(self, name, value):
+        self.calls.append("change:%s:%s" % (name, value))
+        self._maybe_fail("change")
+        self.picture = value
+
+    picture = "CN1"
 
     def close(self):
         self.closed = True

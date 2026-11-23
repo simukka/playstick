@@ -315,5 +315,85 @@ class Panasonic(unittest.TestCase):
         self.assertTrue(transport.closed)
 
 
+def frame(payload):
+    return b"\x02" + payload + b"\x03"
+
+
+class PanasonicSettings(unittest.TestCase):
+    """The settings view's half of the driver. The replies are the ones a
+    PT-AE4000 gave on 2026-11-23 -- see the panasonic.py header."""
+
+    def driver(self, chunks=()):
+        clock = Clock()
+        conn, transport = link(chunks, clock=clock)
+        projector = PanasonicSerial("/dev/null", clock=clock,
+                                    open_link=lambda: conn, sleep=clock.sleep)
+        return projector, transport, clock
+
+    LIT = [frame(b"CN1"), frame(b"HD3"), frame(b"0"), frame(b"0"),
+           frame(b"0"), frame(b"0")]
+
+    def test_every_setting_is_asked_in_table_order(self):
+        projector, transport, _ = self.driver(self.LIT)
+        settings = projector.settings()
+        self.assertEqual([s["name"] for s in settings],
+                         ["picture", "input", "blank", "freeze", "timer",
+                          "waveform"])
+        self.assertEqual(transport.sent, [b"\x02QPM\x03", b"\x02QIN\x03",
+                                          b"\x02QSH\x03", b"\x02QFZ\x03",
+                                          b"\x02QOT\x03", b"\x02QWM\x03"])
+        self.assertEqual(settings[0]["value"], "CN1")
+        self.assertEqual(settings[1]["value"], "HD3")
+        self.assertIn({"value": "CN1", "label": "Cinema 1"},
+                      settings[0]["choices"])
+
+    def test_an_echo_is_not_a_value(self):
+        """In standby the projector answers QPM with "QPM"."""
+        projector, _, _ = self.driver([frame(b"QPM"), frame(b"QIN"),
+                                       frame(b"QSH"), frame(b"QFZ"),
+                                       frame(b"QOT"), frame(b"QWM")])
+        self.assertEqual({s["value"] for s in projector.settings()}, {""})
+
+    def test_er401_is_an_unknown_value_not_an_error(self):
+        projector, _, _ = self.driver([frame(b"ER401")] + self.LIT[1:])
+        self.assertEqual(projector.settings()[0]["value"], "")
+
+    def test_silence_is_not_swallowed(self):
+        """One timeout and an error, rather than six timeouts and a list of
+        blanks that looks like a projector with nothing to say."""
+        projector, _, _ = self.driver()
+        with self.assertRaises(NoReply):
+            projector.settings()
+
+    def test_a_change_is_sent_and_confirmed(self):
+        projector, transport, _ = self.driver([frame(b"VPM:DYN"), frame(b"DYN")])
+        projector.change("picture", "dyn")
+        self.assertEqual(transport.sent, [b"\x02VPM:DYN\x03", b"\x02QPM\x03"])
+
+    def test_a_slow_change_is_asked_again(self):
+        projector, transport, clock = self.driver(
+            [frame(b"VPM:DYN"), frame(b"CN1"), frame(b"DYN")])
+        projector.change("picture", "DYN")
+        self.assertEqual(transport.sent.count(b"\x02QPM\x03"), 2)
+        self.assertEqual(clock.slept, PanasonicSerial.READBACK_INTERVAL)
+
+    def test_an_echoed_value_that_did_not_take_is_Refused(self):
+        """VPM:VIV is echoed like a good value and leaves the mode alone; the
+        driver offers no VIV, but a value it does offer can be ignored too --
+        Component 2 on an AE4000."""
+        replies = [frame(b"IIS:CP2")] + [frame(b"HD3")] * 20
+        projector, _, _ = self.driver(replies)
+        with self.assertRaises(Refused):
+            projector.change("input", "CP2")
+
+    def test_a_value_not_in_the_table_never_reaches_the_wire(self):
+        projector, transport, _ = self.driver()
+        for name, value in (("picture", "VIV"), ("timer", "9"),
+                            ("lamp", "1")):
+            with self.subTest(name=name), self.assertRaises(Refused):
+                projector.change(name, value)
+        self.assertEqual(transport.sent, [])
+
+
 if __name__ == "__main__":
     unittest.main()

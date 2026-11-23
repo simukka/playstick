@@ -166,6 +166,42 @@ class Routes(ApiTest):
                 self.assertEqual(resp.status, code)
                 self.assertTrue(self.assertJson(resp, code)["error"])
 
+    def test_settings_are_read_on_request(self):
+        body = self.assertJson(self.fetch("/api/projector/settings"))
+        self.assertEqual(body["power"], "on")
+        self.assertEqual(body["settings"][0]["name"], "picture")
+
+    def test_a_setting_change_answers_with_the_new_settings(self):
+        body = self.assertJson(self.fetch(
+            "/api/projector/setting", method="POST",
+            body={"name": "picture", "value": "CN1"}))
+        self.assertIn(("change", "picture", "CN1"), self.projectionist.calls)
+        self.assertIn("settings", body)
+
+    def test_a_setting_change_needs_two_strings(self):
+        for body in ({"name": "picture"}, {"name": "picture", "value": 1},
+                     {"value": "CN1"}):
+            with self.subTest(body=body):
+                resp = self.fetch("/api/projector/setting", method="POST",
+                                  body=body)
+                self.assertEqual(resp.status, 400)
+        self.assertFalse([c for c in self.projectionist.calls
+                          if c[0] == "change"])
+
+    def test_a_setting_refusal_is_a_sentence(self):
+        # error -> (status reading, status changing)
+        cases = ((Busy("The projector is off. Turn it on first."), 409, 409),
+                 (Refused("VPM:CN2 did not take"), 503, 409),
+                 (NoReply("no reply"), 503, 503))
+        for error, read_code, change_code in cases:
+            with self.subTest(error=error):
+                self.projectionist.power_error = error
+                resp = self.fetch("/api/projector/settings")
+                self.assertTrue(self.assertJson(resp, read_code)["error"])
+                resp = self.fetch("/api/projector/setting", method="POST",
+                                  body={"name": "picture", "value": "CN2"})
+                self.assertTrue(self.assertJson(resp, change_code)["error"])
+
     # -- the clock
 
     def test_wake_signals_the_idle_clock(self):

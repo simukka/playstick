@@ -462,6 +462,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_thumb(path[len("/api/thumb/"):])
         if path == "/api/status":
             return self._api_status()
+        if path == "/api/projector/settings":
+            return self._api_projector_settings()
         if PHONE_AUDIO:
             match = AUDIO_ROUTE_RE.match(path)
             if match:
@@ -502,6 +504,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_admin_tls_check()
         if path == "/api/projector/power":
             return self._api_projector_power()
+        if path == "/api/projector/setting":
+            return self._api_projector_setting()
         if path == "/api/clock/wake":
             return self._api_clock_wake()
         if path == "/api/pointer":
@@ -855,6 +859,38 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "I couldn't reach the projector."}, 503)
         return self._json({"message": message,
                            "projector": self.projectionist.projector_status()})
+
+    def _api_projector_settings(self):
+        """The projector settings view: every setting the driver offers, read
+        off the projector now. Not part of /api/status on purpose -- that is
+        polled by every phone every few seconds, and this is a handful of
+        serial exchanges wanted only while the view is open."""
+        try:
+            return self._json(self.projectionist.projector_settings())
+        except Busy as exc:
+            return self._json({"error": str(exc)}, 409)
+        except ProjectorError as exc:
+            log("projector settings from the page: %s", exc)
+            return self._json({"error": "I couldn't reach the projector."}, 503)
+
+    def _api_projector_setting(self):
+        body = self._body()
+        name, value = body.get("name"), body.get("value")
+        if not isinstance(name, str) or not isinstance(value, str):
+            return self._json({"error": "name and value must be strings"}, 400)
+        try:
+            answer = self.projectionist.change_setting(name, value)
+        except Busy as exc:
+            return self._json({"error": str(exc)}, 409)
+        except Refused as exc:
+            # A value it echoed and then ignored, or one this model lacks --
+            # Component 2 on an AE4000. The detail is for the journal.
+            log("projector setting from the page: %s", exc)
+            return self._json({"error": "The projector didn't take that."}, 409)
+        except ProjectorError as exc:
+            log("projector setting from the page: %s", exc)
+            return self._json({"error": "I couldn't reach the projector."}, 503)
+        return self._json(answer)
 
     def _api_clock_wake(self):
         """Bring the idle clock back after it has blanked. It is drawn under

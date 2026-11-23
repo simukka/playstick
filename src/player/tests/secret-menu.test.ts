@@ -96,6 +96,7 @@ function menu(status: Partial<Status>) {
     },
     openPointer: () => calls.push("pointer"),
     openCalibrate: () => calls.push("calibrate"),
+    openProjector: () => calls.push("projector"),
   });
   sheet.onStatus({
     state: "idle",
@@ -103,11 +104,21 @@ function menu(status: Partial<Status>) {
     ...status,
   } as Status);
   sheet.opened();
-  const rows = () => (doc.getElementById("secretList") as FakeEl).children;
+  // The power row shares a line with the gear; every other row is a child of
+  // the list. Rows are the rows either way, so the tests read one flat list.
+  const line = () =>
+    (doc.getElementById("secretList") as FakeEl).children.find((c) =>
+      c.classList.contains("projLine"),
+    );
+  const rows = () =>
+    (doc.getElementById("secretList") as FakeEl).children.flatMap((c) =>
+      c.classList.contains("projLine") ? [c.children[0]!] : [c],
+    );
+  const gear = () => line()?.children[1];
   const labels = () => rows().map((r) => r.children[0]!.textContent);
   const subs = () => rows().map((r) => r.children[0]!.children[0]?.textContent ?? "");
   const note = () => (doc.getElementById("secretNote") as FakeEl).textContent;
-  return { sheet, calls, rows, labels, subs, note };
+  return { sheet, calls, rows, labels, subs, note, gear };
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -143,6 +154,20 @@ describe("SecretSheet", () => {
   it("leaves the projector out when there is none", () => {
     const m = menu({ projector: { model: "none", power: "unknown", fault: "" } });
     expect(m.labels()).toEqual(["Show clock", "Pointer", "Calibrate phone"]);
+    expect(m.gear()).toBeUndefined();
+  });
+
+  it("puts a gear beside the power row that opens the projector's settings", () => {
+    const m = menu({});
+    const gear = m.gear()!;
+    expect(gear.getAttribute("aria-label")).toBe("Projector settings");
+    gear.click();
+    expect(m.calls).toEqual(["projector"]);
+  });
+
+  it("offers the gear in standby too: the settings view says to switch on", () => {
+    const m = menu({ projector: { model: "pt-ae4000", power: "standby", fault: "" } });
+    expect(m.gear()).toBeDefined();
   });
 
   it("will not switch off under a film, and says why", () => {

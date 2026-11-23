@@ -134,7 +134,8 @@ describe("the page boots", () => {
       .map((e) => e.id);
     expect(order).toEqual([
       "banner", "audioBtn", "filterBtn", "subsBtn", "tapToListen", "sheetScrim",
-      "sheet", "subsSheet", "fsheet", "esheet", "secretSheet", "pointerSheet",
+      "sheet", "subsSheet", "fsheet", "esheet", "secretSheet", "projectorSheet",
+      "pointerSheet",
       "drawSheet", "calibrateSheet", "library", "preparing", "playing", "gamepad",
     ]);
   });

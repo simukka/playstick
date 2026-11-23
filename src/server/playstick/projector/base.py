@@ -1,9 +1,15 @@
-"""What the daemon needs from a projector, and deliberately nothing else.
+"""What the daemon needs from a projector, and the settings a grown-up may change.
 
-Five verbs and one question. Everything a projector can do that this appliance
-does not need -- lens memories, gamma curves, colour management, the whole menu
-tree -- is absent, because a driver for the next projector should be a short
-file rather than a translation of somebody else's manual.
+Five verbs and one question, which is what starting a film needs. Beside them,
+two optional methods -- settings() and change() -- for the projector settings
+view behind the logo's menu. They are not part of what the daemon relies on:
+the base class answers "no settings", so a driver for the next projector can
+still be a short file and add its settings later, or never.
+
+Settings are DATA, not methods. A driver describes each one -- a name, the
+words to show, and the values it takes -- and the view draws whatever list it
+gets. Adding a projector's colour mode is then a row in that driver's table
+rather than a route, a client method and a widget.
 
 THE ERROR TYPES ARE THE INTERESTING PART
 
@@ -81,3 +87,24 @@ class Projector:
     def close(self):
         """Release the port. A no-op by default: a driver with nothing to
         release should not have to say so."""
+
+    # -- the optional settings, for the settings view
+
+    def settings(self):
+        """Every setting this driver offers, each with its current value:
+
+            {"name": "picture", "label": "Picture mode", "value": "CN1",
+             "choices": [{"value": "NOR", "label": "Normal"}, ...]}
+
+        "value" is "" when the projector would not say. Empty by default: not
+        offering settings is a complete answer, unlike the power verbs above,
+        which a driver has to implement to be a driver at all.
+        """
+        return []
+
+    def change(self, name, value):
+        """Set one setting, and return only once the projector confirms it.
+
+        Raises Refused for a name or value the driver does not offer, and for
+        a value the projector did not take."""
+        raise Refused("this projector has no setting %r" % (name,))

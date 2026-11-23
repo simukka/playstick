@@ -83,6 +83,19 @@ export class ApiClient {
     return this.post("/api/projector/power", { on });
   }
 
+  /** The projector settings view: what the projector says, asked now. Shaped
+   * like a POST's result because a refusal (no projector, not answering)
+   * comes back as 4xx/5xx with a sentence, exactly as a control does. */
+  async projectorSettings(): Promise<PostResult> {
+    const r = await this.fetchFn("/api/projector/settings");
+    return { ok: r.ok, data: (await r.json()) as PostResult["data"] };
+  }
+
+  /** Change one projector setting. Answers with the settings re-read. */
+  projectorSetting(name: string, value: string): Promise<PostResult> {
+    return this.post("/api/projector/setting", { name, value });
+  }
+
   /** Bring the projector's idle clock back after it has blanked. */
   wakeClock(): Promise<PostResult> {
     return this.post("/api/clock/wake");

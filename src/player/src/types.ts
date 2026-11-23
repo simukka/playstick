@@ -56,6 +56,22 @@ export interface Projector {
   fault: string;
 }
 
+/** One row group in the projector settings view, as the driver describes it.
+ * `value` is "" when the projector would not say. */
+export interface ProjectorSetting {
+  name: string;
+  label: string;
+  value: string;
+  choices: { value: string; label: string }[];
+}
+
+/** GET /api/projector/settings. `settings` is empty unless the lamp is lit:
+ * in standby the projector answers nothing but power-on. */
+export interface ProjectorSettings {
+  power: string;
+  settings: ProjectorSetting[];
+}
+
 /** The machine the films live on. Shaped like Projector deliberately: the page
  * should not need a second vocabulary for a second device. */
 export interface Nas {

@@ -319,6 +319,40 @@ class Projectionist:
         log("projector switched off from the page")
         return "Switching off."
 
+    # -- the settings view
+
+    def projector_settings(self):
+        """{"power": ..., "settings": [...]} for the settings view.
+
+        The settings are asked of the projector there and then, not cached by
+        the keeper: they are only wanted while somebody has the view open, and
+        six more exchanges per tick would be six more chances to collide with
+        a film starting. In standby the list is empty -- the projector answers
+        nothing but PON, so there are no values to show -- and the view says
+        to switch it on.
+
+        Raises Busy with no projector, and lets a ProjectorError through for
+        one that is not answering, as power() does.
+        """
+        if self._projector.model == "none":
+            raise Busy("No projector is set up on this stick.")
+        power = self._observe_power()
+        if power != ON:
+            return {"power": power, "settings": []}
+        return {"power": power, "settings": self._projector.settings()}
+
+    def change_setting(self, name, value):
+        """Change one setting, then answer as projector_settings() does, so the
+        view can redraw from what the projector now says rather than from
+        what was asked for."""
+        if self._projector.model == "none":
+            raise Busy("No projector is set up on this stick.")
+        if self._observe_power() != ON:
+            raise Busy("The projector is off. Turn it on first.")
+        self._projector.change(name, value)
+        log("projector %s set to %s from the page", name, value)
+        return self.projector_settings()
+
     # -- the sequence
 
     def _prepare(self, prep):

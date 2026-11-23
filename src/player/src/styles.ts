@@ -18,6 +18,7 @@ import { SUBS_CSS } from "./subs-sheet";
 import { FILTER_CSS } from "./filter-sheet";
 import { EPISODE_CSS } from "./episode-sheet";
 import { SECRET_CSS } from "./secret-menu";
+import { PROJECTOR_CSS } from "./projector-sheet";
 import { POINTER_CSS } from "./pointer";
 import { DRAW_CSS } from "./draw";
 import { GAMEPAD_CSS } from "./gamepad";
@@ -78,6 +79,7 @@ export const CSS = [
   FILTER_CSS,
   EPISODE_CSS,
   SECRET_CSS,
+  PROJECTOR_CSS,
   POINTER_CSS,
   DRAW_CSS,
   GAMEPAD_CSS,

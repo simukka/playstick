@@ -23,6 +23,7 @@ import { FilterSheet } from "./filter-sheet";
 import { EpisodeSheet } from "./episode-sheet";
 import { SheetManager } from "./sheet";
 import { SecretSheet, holdToOpen } from "./secret-menu";
+import { ProjectorSheet } from "./projector-sheet";
 import { PointerSender, PointerSheet, type Orientation } from "./pointer";
 import { DrawSender, DrawSheet } from "./draw";
 import {
@@ -157,6 +158,12 @@ function boot(): void {
     wakeClock: () => api.wakeClock(),
     openPointer: () => sheets.showPointer(true),
     openCalibrate: () => sheets.showCalibrate(true),
+    openProjector: () => sheets.showProjector(true),
+  });
+  const projectorSheet = new ProjectorSheet(doc, {
+    load: () => api.projectorSettings(),
+    change: (name, value) => api.projectorSetting(name, value),
+    back: () => sheets.showSecret(true),
   });
   const pointerSender = new PointerSender({
     post: (sample) => api.pointer(sample),
@@ -352,6 +359,7 @@ function boot(): void {
     filter: filterSheet.root,
     episodes: episodeSheet.root,
     secret: secretSheet.root,
+    projector: projectorSheet.root,
     pointer: pointerSheet.root,
     draw: drawing.root,
     calibrate: calibrateSheet.root,
@@ -360,6 +368,7 @@ function boot(): void {
     onFilterOpen: () => filterSheet.paint(),
     onEpisodesOpen: () => episodeSheet.paint(),
     onSecretOpen: () => secretSheet.opened(),
+    onProjectorOpen: () => projectorSheet.opened(),
     onPointerOpen: () => pointerSheet.paint(),
     onPointerClose: () => pointerSheet.closed(),
     onDrawOpen: () => drawing.opened(),
@@ -464,6 +473,7 @@ function boot(): void {
     filterSheet.root,
     episodeSheet.root,
     secretSheet.root,
+    projectorSheet.root,
     pointerSheet.root,
     drawing.root,
     calibrateSheet.root,

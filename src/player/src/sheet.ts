@@ -144,6 +144,8 @@ export interface SheetManagerDeps {
   episodes: HTMLElement;
   /** The menu in the logo, and the pointer it opens -- see secret-menu.ts. */
   secret: HTMLElement;
+  /** The projector's own settings, behind the gear in the logo's menu. */
+  projector: HTMLElement;
   pointer: HTMLElement;
   /** The drawing sheet the now-playing view's Draw button opens -- see
    * draw.ts. */
@@ -155,6 +157,7 @@ export interface SheetManagerDeps {
   onFilterOpen: () => void;
   onEpisodesOpen: () => void;
   onSecretOpen: () => void;
+  onProjectorOpen: () => void;
   onPointerOpen: () => void;
   onDrawOpen: () => void;
   /** Told when the drawing sheet goes away, so the phone stops counting as a
@@ -175,6 +178,7 @@ type SheetName =
   | "filter"
   | "episodes"
   | "secret"
+  | "projector"
   | "pointer"
   | "draw"
   | "calibrate";
@@ -201,6 +205,7 @@ export class SheetManager {
       filter: deps.filter,
       episodes: deps.episodes,
       secret: deps.secret,
+      projector: deps.projector,
       pointer: deps.pointer,
       draw: deps.draw,
       calibrate: deps.calibrate,
@@ -214,6 +219,7 @@ export class SheetManager {
       filter: deps.onFilterOpen,
       episodes: deps.onEpisodesOpen,
       secret: deps.onSecretOpen,
+      projector: deps.onProjectorOpen,
       pointer: deps.onPointerOpen,
       draw: deps.onDrawOpen,
       calibrate: deps.onCalibrateOpen,
@@ -262,6 +268,9 @@ export class SheetManager {
   }
   get secretOpen(): boolean {
     return this.isOpen("secret");
+  }
+  get projectorOpen(): boolean {
+    return this.isOpen("projector");
   }
   get pointerOpen(): boolean {
     return this.isOpen("pointer");
@@ -313,6 +322,9 @@ export class SheetManager {
   }
   showSecret(on: boolean): void {
     this.show("secret", on);
+  }
+  showProjector(on: boolean): void {
+    this.show("projector", on);
   }
   showPointer(on: boolean): void {
     this.show("pointer", on);

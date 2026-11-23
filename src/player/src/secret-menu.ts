@@ -1,5 +1,5 @@
-// The menu hidden in the Playstick wordmark: the projector, the clock, the
-// pointer, and the calibration wizard for the pointer and the gamepad. For grown-ups, so it is not where a child's thumb lands by accident.
+// The menu hidden in the Playstick wordmark: the projector (and, behind the gear
+// beside it, the projector's own settings), the clock, the pointer, and the calibration wizard for the pointer and the gamepad. For grown-ups, so it is not where a child's thumb lands by accident.
 //
 // HOW IT OPENS. A long press on a touch screen, because a tap is what a child
 // does to everything; a plain click with a mouse, because nobody long-presses a
@@ -19,11 +19,30 @@ export const SECRET_CSS = `
 #playing .brand svg { display: block; height: 20px; width: auto; }
 .row.act::after { display: none; }
 .row.off { opacity: .55; }
+/* The power row and the gear that opens the projector's settings share a
+   line: the power row stands alone, rounded, and the gear is a square beside
+   it. Two buttons rather than one inside the other, which HTML forbids. */
+.projLine { display: flex; gap: 10px; margin-bottom: 10px; }
+.projLine .row { flex: 1; min-width: 0; border-radius: 14px; }
+.projLine .gear {
+  flex: none; width: 60px; min-height: 60px; border-radius: 14px;
+  background: var(--card); color: var(--ink);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.projLine .gear:active { background: var(--card2); }
+.projLine .gear svg { width: 26px; height: 26px; display: block; }
 #secretNote {
   color: var(--dim); font-size: 16px; line-height: 1.45; padding: 10px 14px 2px;
   min-height: 1.45em;
 }
 `;
+
+const GEAR_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" ' +
+  'stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/>' +
+  '<circle cx="12" cy="12" r="6.5"/>' +
+  '<path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1' +
+  'M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg>';
 
 /** How long a finger has to stay on the logo. */
 export const HOLD_MS = 700;
@@ -102,6 +121,8 @@ export interface SecretSheetDeps {
   wakeClock: () => Promise<PostResult>;
   openPointer: () => void;
   openCalibrate: () => void;
+  /** The projector's own settings: picture mode, input, and the rest. */
+  openProjector: () => void;
 }
 
 export class SecretSheet {
@@ -153,11 +174,20 @@ export class SecretSheet {
           : this.projector.power === "unknown"
             ? "It isn't saying whether it's on"
             : "";
-      this.list.appendChild(
-        this.action(lit ? "Turn projector off" : "Turn projector on", sub, blocked, () =>
-          this.run(this.deps.power(!lit)),
-        ),
+      const power = this.action(
+        lit ? "Turn projector off" : "Turn projector on",
+        sub,
+        blocked,
+        () => this.run(this.deps.power(!lit)),
       );
+      const gear = h(this.doc, "button", {
+        class: "gear",
+        type: "button",
+        aria: "Projector settings",
+        html: GEAR_ICON,
+        onTap: () => this.deps.openProjector(),
+      });
+      this.list.appendChild(h(this.doc, "div", { class: "projLine" }, [power, gear]));
     }
 
     const busy = film || this.state === "airplay";

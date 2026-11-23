@@ -14,7 +14,7 @@ directly through the Intel integrated graphics stack **without an X server or de
 * **Fully provisioned by Ansible over SSH.** The device holds no state you can't rebuild; every tunable lives in `group_vars`, and the control node ships as a Docker image.
 * **AirPlay mirroring receiver** built on [`UxPlay`](https://github.com/simukka/UxPlay) mirror any Apple device straight to the projector.
 * **Child-friendly web movie library.** Plays films off a read-only CIFS NAS automount from a browser UI simple enough for a kid.
-* **It controls the projector itself.** RS-232 switches the projector on and off, and an idle framebuffer clock shows when nothing is playing.
+* **It controls the projector itself.** RS-232 switches the projector on and off, and an idle framebuffer clock shows when nothing is playing. A gear beside the power switch in the logo's menu sets the picture mode, input, blank, freeze, off timer and waveform monitor.
 
 ## Everyone can hear their own language
 

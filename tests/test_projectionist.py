@@ -559,6 +559,50 @@ class ByHand(Base):
             projectionist.power(True)
 
 
+class SettingsView(Base):
+    """The settings behind the gear: read live, and only with the lamp lit."""
+
+    def test_lit_lists_the_drivers_settings(self):
+        self.projector.power = "on"
+        answer = self.build().projector_settings()
+        self.assertEqual(answer["power"], "on")
+        self.assertEqual(answer["settings"][0]["value"], "CN1")
+
+    def test_in_standby_the_list_is_empty_and_nothing_is_asked(self):
+        """The projector echoes every inquiry in standby; asking would only
+        produce six blanks and six exchanges."""
+        answer = self.build().projector_settings()
+        self.assertEqual(answer, {"power": "standby", "settings": []})
+        self.assertNotIn("settings", self.projector.calls)
+
+    def test_a_change_answers_with_what_the_projector_now_says(self):
+        self.projector.power = "on"
+        answer = self.build().change_setting("picture", "DYN")
+        self.assertIn("change:picture:DYN", self.projector.calls)
+        self.assertEqual(answer["settings"][0]["value"], "DYN")
+
+    def test_a_change_in_standby_is_busy_and_never_sent(self):
+        with self.assertRaises(Busy):
+            self.build().change_setting("picture", "DYN")
+        self.assertFalse([c for c in self.projector.calls
+                          if c.startswith("change")])
+
+    def test_a_refused_value_reaches_the_caller(self):
+        self.projector.power = "on"
+        self.projector.fail["change"] = Refused("did not take")
+        with self.assertRaises(Refused):
+            self.build().change_setting("picture", "VIV")
+
+    def test_no_projector_is_busy(self):
+        from playstick.projector import NullProjector
+        projectionist = Projectionist(NullProjector(), self.player,
+                                      clock=self.clock, sleep=self.clock.sleep)
+        for call in (projectionist.projector_settings,
+                     lambda: projectionist.change_setting("picture", "NOR")):
+            with self.subTest(call=call), self.assertRaises(Busy):
+                call()
+
+
 class ScriptedNas:
     """NasWatcher's surface as the projectionist uses it, scripted.
 

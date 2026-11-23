@@ -1,3 +1,9 @@
+playstick (1.2.0) unstable; urgency=medium
+
+  * Adds the projector's settings behind a gear beside the power switch: picture mode, input, blank, freeze, off timer and waveform monitor, each confirmed by reading it back.
+
+ -- simukka <kylesimukka@gmail.com>  Mon, 23 Nov 2026 19:58:40 +0100
+
 playstick (1.1.7) unstable; urgency=medium
 
   * Adds drawing on the film: a Draw button under STOP, steered like the pointer, one canvas shared by every phone.
