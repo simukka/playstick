@@ -1,3 +1,9 @@
+playstick (1.1.7) unstable; urgency=medium
+
+  * Adds drawing on the film: a Draw button under STOP, steered like the pointer, one canvas shared by every phone.
+
+ -- simukka <kylesimukka@gmail.com>  Mon, 23 Nov 2026 17:00:31 +0100
+
 playstick (1.1.6) unstable; urgency=medium
 
   * Adds a calibration wizard that fits a profile to each phone, shown on the projector.

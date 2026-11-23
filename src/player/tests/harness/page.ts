@@ -52,6 +52,7 @@ export function makeShell(doc: FakeDocument = makePage(), plays: string[] = []):
     episodes: h(d, "div", { id: "esheet", class: "sheet" }),
     secret: h(d, "div", { id: "secretSheet", class: "sheet" }),
     pointer: h(d, "div", { id: "pointerSheet", class: "sheet" }),
+    draw: h(d, "div", { id: "drawSheet", class: "sheet" }),
     calibrate: h(d, "div", { id: "calibrateSheet", class: "sheet" }),
     onSoundOpen: () => soundPaints++,
     onSubsOpen: () => subsPaints++,
@@ -59,6 +60,7 @@ export function makeShell(doc: FakeDocument = makePage(), plays: string[] = []):
     onEpisodesOpen: () => {},
     onSecretOpen: () => {},
     onPointerOpen: () => {},
+    onDrawOpen: () => {},
     onCalibrateOpen: () => {},
   });
   const library = new LibraryView(

@@ -131,3 +131,58 @@ export function saveProfileJson(storage: StorageLike | null, profile: unknown): 
     // Not remembered this time; the stick still has it.
   }
 }
+
+export type DrawTool = "brush" | "pencil" | "eraser";
+export type DrawSize = "s" | "m" | "l";
+export const DRAW_COLORS = [
+  "red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "white", "black",
+] as const;
+export type DrawColor = (typeof DRAW_COLORS)[number];
+
+export interface DrawPrefs {
+  tool: DrawTool;
+  color: DrawColor;
+  /** Each tool keeps its own size: a fine pencil and a fat brush. */
+  sizes: Record<DrawTool, DrawSize>;
+}
+
+export const DRAW_DEFAULTS: DrawPrefs = {
+  tool: "brush",
+  color: "red",
+  sizes: { brush: "m", pencil: "m", eraser: "m" },
+};
+
+const DRAW_KEY = "playstick.draw";
+
+export function loadDrawPrefs(storage: StorageLike | null): DrawPrefs {
+  let raw: unknown = null;
+  try {
+    raw = JSON.parse(storage?.getItem(DRAW_KEY) || "null");
+  } catch {
+    raw = null;
+  }
+  const got = (raw && typeof raw === "object" ? raw : {}) as Partial<DrawPrefs>;
+  const size = (v: unknown, d: DrawSize): DrawSize => (v === "s" || v === "m" || v === "l" ? v : d);
+  const sizes = (got.sizes && typeof got.sizes === "object" ? got.sizes : {}) as Partial<
+    Record<DrawTool, unknown>
+  >;
+  return {
+    tool: got.tool === "pencil" || got.tool === "eraser" ? got.tool : "brush",
+    color: (DRAW_COLORS as readonly string[]).includes(got.color as string)
+      ? (got.color as DrawColor)
+      : DRAW_DEFAULTS.color,
+    sizes: {
+      brush: size(sizes.brush, "m"),
+      pencil: size(sizes.pencil, "m"),
+      eraser: size(sizes.eraser, "m"),
+    },
+  };
+}
+
+export function saveDrawPrefs(storage: StorageLike | null, prefs: DrawPrefs): void {
+  try {
+    storage?.setItem(DRAW_KEY, JSON.stringify(prefs));
+  } catch {
+    // Not remembered this time.
+  }
+}

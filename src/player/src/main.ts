@@ -24,6 +24,7 @@ import { EpisodeSheet } from "./episode-sheet";
 import { SheetManager } from "./sheet";
 import { SecretSheet, holdToOpen } from "./secret-menu";
 import { PointerSender, PointerSheet, type Orientation } from "./pointer";
+import { DrawSender, DrawSheet } from "./draw";
 import {
   browserStorage,
   loadPhoneId,
@@ -313,6 +314,38 @@ function boot(): void {
   applyProfile(profile);
   refreshProfile();
 
+  // --- drawing on the film, from the now-playing view's Draw button --------
+  // It moves a cursor the way the pointer moves its dot, so it takes the
+  // pointer's tilt plumbing and this phone's pointer calibration. The sender
+  // is told about replies through the sheet, and the sheet sends through the
+  // sender, so one of them has to be declared first.
+  let drawSheet: DrawSheet | null = null;
+  const drawSender = new DrawSender({
+    post: (body) => api.draw(body),
+    now: () => performance.now(),
+    schedule: (fn, ms) => window.setTimeout(fn, ms),
+    phone: () => phoneId,
+    cursor: () => drawSheet?.cursorNow ?? null,
+    onReply: (r) => drawSheet?.onReply(r),
+  });
+  const drawing = new DrawSheet(doc, {
+    sender: drawSender,
+    storage,
+    tiltAvailable,
+    requestTilt,
+    listenTilt: (fn: (o: Orientation) => void) => {
+      const onTurn = (ev: DeviceOrientationEvent): void => {
+        if (ev.alpha !== null && ev.beta !== null) {
+          fn({ alpha: ev.alpha, beta: ev.beta });
+        }
+      };
+      window.addEventListener("deviceorientation", onTurn);
+      return () => window.removeEventListener("deviceorientation", onTurn);
+    },
+    calibration: () => profile?.pointer ?? null,
+  });
+  drawSheet = drawing;
+
   const sheets = new SheetManager(doc, {
     sound: soundSheet.root,
     subs: subsSheet.root,
@@ -320,6 +353,7 @@ function boot(): void {
     episodes: episodeSheet.root,
     secret: secretSheet.root,
     pointer: pointerSheet.root,
+    draw: drawing.root,
     calibrate: calibrateSheet.root,
     onSoundOpen: () => soundSheet.paint(),
     onSubsOpen: () => subsSheet.paint(),
@@ -328,6 +362,8 @@ function boot(): void {
     onSecretOpen: () => secretSheet.opened(),
     onPointerOpen: () => pointerSheet.paint(),
     onPointerClose: () => pointerSheet.closed(),
+    onDrawOpen: () => drawing.opened(),
+    onDrawClose: () => drawing.closed(),
     onCalibrateOpen: () => calibrateSheet.opened(),
     onCalibrateClose: () => calibrateSheet.closed(),
   });
@@ -389,6 +425,7 @@ function boot(): void {
     schedule: (fn: () => void, ms: number) => window.setTimeout(fn, ms),
     cancel: (id: number) => window.clearTimeout(id),
   };
+  presenter.playing.draw.addEventListener("click", () => sheets.showDraw(true));
   for (const brand of [libraryView.brand, presenter.playing.brand]) {
     holdToOpen(brand, () => sheets.showSecret(true), hold);
   }
@@ -428,6 +465,7 @@ function boot(): void {
     episodeSheet.root,
     secretSheet.root,
     pointerSheet.root,
+    drawing.root,
     calibrateSheet.root,
     libraryView.root,
     presenter.preparing.root,
@@ -484,6 +522,11 @@ function boot(): void {
     pointerSheet.onStatus(s);
     if (sheets.pointerOpen && pointerSheet.playingNow !== wasPlaying) {
       pointerSheet.paint();
+    }
+    const wasDrawing = drawing.playingNow;
+    drawing.onStatus(s);
+    if (sheets.drawOpen && drawing.playingNow !== wasDrawing) {
+      drawing.paint();
     }
     const onGrid =
       s.state !== "playing" &&

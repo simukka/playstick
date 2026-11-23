@@ -8,6 +8,7 @@ import { timeLeft, barWidth, clockTime, jumpLabel } from "./format";
 import { TAIL } from "./seek";
 import type { Status } from "./types";
 import { WORDMARK } from "./brand";
+import { DRAW_ICON } from "./draw";
 
 export type ViewName = "library" | "preparing" | "playing" | "gamepad";
 
@@ -345,6 +346,8 @@ export class PlayingView {
   // The six the controls wire. They live here because they are drawn here.
   readonly toggle: HTMLElement;
   readonly stop: HTMLElement;
+  /** Opens the drawing sheet; wired by main.ts, which owns the sheets. */
+  readonly draw: HTMLElement;
   readonly volDown: HTMLElement;
   readonly volUp: HTMLElement;
   readonly skipBack: HTMLElement;
@@ -393,6 +396,12 @@ export class PlayingView {
       html: skipIcon(false),
     });
     this.stop = h(doc, "button", { id: "stop", text: "STOP" });
+    this.draw = h(doc, "button", {
+      id: "drawBtn",
+      type: "button",
+      aria: "Draw on the film",
+      html: DRAW_ICON + "<span>Draw</span>",
+    });
     this.volDown = h(doc, "button", { id: "volDown", aria: "Quieter", text: "\u2212" });
     this.volUp = h(doc, "button", { id: "volUp", aria: "Louder", text: "+" });
     this.volume = h(doc, "div", { id: "volume" }, [this.volDown, this.volUp]);
@@ -404,6 +413,7 @@ export class PlayingView {
       this.hint,
       h(doc, "div", { id: "transport" }, [this.skipBack, this.toggle, this.skipFwd]),
       this.stop,
+      this.draw,
       this.volume,
     ]);
   }

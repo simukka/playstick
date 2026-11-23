@@ -145,6 +145,9 @@ export interface SheetManagerDeps {
   /** The menu in the logo, and the pointer it opens -- see secret-menu.ts. */
   secret: HTMLElement;
   pointer: HTMLElement;
+  /** The drawing sheet the now-playing view's Draw button opens -- see
+   * draw.ts. */
+  draw: HTMLElement;
   /** The calibration wizard the menu opens -- see calibrate.ts. */
   calibrate: HTMLElement;
   onSoundOpen: () => void;
@@ -153,6 +156,10 @@ export interface SheetManagerDeps {
   onEpisodesOpen: () => void;
   onSecretOpen: () => void;
   onPointerOpen: () => void;
+  onDrawOpen: () => void;
+  /** Told when the drawing sheet goes away, so the phone stops counting as a
+   * painter. */
+  onDrawClose?: () => void;
   onCalibrateOpen: () => void;
   /** Told when the calibration sheet goes away: the black screen on the
    * projector goes with it. */
@@ -162,7 +169,15 @@ export interface SheetManagerDeps {
   onPointerClose?: () => void;
 }
 
-type SheetName = "sound" | "subs" | "filter" | "episodes" | "secret" | "pointer" | "calibrate";
+type SheetName =
+  | "sound"
+  | "subs"
+  | "filter"
+  | "episodes"
+  | "secret"
+  | "pointer"
+  | "draw"
+  | "calibrate";
 
 export class SheetManager {
   /** The chrome, mounted by the composition root. */
@@ -177,6 +192,7 @@ export class SheetManager {
   private readonly opened: Record<SheetName, () => void>;
   private readonly onPointerClose?: () => void;
   private readonly onCalibrateClose?: () => void;
+  private readonly onDrawClose?: () => void;
 
   constructor(doc: Document, deps: SheetManagerDeps) {
     this.roots = {
@@ -186,10 +202,12 @@ export class SheetManager {
       episodes: deps.episodes,
       secret: deps.secret,
       pointer: deps.pointer,
+      draw: deps.draw,
       calibrate: deps.calibrate,
     };
     this.onPointerClose = deps.onPointerClose;
     this.onCalibrateClose = deps.onCalibrateClose;
+    this.onDrawClose = deps.onDrawClose;
     this.opened = {
       sound: deps.onSoundOpen,
       subs: deps.onSubsOpen,
@@ -197,6 +215,7 @@ export class SheetManager {
       episodes: deps.onEpisodesOpen,
       secret: deps.onSecretOpen,
       pointer: deps.onPointerOpen,
+      draw: deps.onDrawOpen,
       calibrate: deps.onCalibrateOpen,
     };
 
@@ -247,12 +266,16 @@ export class SheetManager {
   get pointerOpen(): boolean {
     return this.isOpen("pointer");
   }
+  get drawOpen(): boolean {
+    return this.isOpen("draw");
+  }
   get calibrateOpen(): boolean {
     return this.isOpen("calibrate");
   }
 
   show(name: SheetName, on: boolean): void {
     const pointerWasOpen = this.isOpen("pointer");
+    const drawWasOpen = this.isOpen("draw");
     const calibrateWasOpen = this.isOpen("calibrate");
     for (const key of Object.keys(this.roots) as SheetName[]) {
       toggleClass(this.roots[key], "on", on && key === name);
@@ -267,6 +290,9 @@ export class SheetManager {
     }
     if (calibrateWasOpen && !this.isOpen("calibrate")) {
       this.onCalibrateClose?.();
+    }
+    if (drawWasOpen && !this.isOpen("draw")) {
+      this.onDrawClose?.();
     }
     if (on) {
       this.opened[name]();
@@ -291,12 +317,16 @@ export class SheetManager {
   showPointer(on: boolean): void {
     this.show("pointer", on);
   }
+  showDraw(on: boolean): void {
+    this.show("draw", on);
+  }
   showCalibrate(on: boolean): void {
     this.show("calibrate", on);
   }
 
   closeAll(): void {
     const pointerWasOpen = this.isOpen("pointer");
+    const drawWasOpen = this.isOpen("draw");
     const calibrateWasOpen = this.isOpen("calibrate");
     for (const key of Object.keys(this.roots) as SheetName[]) {
       toggleClass(this.roots[key], "on", false);
@@ -307,6 +337,9 @@ export class SheetManager {
     }
     if (calibrateWasOpen) {
       this.onCalibrateClose?.();
+    }
+    if (drawWasOpen) {
+      this.onDrawClose?.();
     }
   }
 }

@@ -61,6 +61,7 @@ from .library import KINDS, Library, resolve_inside
 from .thumbs import placeholder_svg
 from .player import Busy
 from .projector import ProjectorError, Refused
+from . import draw as draw_mod
 from . import pointer as pointer_mod
 from . import profiles as profiles_mod
 from .projector import probe as projector_probe
@@ -124,6 +125,27 @@ def pointer_allowed():
         if _pointer_window[1] >= POINTER_MAX_RATE:
             return False
         _pointer_window[1] += 1
+        return True
+
+
+_draw_lock = threading.Lock()
+_draw_window = [0.0, 0]
+
+# Drawing requests per second, for everybody together. A painting phone sends
+# twenty-five and checks in twice more; this is four of them with room over.
+DRAW_MAX_RATE = 120
+
+
+def draw_allowed():
+    """The pointer's budget, with its own counter."""
+    now = time.monotonic()
+    with _draw_lock:
+        if now - _draw_window[0] >= 1.0:
+            _draw_window[0] = now
+            _draw_window[1] = 0
+        if _draw_window[1] >= DRAW_MAX_RATE:
+            return False
+        _draw_window[1] += 1
         return True
 
 
@@ -286,6 +308,8 @@ class Handler(BaseHTTPRequestHandler):
     # The dot over the film. None in a daemon built without it -- the tests'
     # handler, say -- and the route then answers that nothing is drawn.
     pointer = None
+    # The shared drawing over the film (draw.py). None likewise.
+    drawing = None
     # The game runner, or None on a daemon built without games. Its status is
     # in /api/status and its phones are on /api/game/socket.
     game = None
@@ -482,6 +506,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._api_clock_wake()
         if path == "/api/pointer":
             return self._api_pointer()
+        if path == "/api/draw":
+            return self._api_draw()
         if path == "/api/calibrate/start":
             return self._api_calibrate_start()
         if path.startswith("/api/profile/"):
@@ -866,6 +892,68 @@ class Handler(BaseHTTPRequestHandler):
         shown = self.pointer.update(x, y, bool(body.get("on", True)),
                                     size=size, color=color)
         return self._json({"shown": shown})
+
+    def _api_draw(self):
+        """The shared drawing (draw.py). {"phone": id, "op": ...} where op is
+
+          "stroke": {"id": n, "tool", "color", "size", "points": [x, y, ...],
+                     "end": bool} -- ink, the pen down
+          "move":   {"x", "y", "tool", "color", "size"} -- the cursor, pen up
+          "sync", "clear", "leave"
+
+        and every reply says whether a film is up, how many are drawing, and
+        whether the drawing is full."""
+        body = self._body()
+        phone = body.get("phone")
+        if not isinstance(phone, str) or not profiles_mod.ID_RE.match(phone):
+            return self._json({"error": "which phone?"}, 400)
+        op = body.get("op", "stroke")
+        if op not in ("stroke", "move", "sync", "clear", "leave"):
+            return self._json({"error": "unknown op"}, 400)
+        args = None
+        if op in ("stroke", "move"):
+            tool = body.get("tool")
+            color, size = body.get("color", "red"), body.get("size", "m")
+            if (tool not in draw_mod.TOOLS or color not in draw_mod.COLORS
+                    or size not in draw_mod.SIZES[tool]):
+                return self._json({"error": "unknown tool, colour or size"},
+                                  400)
+            flat = (body.get("points", []) if op == "stroke"
+                    else [body.get("x"), body.get("y")])
+            if (not isinstance(flat, list) or len(flat) % 2
+                    or len(flat) > 2 * draw_mod.MAX_BATCH):
+                return self._json({"error": "points are x, y pairs"}, 400)
+            # A bool is an int to float(), and json.loads takes NaN; neither
+            # is a place on a screen.
+            if any(isinstance(v, bool) or not isinstance(v, (int, float))
+                   for v in flat):
+                return self._json({"error": "points are x, y pairs"}, 400)
+            nums = [float(v) for v in flat]
+            if not all(math.isfinite(v) for v in nums):
+                return self._json({"error": "points are x, y pairs"}, 400)
+            nums = [min(1.0, max(0.0, v)) for v in nums]
+            points = list(zip(nums[0::2], nums[1::2]))
+            if op == "move":
+                args = points[0] + (tool, color, size)
+            else:
+                sid = body.get("id")
+                if isinstance(sid, bool) or not isinstance(sid, int):
+                    return self._json({"error": "which stroke?"}, 400)
+                args = (sid, tool, color, size, points, bool(body.get("end")))
+        if not draw_allowed():
+            return self._json({"error": "too many"}, 429)
+        if self.drawing is None:
+            return self._json({"shown": False, "painters": 0, "full": False})
+        if op == "leave":
+            self.drawing.leave(phone)
+            return self._json({})
+        if op == "clear":
+            return self._json(self.drawing.clear(phone))
+        if op == "sync":
+            return self._json(self.drawing.sync(phone))
+        if op == "move":
+            return self._json(self.drawing.move(phone, *args))
+        return self._json(self.drawing.stroke(phone, *args))
 
     # -- the calibration wizard and the profiles it saves (calibrate.py,
     #    profiles.py)

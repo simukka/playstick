@@ -19,6 +19,7 @@ import { FILTER_CSS } from "./filter-sheet";
 import { EPISODE_CSS } from "./episode-sheet";
 import { SECRET_CSS } from "./secret-menu";
 import { POINTER_CSS } from "./pointer";
+import { DRAW_CSS } from "./draw";
 import { GAMEPAD_CSS } from "./gamepad";
 import { CALIBRATE_CSS } from "./calibrate";
 
@@ -78,6 +79,7 @@ export const CSS = [
   EPISODE_CSS,
   SECRET_CSS,
   POINTER_CSS,
+  DRAW_CSS,
   GAMEPAD_CSS,
   CALIBRATE_CSS,
 ].join("\n");

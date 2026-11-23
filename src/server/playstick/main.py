@@ -19,6 +19,7 @@ from .stage import Stage
 from .projectionist import Projectionist
 from .projector import open_projector
 from .http import Handler
+from .draw import Drawing
 from .pointer import PointerOverlay
 from .calibrate import Calibration
 from .profiles import Profiles
@@ -88,6 +89,9 @@ def main():
     pointer = PointerOverlay(player)
     threading.Thread(target=pointer.run, args=(stopping,), daemon=True).start()
     Handler.pointer = pointer
+    drawing = Drawing(player)
+    threading.Thread(target=drawing.run, args=(stopping,), daemon=True).start()
+    Handler.drawing = drawing
     # The calibration wizard's black screen, drawn on the same mpv. A session
     # nobody is holding any more is ended through the projectionist, the same
     # way the page's STOP ends a film.

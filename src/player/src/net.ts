@@ -110,6 +110,11 @@ export class ApiClient {
     return this.post("/api/profile/" + encodeURIComponent(id), body);
   }
 
+  /** The shared drawing: strokes in, everybody's back. See draw.ts. */
+  draw(body: Record<string, unknown>): Promise<PostResult> {
+    return this.post("/api/draw", body);
+  }
+
   /** One pointer sample. The sender in pointer.ts decides how often. */
   pointer(sample: {
     x: number;
